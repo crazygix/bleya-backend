@@ -2,12 +2,14 @@
   "compilerOptions": {
     "target": "ESNext",
     "module": "NodeNext",
-    "rootDir": "src",
+    "rootDir": "api",
     "sourceMap": true,
     "outDir": "dist",
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
     "strict": true,
   },
-  "include": ["src/**/*"],
+  "include": [
+    "api/**/**/*"
+  ],
 }
