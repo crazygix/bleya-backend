@@ -2,7 +2,7 @@
   "compilerOptions": {
     "target": "ESNext",
     "module": "NodeNext",
-    "rootDir": "api",
+    "rootDir": ".",
     "sourceMap": true,
     "outDir": "dist",
     "esModuleInterop": true,
@@ -10,6 +10,9 @@
     "strict": true,
   },
   "include": [
-    "api/**/**/*"
-  ],
+    "server/**/*",
+    "routes/**/*",
+    "middleware/**/*",
+    "models/**/*"
+  ]
 }
