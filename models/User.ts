@@ -6,9 +6,8 @@ const userSchema = new mongoose.Schema({
         required: true,
         unique: true,
     },
-    displayName: {
+    code: {
         type: String,
-        default: '',
     },
     createdAt: {
         type: Date,

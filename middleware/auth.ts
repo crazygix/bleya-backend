@@ -1,49 +1,32 @@
 import { Request, Response, NextFunction } from 'express';
-import admin from 'firebase-admin';
+import jwt from 'jsonwebtoken';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
-// Initialize Firebase Admin
-if (!admin.apps.length) {
-    admin.initializeApp({
-        credential: admin.credential.cert({
-            projectId: process.env.FIREBASE_PROJECT_ID,
-            privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
-            clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-        }),
-    });
-}
-
 export interface AuthRequest extends Request {
     user?: {
-        uid: string;
+        userId: string;
         phoneNumber: string;
     };
 }
 
-export const authenticateUser = async (
+export const authenticateUser = (
     req: AuthRequest,
     res: Response,
     next: NextFunction
 ) => {
-    try {
-        const authHeader = req.headers.authorization;
-        if (!authHeader?.startsWith('Bearer ')) {
-            return res.status(401).json({ error: 'No token provided' });
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+        const token = authHeader.split(' ')[1];
+        try {
+            const decoded = jwt.verify(token, process.env.JWT_SECRET!);
+            req?.user = decoded as { userId: string; phoneNumber: string };
+            next();
+        } catch (err) {
+            return res.status(401).json({ error: 'Invalid token' });
         }
-
-        const token = authHeader.split('Bearer ')[1];
-        const decodedToken = await admin.auth().verifyIdToken(token);
-
-        req.user = {
-            uid: decodedToken.uid,
-            phoneNumber: decodedToken.phone_number || '',
-        };
-
-        next();
-    } catch (error) {
-        console.error('Authentication error:', error);
-        res.status(401).json({ error: 'Invalid token' });
+    } else {
+        return res.status(401).json({ error: 'No token provided' });
     }
 }; 
