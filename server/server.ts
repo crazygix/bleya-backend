@@ -5,6 +5,28 @@ import cookieParser from 'cookie-parser'
 import compression from 'compression'
 import cors from 'cors'
 import authRoutes from '../routes/auth.js'
+import mongoose from 'mongoose'
+import dotenv from 'dotenv';
+
+dotenv.config();
+
+const mongoUri = process.env.MONGODB_URI;
+if (!mongoUri) {
+    throw new Error('MONGODB_URI environment variable is not set');
+}
+
+mongoose.connect(mongoUri, {
+    useNewUrlParser: true,
+    useUnifiedTopology: true,
+} as any)
+
+mongoose.connection.on('connected', () => {
+    console.log('MongoDB connected')
+})
+
+mongoose.connection.on('error', err => {
+    console.error('MongoDB connection error:', err)
+})
 
 const app = express()
 app.use(cors({
