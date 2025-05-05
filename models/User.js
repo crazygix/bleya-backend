@@ -5,10 +5,6 @@ const userSchema = new mongoose.Schema({
         required: true,
         unique: true,
     },
-    displayName: {
-        type: String,
-        default: '',
-    },
     createdAt: {
         type: Date,
         default: Date.now,

@@ -1,12 +1,12 @@
 import express from 'express';
-import admin from 'firebase-admin';
 import { authenticateUser } from '../middleware/auth.ts';
 import { User } from '../models/User.ts';
 const router = express.Router();
+
 // Create account with phone number
 router.post('/create-account', async (req, res) => {
     try {
-        const { phoneNumber, displayName } = req.body;
+        const phoneNumber = req.body;
         if (!phoneNumber) {
             return res.status(400).json({ error: 'Phone number is required' });
         }
@@ -17,8 +17,7 @@ router.post('/create-account', async (req, res) => {
         }
         // Create new user
         const user = await User.create({
-            phoneNumber,
-            displayName: displayName || phoneNumber
+            phoneNumber
         });
         // Create a custom token for the phone number
         const customToken = await admin.auth().createCustomToken(phoneNumber);
@@ -26,7 +25,6 @@ router.post('/create-account', async (req, res) => {
             message: 'Account created successfully',
             user: {
                 phoneNumber: user.phoneNumber,
-                displayName: user.displayName,
                 createdAt: user.createdAt
             },
             token: customToken
@@ -37,6 +35,7 @@ router.post('/create-account', async (req, res) => {
         res.status(500).json({ error: 'Error creating account' });
     }
 });
+
 // Verify phone number and get token
 router.post('/verify-phone', async (req, res) => {
     try {
@@ -58,7 +57,8 @@ router.post('/verify-phone', async (req, res) => {
         res.status(500).json({ error: 'Error verifying phone number' });
     }
 });
-// Verify the Firebase ID token and get user info
+
+// Verify the JWT and get user info
 router.post('/verify-token', authenticateUser, async (req, res) => {
     try {
         const user = req.user;
@@ -76,7 +76,6 @@ router.post('/verify-token', authenticateUser, async (req, res) => {
         res.json({
             uid: user.uid,
             phoneNumber: user.phoneNumber,
-            displayName: dbUser.displayName,
             createdAt: dbUser.createdAt,
             lastLogin: dbUser.lastLogin
         });
