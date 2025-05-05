@@ -15,10 +15,7 @@ if (!mongoUri) {
     throw new Error('MONGODB_URI environment variable is not set');
 }
 
-mongoose.connect(mongoUri, {
-    useNewUrlParser: true,
-    useUnifiedTopology: true,
-} as any)
+mongoose.connect(mongoUri);
 
 mongoose.connection.on('connected', () => {
     console.log('MongoDB connected')
