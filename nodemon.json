@@ -1,7 +1,10 @@
 {
   "watch": [
-    "api"
+    "server",
+    "routes",
+    "models",
+    "middleware"
   ],
   "ext": ".ts,.js",
-  "exec": "ts-node ./api/server.ts"
+  "exec": "ts-node ./server/server.ts"
 }

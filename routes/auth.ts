@@ -5,10 +5,24 @@ import { User } from '../models/User.js';
 
 const router = express.Router();
 
+// Test endpoint to debug request body parsing
+router.post('/test', (req, res) => {
+    console.log('Test endpoint hit');
+    console.log('Headers:', req.headers);
+    console.log('Body:', req.body);
+    console.log('Body type:', typeof req.body);
+    res.json({
+        message: 'Test endpoint working',
+        body: req.body,
+        bodyType: typeof req.body,
+        headers: req.headers
+    });
+});
+
 // Create account with phone number
 router.post('/create-account', async (req, res) => {
     try {
-        const phoneNumber = req.body;
+        const { phoneNumber } = req.body;
 
         if (!phoneNumber) {
             return res.status(400).json({ error: 'Phone number is required' });
@@ -63,8 +77,15 @@ router.post('/verify-phone', async (req, res) => {
 // Request code (send code to user)
 router.post('/request-code', async (req, res) => {
     try {
+        console.log('Request body received:', req.body);
+        console.log('Content-Type:', req.headers['content-type']);
+
         const { phoneNumber } = req.body;
+
+        console.log('Extracted phoneNumber:', phoneNumber);
+
         if (!phoneNumber) {
+            console.log('Phone number is missing from request');
             return res.status(400).json({ error: 'Phone number is required' });
         }
 

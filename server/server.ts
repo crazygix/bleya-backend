@@ -26,13 +26,27 @@ mongoose.connection.on('error', err => {
 })
 
 const app = express()
+
+// CORS configuration - more permissive for production
 app.use(cors({
-    credentials: true
+    origin: true, // Allow all origins in production
+    credentials: false, // Disable credentials for better compatibility
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 }))
 
 app.use(compression())
 app.use(cookieParser())
-app.use(bodyParser.json())
+
+// Body parser configuration - more explicit for production
+app.use(bodyParser.json({ limit: '10mb' }))
+app.use(bodyParser.urlencoded({ extended: true, limit: '10mb' }))
+
+// Add request logging for debugging
+app.use((req: Request, res: Response, next) => {
+    console.log(`${req.method} ${req.path} - Body:`, req.body)
+    next()
+})
 
 // Mount auth routes
 app.use('/api/auth', authRoutes)
