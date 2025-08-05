@@ -55,6 +55,16 @@ app.get("/", (req: Request, res: Response) => {
     res.send("Gde si bre zverino?")
 })
 
+// Health check endpoint for Railway
+app.get("/health", (req: Request, res: Response) => {
+    res.json({
+        status: "ok",
+        timestamp: new Date().toISOString(),
+        environment: process.env.NODE_ENV || 'development',
+        port: process.env.PORT || 8080
+    });
+});
+
 const server = http.createServer(app)
 const port = process.env.PORT || 8080
 server.listen(port, () => {
