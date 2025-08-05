@@ -5,12 +5,14 @@
   "license": "ISC",
   "author": "",
   "type": "module",
-  "main": "server.js",
+  "main": "dist/server/server.js",
   "scripts": {
-    "start": "nodemon",
+    "start": "node dist/server/server.js",
+    "dev": "nodemon",
     "setup": "node scripts/setup.js",
     "test": "echo \"Error: no test specified\" && exit 1",
-    "build": "tsc"
+    "build": "tsc",
+    "postinstall": "npm run build"
   },
   "devDependencies": {
     "@types/body-parser": "^1.19.5",
