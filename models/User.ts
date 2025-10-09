@@ -9,6 +9,12 @@ const userSchema = new mongoose.Schema({
     code: {
         type: String,
     },
+    refreshTokenHash: {
+        type: String,
+    },
+    refreshTokenExpiresAt: {
+        type: Date,
+    },
     createdAt: {
         type: Date,
         default: Date.now,
