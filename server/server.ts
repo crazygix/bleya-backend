@@ -30,7 +30,7 @@ const app = express()
 // CORS configuration - more permissive for production
 app.use(cors({
     origin: true, // Allow all origins in production
-    credentials: false, // Disable credentials for better compatibility
+    credentials: true, // Enable credentials for httpOnly cookies
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 }))

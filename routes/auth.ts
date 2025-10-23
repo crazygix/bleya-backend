@@ -145,8 +145,6 @@ router.get('/me', authenticateUser, async (req: AuthRequest, res) => {
     }
 });
 
-export default router;
-
 // Exchange refresh token for a new access token (and rotate refresh)
 router.post('/refresh', async (req, res) => {
     try {
@@ -200,3 +198,5 @@ router.post('/logout', async (req, res) => {
         res.status(500).json({ error: 'Error during logout' });
     }
 });
+
+export default router;
