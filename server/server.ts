@@ -5,8 +5,10 @@ import cookieParser from 'cookie-parser'
 import compression from 'compression'
 import cors from 'cors'
 import authRoutes from '../routes/auth.js'
+import roomRoutes from '../routes/rooms.js'
 import mongoose from 'mongoose'
-import dotenv from 'dotenv';
+import dotenv from 'dotenv'
+import { setupSocketIO } from './socket.js'
 
 dotenv.config();
 
@@ -51,6 +53,9 @@ app.use((req: Request, res: Response, next) => {
 // Mount auth routes
 app.use('/api/auth', authRoutes)
 
+// Mount room routes
+app.use('/api/rooms', roomRoutes)
+
 app.get("/", (req: Request, res: Response) => {
     res.send("Gde si bre zverino?")
 })
@@ -66,6 +71,10 @@ app.get("/health", (req: Request, res: Response) => {
 });
 
 const server = http.createServer(app)
+
+// Setup Socket.io
+setupSocketIO(server)
+
 const port = process.env.PORT || 8080
 server.listen(port, () => {
     console.log(`Server running on port ${port}`)
