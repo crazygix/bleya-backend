@@ -21,8 +21,6 @@ const log = (message: string, data?: any) => {
         ? `[${timestamp}] ${message} ${JSON.stringify(data)}`
         : `[${timestamp}] ${message}`;
     console.log(logMessage);
-    // Ensure log is flushed immediately (important for Railway)
-    process.stdout.write(logMessage + '\n');
 };
 
 const mongoUri = process.env.MONGODB_URI;
