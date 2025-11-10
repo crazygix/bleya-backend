@@ -14,6 +14,17 @@ import { setupSocketIO } from './socket.js'
 
 dotenv.config();
 
+// Helper function for logging (ensures immediate flush for Railway)
+const log = (message: string, data?: any) => {
+    const timestamp = new Date().toISOString();
+    const logMessage = data 
+        ? `[${timestamp}] ${message} ${JSON.stringify(data)}`
+        : `[${timestamp}] ${message}`;
+    console.log(logMessage);
+    // Ensure log is flushed immediately (important for Railway)
+    process.stdout.write(logMessage + '\n');
+};
+
 const mongoUri = process.env.MONGODB_URI;
 if (!mongoUri) {
     throw new Error('MONGODB_URI environment variable is not set');
@@ -22,11 +33,11 @@ if (!mongoUri) {
 mongoose.connect(mongoUri);
 
 mongoose.connection.on('connected', () => {
-    console.log('MongoDB connected')
+    log('MongoDB connected');
 })
 
 mongoose.connection.on('error', err => {
-    console.error('MongoDB connection error:', err)
+    log('MongoDB connection error:', err);
 })
 
 const app = express()
@@ -46,9 +57,17 @@ app.use(cookieParser())
 app.use(bodyParser.json({ limit: '10mb' }))
 app.use(bodyParser.urlencoded({ extended: true, limit: '10mb' }))
 
-// Add request logging for debugging
+// Add request/response logging for debugging
 app.use((req: Request, res: Response, next) => {
-    console.log(`${req.method} ${req.path} - Body:`, req.body)
+    log(`${req.method} ${req.path}`, { body: req.body, query: req.query });
+    
+    // Log response when it finishes
+    const originalSend = res.send;
+    res.send = function(body) {
+        log(`${req.method} ${req.path} - Response:`, { status: res.statusCode, body: typeof body === 'string' ? body.substring(0, 200) : body });
+        return originalSend.call(this, body);
+    };
+    
     next()
 })
 
@@ -82,6 +101,6 @@ setupSocketIO(server)
 
 const port = process.env.PORT || 8080
 server.listen(port, () => {
-    console.log(`Server running on http://localhost:${port}`)
+    log(`Server running on port ${port}`);
 })
 
