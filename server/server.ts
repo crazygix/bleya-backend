@@ -4,8 +4,10 @@ import bodyParser from 'body-parser'
 import cookieParser from 'cookie-parser'
 import compression from 'compression'
 import cors from 'cors'
+import path from 'path'
 import authRoutes from '../routes/auth.js'
 import roomRoutes from '../routes/rooms.js'
+import userRoutes from '../routes/users.js'
 import mongoose from 'mongoose'
 import dotenv from 'dotenv'
 import { setupSocketIO } from './socket.js'
@@ -56,8 +58,14 @@ app.use('/api/auth', authRoutes)
 // Mount room routes
 app.use('/api/rooms', roomRoutes)
 
+// Mount user routes
+app.use('/api/users', userRoutes)
+
+// Serve uploaded files statically
+app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')))
+
 app.get("/", (req: Request, res: Response) => {
-    res.send("Gde si bre zverino?")
+    res.json({ message: "Gde si bre zverino?" })
 })
 
 // Health check endpoint for Railway
@@ -77,6 +85,6 @@ setupSocketIO(server)
 
 const port = process.env.PORT || 8080
 server.listen(port, () => {
-    console.log(`Server running on port ${port}`)
+    console.log(`Server running on http://localhost:${port}`)
 })
 

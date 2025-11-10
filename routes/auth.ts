@@ -37,7 +37,7 @@ function setRefreshCookie(res: express.Response, refreshToken: string) {
         secure: isProd,
         sameSite: 'lax',
         expires: getRefreshExpiryDate(),
-        path: '/api/auth'
+        path: '/'
     });
 }
 
@@ -54,8 +54,6 @@ router.post('/test', (req, res) => {
         headers: req.headers
     });
 });
-
-// Removed redundant create-account and verify-phone routes
 
 // Request code (send code to user)
 router.post('/request-code', async (req, res) => {
@@ -137,6 +135,9 @@ router.get('/me', authenticateUser, async (req: AuthRequest, res) => {
         }
         res.json({
             phoneNumber: user.phoneNumber,
+            username: user.username,
+            bio: user.bio,
+            profileImageUrl: user.profileImageUrl,
             createdAt: user.createdAt,
             lastLogin: user.lastLogin
         });
@@ -148,15 +149,29 @@ router.get('/me', authenticateUser, async (req: AuthRequest, res) => {
 // Exchange refresh token for a new access token (and rotate refresh)
 router.post('/refresh', async (req, res) => {
     try {
+        console.log('Refresh endpoint called - cookies:', req.cookies);
         const { refreshToken } = req.cookies || {};
+
         if (!refreshToken) {
+            console.log('Refresh failed: Missing refresh token cookie');
             return res.status(401).json({ error: 'Missing refresh token' });
         }
 
         const hashed = hashRefreshToken(refreshToken);
         const user = await User.findOne({ refreshTokenHash: hashed });
-        if (!user || !user.refreshTokenExpiresAt || user.refreshTokenExpiresAt < new Date()) {
-            res.clearCookie('refreshToken', { path: '/api/auth' });
+
+        if (!user) {
+            console.log('Refresh failed: User not found for refresh token hash');
+            res.clearCookie('refreshToken', { path: '/' });
+            return res.status(401).json({ error: 'Invalid or expired refresh token' });
+        }
+
+        if (!user.refreshTokenExpiresAt || user.refreshTokenExpiresAt < new Date()) {
+            console.log('Refresh failed: Refresh token expired', {
+                expiresAt: user.refreshTokenExpiresAt,
+                now: new Date()
+            });
+            res.clearCookie('refreshToken', { path: '/' });
             return res.status(401).json({ error: 'Invalid or expired refresh token' });
         }
 
@@ -171,10 +186,14 @@ router.post('/refresh', async (req, res) => {
 
         setRefreshCookie(res, newRefresh);
 
-        res.json({ token: accessToken });
+        console.log('Refresh successful for user:', user.phoneNumber);
+        return res.json({ token: accessToken });
     } catch (error) {
         console.error('Error refreshing token:', error);
-        res.status(500).json({ error: 'Error refreshing token' });
+        // Ensure response is sent and execution stops
+        if (!res.headersSent) {
+            return res.status(500).json({ error: 'Error refreshing token' });
+        }
     }
 });
 
@@ -191,7 +210,7 @@ router.post('/logout', async (req, res) => {
                 await user.save();
             }
         }
-        res.clearCookie('refreshToken', { path: '/api/auth' });
+        res.clearCookie('refreshToken', { path: '/' });
         res.json({ success: true });
     } catch (error) {
         console.error('Error during logout:', error);

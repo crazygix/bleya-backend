@@ -27,8 +27,10 @@
     "typescript": "^5.7.3"
   },
   "dependencies": {
+    "@types/multer": "^2.0.0",
     "@types/socket.io": "^3.0.1",
     "body-parser": "^1.20.3",
+    "cloudinary": "^2.8.0",
     "compression": "^1.7.5",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
@@ -36,6 +38,7 @@
     "express": "^4.21.2",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.2.0",
+    "multer": "^2.0.2",
     "socket.io": "^4.8.1"
   }
 }

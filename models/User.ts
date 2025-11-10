@@ -15,6 +15,18 @@ const userSchema = new mongoose.Schema({
     refreshTokenExpiresAt: {
         type: Date,
     },
+    username: {
+        type: String,
+        default: '',
+    },
+    bio: {
+        type: String,
+        default: '',
+    },
+    profileImageUrl: {
+        type: String,
+        default: '',
+    },
     createdAt: {
         type: Date,
         default: Date.now,
