@@ -61,9 +61,6 @@ app.use('/api/rooms', roomRoutes)
 // Mount user routes
 app.use('/api/users', userRoutes)
 
-// Serve uploaded files statically
-app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')))
-
 app.get("/", (req: Request, res: Response) => {
     res.json({ message: "Gde si bre zverino?" })
 })
