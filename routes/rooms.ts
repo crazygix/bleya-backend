@@ -119,6 +119,37 @@ router.post('/:roomId/join', authenticateUser, async (req: AuthRequest, res) => 
     }
 });
 
+// Get room members
+router.get('/:roomId/members', authenticateUser, async (req: AuthRequest, res) => {
+    try {
+        const { roomId } = req.params;
+
+        // Verify room exists
+        const room = await Room.findById(roomId);
+        if (!room) {
+            return res.status(404).json({ error: 'Room not found' });
+        }
+
+        // Find all users who have this room in their joinedRooms
+        const roomObjectId = new mongoose.Types.ObjectId(roomId);
+        const users = await User.find({
+            joinedRooms: roomObjectId
+        }).select('_id username phoneNumber profileImageUrl').lean();
+
+        const members = users.map((user: any) => ({
+            id: user._id.toString(),
+            username: user.username || '',
+            phoneNumber: user.phoneNumber,
+            profileImageUrl: user.profileImageUrl || '',
+        }));
+
+        res.json(members);
+    } catch (error) {
+        console.error('Error fetching room members:', error);
+        res.status(500).json({ error: 'Error fetching room members' });
+    }
+});
+
 // Leave a room
 router.post('/:roomId/leave', authenticateUser, async (req: AuthRequest, res) => {
     try {
