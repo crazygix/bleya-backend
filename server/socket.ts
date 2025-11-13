@@ -1,6 +1,7 @@
 import { Server as SocketIOServer } from 'socket.io';
 import { Server as HTTPServer } from 'http';
 import jwt from 'jsonwebtoken';
+import mongoose from 'mongoose';
 import { Room } from '../models/Room.js';
 import { Message } from '../models/Message.js';
 import { User } from '../models/User.js';
@@ -51,6 +52,34 @@ export function setupSocketIO(server: HTTPServer) {
                 if (!room) {
                     socket.emit('error', { message: 'Room not found' });
                     return;
+                }
+
+                // Get user document and persist room join
+                const userDoc = await User.findById(user.userId);
+                if (!userDoc) {
+                    socket.emit('error', { message: 'User not found' });
+                    return;
+                }
+
+                const roomObjectId = new mongoose.Types.ObjectId(roomId);
+
+                // Check if already in joinedRooms
+                const isAlreadyJoined = userDoc.joinedRooms.some(
+                    (id: any) => id.equals(roomObjectId)
+                );
+
+                if (!isAlreadyJoined) {
+                    // Check limit
+                    if (userDoc.joinedRooms.length >= 5) {
+                        socket.emit('error', {
+                            message: 'You can only join up to 5 rooms at a time'
+                        });
+                        return;
+                    }
+
+                    // Add to joined rooms
+                    userDoc.joinedRooms.push(roomObjectId);
+                    await userDoc.save();
                 }
 
                 // Leave previous room if any
