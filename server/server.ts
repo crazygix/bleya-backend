@@ -17,7 +17,7 @@ dotenv.config();
 // Helper function for logging (ensures immediate flush for Railway)
 const log = (message: string, data?: any) => {
     const timestamp = new Date().toISOString();
-    const logMessage = data 
+    const logMessage = data
         ? `[${timestamp}] ${message} ${JSON.stringify(data)}`
         : `[${timestamp}] ${message}`;
     console.log(logMessage);
@@ -58,14 +58,14 @@ app.use(bodyParser.urlencoded({ extended: true, limit: '10mb' }))
 // Add request/response logging for debugging
 app.use((req: Request, res: Response, next) => {
     log(`${req.method} ${req.path}`, { body: req.body, query: req.query });
-    
+
     // Log response when it finishes
     const originalSend = res.send;
-    res.send = function(body) {
+    res.send = function (body) {
         log(`${req.method} ${req.path} - Response:`, { status: res.statusCode, body: typeof body === 'string' ? body.substring(0, 200) : body });
         return originalSend.call(this, body);
     };
-    
+
     next()
 })
 
@@ -99,6 +99,9 @@ setupSocketIO(server)
 
 const port = process.env.PORT || 8080
 server.listen(port, () => {
-    log(`Server running on port ${port}`);
+    const host = process.env.HOST || 'localhost';
+    const protocol = process.env.NODE_ENV === 'production' ? 'https' : 'http';
+    const url = `${protocol}://${host}:${port}`;
+    log(`Server running at ${url}`);
 })
 

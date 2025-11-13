@@ -43,6 +43,7 @@ router.get('/me', authenticateUser, async (req: AuthRequest, res) => {
             return res.status(404).json({ error: 'User not found' });
         }
         res.json({
+            id: user._id.toString(),
             phoneNumber: user.phoneNumber,
             username: user.username,
             bio: user.bio,
@@ -135,6 +136,34 @@ router.post('/profile-image', authenticateUser, upload.single('image'), async (r
     } catch (error) {
         console.error('Error uploading profile image:', error);
         res.status(500).json({ error: 'Error uploading profile image' });
+    }
+});
+
+// Get user by ID (must be last to avoid conflicts with /me, /profile, /profile-image)
+router.get('/:userId', authenticateUser, async (req: AuthRequest, res) => {
+    try {
+        const { userId } = req.params;
+        
+        // Validate MongoDB ObjectId format
+        if (!userId.match(/^[0-9a-fA-F]{24}$/)) {
+            return res.status(400).json({ error: 'Invalid user ID format' });
+        }
+        
+        const user = await User.findById(userId);
+        if (!user) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+        res.json({
+            id: user._id.toString(),
+            phoneNumber: user.phoneNumber,
+            username: user.username,
+            bio: user.bio,
+            profileImageUrl: user.profileImageUrl,
+            createdAt: user.createdAt,
+            lastLogin: user.lastLogin
+        });
+    } catch (error) {
+        res.status(500).json({ error: 'Error fetching user info' });
     }
 });
 

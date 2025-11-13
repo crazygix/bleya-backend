@@ -3,6 +3,7 @@ import { Server as HTTPServer } from 'http';
 import jwt from 'jsonwebtoken';
 import { Room } from '../models/Room.js';
 import { Message } from '../models/Message.js';
+import { User } from '../models/User.js';
 
 interface AuthenticatedSocket {
     userId: string;
@@ -67,12 +68,18 @@ export function setupSocketIO(server: HTTPServer) {
                     .limit(50)
                     .lean();
 
+                // Fetch usernames for all unique phone numbers
+                const phoneNumbers = [...new Set(messages.map((msg: any) => msg.phoneNumber))];
+                const users = await User.find({ phoneNumber: { $in: phoneNumbers } }).lean();
+                const usernameMap = new Map(users.map((u: any) => [u.phoneNumber, u.username || '']));
+
                 // Format messages for client
                 const formattedMessages = messages.reverse().map((msg: any) => ({
                     id: msg._id.toString(),
                     roomId: msg.roomId.toString(),
                     userId: msg.userId,
                     phoneNumber: msg.phoneNumber,
+                    username: usernameMap.get(msg.phoneNumber) || '',
                     text: msg.text,
                     createdAt: msg.createdAt.toISOString(),
                 }));
@@ -123,12 +130,17 @@ export function setupSocketIO(server: HTTPServer) {
 
                 await message.save();
 
+                // Fetch username for the sender
+                const senderUser = await User.findOne({ phoneNumber: user.phoneNumber }).lean();
+                const username = senderUser?.username || '';
+
                 // Populate room info for response
                 const messageData = {
                     id: message._id.toString(),
                     roomId: message.roomId.toString(),
                     userId: message.userId,
                     phoneNumber: message.phoneNumber,
+                    username: username,
                     text: message.text,
                     createdAt: message.createdAt.toISOString(),
                 };
