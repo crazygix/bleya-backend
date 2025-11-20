@@ -11,6 +11,7 @@ import userRoutes from '../routes/users.js'
 import mongoose from 'mongoose'
 import dotenv from 'dotenv'
 import { setupSocketIO } from './socket.js'
+import { errorHandler } from '../middleware/errorHandler.js'
 
 dotenv.config();
 
@@ -91,6 +92,9 @@ app.get("/health", (req: Request, res: Response) => {
         port: process.env.PORT || 8080
     });
 });
+
+// Error handling middleware (must be last)
+app.use(errorHandler);
 
 const server = http.createServer(app)
 

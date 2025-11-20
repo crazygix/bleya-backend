@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import dotenv from 'dotenv';
+import { UnauthorizedError } from '../utils/errors.js';
 
 dotenv.config();
 
@@ -24,9 +25,9 @@ export const authenticateUser = (
             req.user = decoded as { userId: string; phoneNumber: string };
             next();
         } catch (err) {
-            return res.status(401).json({ error: 'Invalid token' });
+            return next(new UnauthorizedError('Invalid or expired token'));
         }
     } else {
-        return res.status(401).json({ error: 'No token provided' });
+        return next(new UnauthorizedError('No token provided'));
     }
 }; 
