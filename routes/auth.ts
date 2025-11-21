@@ -4,13 +4,14 @@ import crypto from 'crypto';
 import { authenticateUser, AuthRequest } from '../middleware/auth.js';
 import { User } from '../models/User.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
+import { rateLimiter } from '../middleware/rateLimiter.js';
 import { ValidationError, UnauthorizedError, NotFoundError, ErrorCode, InternalError } from '../utils/errors.js';
 
 const router = express.Router();
 
 // Token config (defaults if env not set)
 const ACCESS_TOKEN_TTL: string | number = process.env.ACCESS_TOKEN_TTL || '60m';
-const REFRESH_TOKEN_TTL_DAYS = Number(process.env.REFRESH_TOKEN_TTL_DAYS || 365);
+const REFRESH_TOKEN_TTL_DAYS = Number(process.env.REFRESH_TOKEN_TTL_DAYS || 90);
 
 function signAccessToken(payload: { userId: string; phoneNumber: string }) {
     const secret: Secret = process.env.JWT_SECRET as Secret;
@@ -134,7 +135,8 @@ router.get('/me', authenticateUser, asyncHandler(async (req: AuthRequest, res: e
 }));
 
 // Exchange refresh token for a new access token (and rotate refresh)
-router.post('/refresh', asyncHandler(async (req: express.Request, res: express.Response) => {
+// Rate limit: 5 requests per 15 minutes per IP
+router.post('/refresh', rateLimiter(5, 15 * 60 * 1000), asyncHandler(async (req: express.Request, res: express.Response) => {
     const { refreshToken } = req.cookies || {};
 
     if (!refreshToken) {
@@ -143,26 +145,35 @@ router.post('/refresh', asyncHandler(async (req: express.Request, res: express.R
     }
 
     const hashed = hashRefreshToken(refreshToken);
-    const user = await User.findOne({ refreshTokenHash: hashed });
+    const now = new Date();
+
+    // Atomically find and update the user with the matching refresh token hash
+    // This prevents race conditions when multiple refresh requests occur simultaneously
+    const newRefresh = generateRefreshToken();
+    const newRefreshHash = hashRefreshToken(newRefresh);
+    const newExpiry = getRefreshExpiryDate();
+
+    const user = await User.findOneAndUpdate(
+        {
+            refreshTokenHash: hashed,
+            refreshTokenExpiresAt: { $gt: now } // Ensure token hasn't expired
+        },
+        {
+            $set: {
+                refreshTokenHash: newRefreshHash,
+                refreshTokenExpiresAt: newExpiry
+            }
+        },
+        { new: true } // Return the updated document
+    );
 
     if (!user) {
         res.clearCookie('refreshToken', { path: '/' });
         throw new UnauthorizedError('Invalid or expired refresh token');
     }
 
-    if (!user.refreshTokenExpiresAt || user.refreshTokenExpiresAt < new Date()) {
-        res.clearCookie('refreshToken', { path: '/' });
-        throw new UnauthorizedError('Invalid or expired refresh token');
-    }
-
     const payload = { phoneNumber: user.phoneNumber, userId: user._id.toString() };
     const accessToken = signAccessToken(payload);
-
-    // Rotate refresh token
-    const newRefresh = generateRefreshToken();
-    user.refreshTokenHash = hashRefreshToken(newRefresh);
-    user.refreshTokenExpiresAt = getRefreshExpiryDate();
-    await user.save();
 
     setRefreshCookie(res, newRefresh);
 

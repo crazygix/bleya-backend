@@ -29,6 +29,11 @@ if (!mongoUri) {
     throw new Error('MONGODB_URI environment variable is not set');
 }
 
+const jwtSecret = process.env.JWT_SECRET;
+if (!jwtSecret) {
+    throw new Error('JWT_SECRET environment variable is not set');
+}
+
 mongoose.connect(mongoUri);
 
 mongoose.connection.on('connected', () => {
