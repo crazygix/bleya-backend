@@ -10,8 +10,8 @@ import { ValidationError, UnauthorizedError, NotFoundError, ErrorCode, InternalE
 const router = express.Router();
 
 // Token config (defaults if env not set)
-const ACCESS_TOKEN_TTL: string | number = process.env.ACCESS_TOKEN_TTL || '60m';
-const REFRESH_TOKEN_TTL_DAYS = Number(process.env.REFRESH_TOKEN_TTL_DAYS || 90);
+const ACCESS_TOKEN_TTL: string | number = process.env.ACCESS_TOKEN_TTL || '5m';
+const REFRESH_TOKEN_TTL_DAYS = Number(process.env.REFRESH_TOKEN_TTL_DAYS || 1);
 
 function signAccessToken(payload: { userId: string; phoneNumber: string }) {
     const secret: Secret = process.env.JWT_SECRET as Secret;
