@@ -8,7 +8,6 @@ import { User } from '../models/User.js';
 
 interface AuthenticatedSocket {
     userId: string;
-    phoneNumber: string;
     roomId?: string;
 }
 
@@ -30,7 +29,7 @@ export function setupSocketIO(server: HTTPServer) {
         }
 
         try {
-            const decoded = jwt.verify(token, process.env.JWT_SECRET!) as { userId: string; phoneNumber: string };
+            const decoded = jwt.verify(token, process.env.JWT_SECRET!) as { userId: string };
             (socket as any).user = decoded;
             next();
         } catch (err) {
@@ -40,7 +39,8 @@ export function setupSocketIO(server: HTTPServer) {
 
     io.on('connection', (socket) => {
         const user = (socket as any).user as AuthenticatedSocket;
-        console.log(`User ${user.phoneNumber} connected`);
+
+        console.log(`User ${user.userId} connected`);
 
         // Join a room
         socket.on('join_room', async (data: { roomId: string }) => {
@@ -97,18 +97,17 @@ export function setupSocketIO(server: HTTPServer) {
                     .limit(50)
                     .lean();
 
-                // Fetch usernames for all unique phone numbers
-                const phoneNumbers = [...new Set(messages.map((msg: any) => msg.phoneNumber))];
-                const users = await User.find({ phoneNumber: { $in: phoneNumbers } }).lean();
-                const usernameMap = new Map(users.map((u: any) => [u.phoneNumber, u.username || '']));
+                // Fetch usernames for all unique user IDs
+                const userIds = [...new Set(messages.map((msg: any) => msg.userId))];
+                const users = await User.find({ _id: { $in: userIds } }).lean();
+                const usernameMap = new Map(users.map((u: any) => [u._id.toString(), u.username || '']));
 
                 // Format messages for client
                 const formattedMessages = messages.reverse().map((msg: any) => ({
                     id: msg._id.toString(),
                     roomId: msg.roomId.toString(),
                     userId: msg.userId,
-                    phoneNumber: msg.phoneNumber,
-                    username: usernameMap.get(msg.phoneNumber) || '',
+                    username: usernameMap.get(msg.userId) || '',
                     text: msg.text,
                     createdAt: msg.createdAt.toISOString(),
                 }));
@@ -125,11 +124,10 @@ export function setupSocketIO(server: HTTPServer) {
 
                 // Notify others in the room
                 socket.to(roomId).emit('user_joined', {
-                    userId: user.userId,
-                    phoneNumber: user.phoneNumber,
+                    userId: user.userId
                 });
 
-                console.log(`User ${user.phoneNumber} joined room ${room.name}`);
+                console.log(`User ${user.userId} joined room ${room.name}`);
             } catch (error) {
                 console.error('Error joining room:', error);
                 socket.emit('error', { message: 'Failed to join room' });
@@ -153,14 +151,13 @@ export function setupSocketIO(server: HTTPServer) {
                 const message = new Message({
                     roomId: user.roomId,
                     userId: user.userId,
-                    phoneNumber: user.phoneNumber,
                     text: text.trim(),
                 });
 
                 await message.save();
 
                 // Fetch username for the sender
-                const senderUser = await User.findOne({ phoneNumber: user.phoneNumber }).lean();
+                const senderUser = await User.findById(user.userId).lean();
                 const username = senderUser?.username || '';
 
                 // Populate room info for response
@@ -168,7 +165,6 @@ export function setupSocketIO(server: HTTPServer) {
                     id: message._id.toString(),
                     roomId: message.roomId.toString(),
                     userId: message.userId,
-                    phoneNumber: message.phoneNumber,
                     username: username,
                     text: message.text,
                     createdAt: message.createdAt.toISOString(),
@@ -177,7 +173,7 @@ export function setupSocketIO(server: HTTPServer) {
                 // Broadcast to all in the room
                 io.to(user.roomId).emit('new_message', messageData);
 
-                console.log(`Message from ${user.phoneNumber} in room ${user.roomId}`);
+                console.log(`Message from ${user.userId} in room ${user.roomId}`);
             } catch (error) {
                 console.error('Error sending message:', error);
                 socket.emit('error', { message: 'Failed to send message' });
@@ -185,15 +181,20 @@ export function setupSocketIO(server: HTTPServer) {
         });
 
         // Leave room
-        socket.on('leave_room', () => {
+        socket.on('leave_room', async () => {
             if (user.roomId) {
-                socket.to(user.roomId).emit('user_left', {
-                    userId: user.userId,
-                    phoneNumber: user.phoneNumber,
-                });
-                socket.leave(user.roomId);
-                console.log(`User ${user.phoneNumber} left room ${user.roomId}`);
+                const roomId = user.roomId;
                 user.roomId = undefined;
+
+                socket.to(roomId).emit('user_left', { userId: user.userId });
+                socket.leave(roomId);
+
+                try {
+                    const room = await Room.findById(roomId);
+                    console.log(`User ${user.userId} left room ${room?.name}`);
+                } catch (error) {
+                    console.log(`User ${user.userId} left room ${roomId}`);
+                }
             }
         });
 
@@ -202,10 +203,9 @@ export function setupSocketIO(server: HTTPServer) {
             if (user.roomId) {
                 socket.to(user.roomId).emit('user_left', {
                     userId: user.userId,
-                    phoneNumber: user.phoneNumber,
                 });
             }
-            console.log(`User ${user.phoneNumber} disconnected`);
+            console.log(`User ${user.userId} disconnected`);
         });
     });
 
