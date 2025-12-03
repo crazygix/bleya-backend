@@ -9,6 +9,9 @@ const userSchema = new mongoose.Schema({
     code: {
         type: String,
     },
+    codeExpiresAt: {
+        type: Date,
+    },
     refreshTokenHash: {
         type: String,
     },
@@ -31,6 +34,10 @@ const userSchema = new mongoose.Schema({
         type: Date,
         default: Date.now,
     },
+    updatedAt: {
+        type: Date,
+        default: Date.now,
+    },
     lastLogin: {
         type: Date,
         default: Date.now,
@@ -46,12 +53,6 @@ const userSchema = new mongoose.Schema({
             message: 'User can only join up to 5 rooms'
         }
     }
-});
-
-// Update lastLogin timestamp before saving
-userSchema.pre('save', function (next) {
-    this.lastLogin = new Date();
-    next();
 });
 
 export const User = mongoose.model('User', userSchema); 

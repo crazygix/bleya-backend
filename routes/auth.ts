@@ -13,6 +13,25 @@ const router = express.Router();
 const ACCESS_TOKEN_TTL: string | number = process.env.ACCESS_TOKEN_TTL || '5m';
 const REFRESH_TOKEN_TTL_DAYS = Number(process.env.REFRESH_TOKEN_TTL_DAYS || 1);
 
+// Code expiration time (10 minutes)
+const CODE_EXPIRY_MINUTES = 10;
+
+/**
+ * Normalize phone number by removing spaces, dashes, and parentheses
+ * This ensures consistent storage and comparison
+ */
+function normalizePhoneNumber(phoneNumber: string): string {
+    return phoneNumber.trim().replace(/[\s\-\(\)]/g, '');
+}
+
+/**
+ * Validate phone number format
+ * Must be 10-15 digits, optionally starting with +
+ */
+function validatePhoneNumber(phoneNumber: string): boolean {
+    return /^\+?[0-9]{10,15}$/.test(phoneNumber);
+}
+
 function signAccessToken(payload: { userId: string; phoneNumber: string }) {
     const secret: Secret = process.env.JWT_SECRET as Secret;
     const options: jwt.SignOptions = { expiresIn: ACCESS_TOKEN_TTL as any, algorithm: 'HS256' };
@@ -45,6 +64,7 @@ function setRefreshCookie(res: express.Response, refreshToken: string) {
 }
 
 // Test endpoint to debug request body parsing
+// TODO: Remove or protect this endpoint in production
 router.post('/test', (req, res) => {
     console.log('Test endpoint hit');
     console.log('Headers:', req.headers);
@@ -59,7 +79,8 @@ router.post('/test', (req, res) => {
 });
 
 // Request code (send code to user)
-router.post('/request-code', asyncHandler(async (req: express.Request, res: express.Response) => {
+// Rate limit: 3 requests per 15 minutes per IP to prevent abuse
+router.post('/request-code', rateLimiter(3, 15 * 60 * 1000), asyncHandler(async (req: express.Request, res: express.Response) => {
     const { phoneNumber } = req.body;
 
     if (!phoneNumber) {
@@ -71,37 +92,92 @@ router.post('/request-code', asyncHandler(async (req: express.Request, res: expr
         throw new ValidationError('Phone number must be a valid string');
     }
 
+    // Normalize phone number (remove spaces, dashes, etc.)
+    const normalizedPhone = normalizePhoneNumber(phoneNumber);
+
+    // Validate phone number format
+    if (!validatePhoneNumber(normalizedPhone)) {
+        throw new ValidationError('Phone number must be 10-15 digits');
+    }
+
     // Generate a 6-digit code
     const code = Math.floor(100000 + Math.random() * 900000).toString();
 
+    // Code expires in CODE_EXPIRY_MINUTES minutes
+    const codeExpiresAt = new Date();
+    codeExpiresAt.setMinutes(codeExpiresAt.getMinutes() + CODE_EXPIRY_MINUTES);
+
     // Find or create user and set code
-    let user = await User.findOne({ phoneNumber });
+    let user = await User.findOne({ phoneNumber: normalizedPhone });
     if (!user) {
-        user = await User.create({ phoneNumber, code });
+        user = await User.create({
+            phoneNumber: normalizedPhone,
+            code,
+            codeExpiresAt
+        });
     } else {
         user.code = code;
+        user.codeExpiresAt = codeExpiresAt;
         await user.save();
     }
 
     // In production, send code via SMS here
-    // For now, return code in response for testing
+    // For now, return code in response for testing (TODO: Remove in production)
     res.json({ message: 'Verification code sent', code });
 }));
 
 // Verify code and get JWT
-router.post('/verify-code', asyncHandler(async (req: express.Request, res: express.Response) => {
+// Rate limit: 5 attempts per 15 minutes per IP to prevent brute force
+router.post('/verify-code', rateLimiter(5, 15 * 60 * 1000), asyncHandler(async (req: express.Request, res: express.Response) => {
     const { phoneNumber, code } = req.body;
     if (!phoneNumber || !code) {
         throw new ValidationError('Phone number and code are required');
     }
 
-    const user = await User.findOne({ phoneNumber });
-    if (!user || user.code !== code) {
+    // Validate phone number format (basic validation)
+    if (typeof phoneNumber !== 'string' || phoneNumber.trim().length === 0) {
+        throw new ValidationError('Phone number must be a valid string');
+    }
+
+    // Validate code format (must be 6 digits)
+    if (typeof code !== 'string' || !/^[0-9]{6}$/.test(code)) {
+        throw new ValidationError('Code must be a 6-digit number');
+    }
+
+    // Normalize phone number (same as in request-code)
+    const normalizedPhone = normalizePhoneNumber(phoneNumber);
+
+    const user = await User.findOne({ phoneNumber: normalizedPhone });
+
+    // Check if user exists
+    if (!user) {
+        throw new UnauthorizedError('Invalid phone number or code');
+    }
+
+    // Check if code exists and hasn't expired
+    if (!user.code || !user.codeExpiresAt) {
+        throw new UnauthorizedError('No verification code found. Please request a new code.');
+    }
+
+    const now = new Date();
+    if (user.codeExpiresAt < now) {
+        // Code expired, clear it
+        user.code = undefined;
+        user.codeExpiresAt = undefined;
+        await user.save();
+        throw new UnauthorizedError('Verification code has expired. Please request a new code.');
+    }
+
+    // Verify code matches
+    if (user.code !== code) {
         throw new UnauthorizedError('Invalid phone number or code');
     }
 
     // Clear the code after successful verification
     user.code = undefined;
+    user.codeExpiresAt = undefined;
+    // Update last login timestamp only on successful authentication
+    user.lastLogin = new Date();
     await user.save();
 
     // Issue access token and refresh token (rotated)
@@ -130,6 +206,7 @@ router.get('/me', authenticateUser, asyncHandler(async (req: AuthRequest, res: e
         bio: user.bio,
         profileImageUrl: user.profileImageUrl,
         createdAt: user.createdAt,
+        updatedAt: user.updatedAt,
         lastLogin: user.lastLogin
     });
 }));

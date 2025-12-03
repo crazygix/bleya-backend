@@ -9,10 +9,8 @@ const roomSchema = new mongoose.Schema({
     description: {
         type: String,
     },
-    createdAt: {
-        type: Date,
-        default: Date.now,
-    },
+}, {
+    timestamps: true, // Automatically adds createdAt and updatedAt fields
 });
 
 export const Room = mongoose.model('Room', roomSchema);

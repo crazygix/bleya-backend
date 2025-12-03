@@ -45,7 +45,7 @@ router.get('/me', authenticateUser, asyncHandler(async (req: AuthRequest, res: e
         bio: user.bio,
         profileImageUrl: user.profileImageUrl,
         createdAt: user.createdAt,
-        lastLogin: user.lastLogin
+        updatedAt: user.updatedAt
     });
 }));
 
@@ -58,17 +58,30 @@ router.put('/profile', authenticateUser, asyncHandler(async (req: AuthRequest, r
         throw new NotFoundError('User not found', ErrorCode.USER_NOT_FOUND);
     }
 
+    let profileChanged = false;
+
     if (username !== undefined) {
         if (typeof username !== 'string' || username.trim().length === 0) {
             throw new ValidationError('Username must be a non-empty string');
         }
-        user.username = username.trim();
+        if (user.username !== username.trim()) {
+            user.username = username.trim();
+            profileChanged = true;
+        }
     }
     if (bio !== undefined) {
         if (typeof bio !== 'string') {
             throw new ValidationError('Bio must be a string');
         }
-        user.bio = bio;
+        if (user.bio !== bio) {
+            user.bio = bio;
+            profileChanged = true;
+        }
+    }
+
+    // Update updatedAt only if profile actually changed
+    if (profileChanged) {
+        user.updatedAt = new Date();
     }
 
     await user.save();
@@ -79,6 +92,7 @@ router.put('/profile', authenticateUser, asyncHandler(async (req: AuthRequest, r
         bio: user.bio,
         profileImageUrl: user.profileImageUrl,
         createdAt: user.createdAt,
+        updatedAt: user.updatedAt,
         lastLogin: user.lastLogin
     });
 }));
@@ -121,6 +135,8 @@ router.post('/profile-image', authenticateUser, upload.single('image'), asyncHan
 
     // Store the full URL in the database
     user.profileImageUrl = uploadResult.url;
+    // Update updatedAt when profile image changes
+    user.updatedAt = new Date();
     await user.save();
 
     res.json({
@@ -129,6 +145,7 @@ router.post('/profile-image', authenticateUser, upload.single('image'), asyncHan
         bio: user.bio,
         profileImageUrl: user.profileImageUrl,
         createdAt: user.createdAt,
+        updatedAt: user.updatedAt,
         lastLogin: user.lastLogin
     });
 }));
@@ -136,12 +153,12 @@ router.post('/profile-image', authenticateUser, upload.single('image'), asyncHan
 // Get user by ID (must be last to avoid conflicts with /me, /profile, /profile-image)
 router.get('/:userId', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
     const { userId } = req.params;
-    
+
     // Validate MongoDB ObjectId format
     if (!userId.match(/^[0-9a-fA-F]{24}$/)) {
         throw new ValidationError('Invalid user ID format');
     }
-    
+
     const user = await User.findById(userId);
     if (!user) {
         throw new NotFoundError('User not found', ErrorCode.USER_NOT_FOUND);
@@ -153,7 +170,7 @@ router.get('/:userId', authenticateUser, asyncHandler(async (req: AuthRequest, r
         bio: user.bio,
         profileImageUrl: user.profileImageUrl,
         createdAt: user.createdAt,
-        lastLogin: user.lastLogin
+        updatedAt: user.updatedAt
     });
 }));
 

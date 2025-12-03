@@ -1,9 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
-import dotenv from 'dotenv';
 import { UnauthorizedError } from '../utils/errors.js';
-
-dotenv.config();
 
 export interface AuthRequest extends Request {
     user?: {
