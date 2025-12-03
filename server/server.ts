@@ -150,6 +150,49 @@ const server = http.createServer(app)
 // Setup Socket.io
 setupSocketIO(server)
 
+// Global error handlers for unhandled rejections and exceptions
+process.on('unhandledRejection', (reason: any, promise: Promise<any>) => {
+    const error = reason instanceof Error ? reason : new Error(String(reason));
+    const errorData = {
+        timestamp: new Date().toISOString(),
+        type: 'unhandledRejection',
+        error: {
+            name: error.name,
+            message: error.message,
+            stack: error.stack,
+        },
+        promise: promise.toString(),
+    };
+
+    // Write synchronously to ensure logs are flushed before exit
+    process.stderr.writeSync(`Unhandled Promise Rejection: ${JSON.stringify(errorData, null, 2)}\n`);
+
+    // Set exit code and exit immediately (log is already flushed synchronously)
+    // Process manager (e.g., Railway) will restart the process
+    process.exitCode = 1;
+    process.exit(1);
+});
+
+process.on('uncaughtException', (error: Error) => {
+    const errorData = {
+        timestamp: new Date().toISOString(),
+        type: 'uncaughtException',
+        error: {
+            name: error.name,
+            message: error.message,
+            stack: error.stack,
+        },
+    };
+
+    // Write synchronously to ensure logs are flushed before exit
+    process.stderr.writeSync(`Uncaught Exception: ${JSON.stringify(errorData, null, 2)}\n`);
+
+    // Set exit code and exit immediately (log is already flushed synchronously)
+    // Process manager (e.g., Railway) will restart the process
+    process.exitCode = 1;
+    process.exit(1);
+});
+
 const port = process.env.PORT || 8080
 server.listen(port, () => {
     const host = process.env.HOST || 'localhost';
