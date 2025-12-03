@@ -4,6 +4,7 @@ import bodyParser from 'body-parser'
 import cookieParser from 'cookie-parser'
 import compression from 'compression'
 import cors from 'cors'
+import helmet from 'helmet'
 import path from 'path'
 import authRoutes from '../routes/auth.js'
 import roomRoutes from '../routes/rooms.js'
@@ -34,6 +35,33 @@ if (!jwtSecret) {
     throw new Error('JWT_SECRET environment variable is not set');
 }
 
+// Validate R2 configuration (required for file uploads)
+const r2Endpoint = process.env.R2_ENDPOINT;
+const r2AccessKeyId = process.env.R2_ACCESS_KEY_ID;
+const r2SecretAccessKey = process.env.R2_SECRET_ACCESS_KEY;
+const r2BucketName = process.env.R2_BUCKET_NAME;
+
+const isProduction = process.env.NODE_ENV === 'production';
+const r2ConfigMissing = !r2Endpoint || !r2AccessKeyId || !r2SecretAccessKey || !r2BucketName;
+
+if (r2ConfigMissing) {
+    const missingVars = {
+        R2_ENDPOINT: r2Endpoint ? 'set' : 'missing',
+        R2_ACCESS_KEY_ID: r2AccessKeyId ? 'set' : 'missing',
+        R2_SECRET_ACCESS_KEY: r2SecretAccessKey ? 'set' : 'missing',
+        R2_BUCKET_NAME: r2BucketName ? 'set' : 'missing',
+    };
+
+    if (isProduction) {
+        // In production, R2 is required - fail fast
+        throw new Error(`R2 configuration incomplete in production. Missing: ${JSON.stringify(missingVars)}`);
+    } else {
+        // In development, warn but allow server to start
+        log('Warning: R2 configuration incomplete. File uploads will fail.');
+        log('Required R2 env vars:', missingVars);
+    }
+}
+
 mongoose.connect(mongoUri);
 
 mongoose.connection.on('connected', () => {
@@ -45,6 +73,22 @@ mongoose.connection.on('error', err => {
 })
 
 const app = express()
+
+// Security headers with helmet
+// Configure helmet for production security
+app.use(helmet({
+    contentSecurityPolicy: {
+        directives: {
+            defaultSrc: ["'self'"],
+            styleSrc: ["'self'", "'unsafe-inline'"],
+            scriptSrc: ["'self'"],
+            imgSrc: ["'self'", "data:", "https:"], // Allow images from R2/CDN
+            connectSrc: ["'self'"],
+        },
+    },
+    crossOriginEmbedderPolicy: false, // Allow embedding for Socket.io
+    crossOriginResourcePolicy: { policy: "cross-origin" }, // Allow R2 resources
+}));
 
 // CORS configuration - more permissive for production
 app.use(cors({
