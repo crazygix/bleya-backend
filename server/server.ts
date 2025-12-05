@@ -63,7 +63,16 @@ if (r2ConfigMissing) {
     }
 }
 
-mongoose.connect(mongoUri);
+// MongoDB connection options
+const mongooseOptions = {
+    serverSelectionTimeoutMS: 5000, // Timeout after 5s instead of 30s
+    socketTimeoutMS: 45000, // Close sockets after 45s of inactivity
+    connectTimeoutMS: 10000, // Give up initial connection after 10s
+    maxPoolSize: 10, // Maintain up to 10 socket connections
+    minPoolSize: 2, // Maintain at least 2 socket connections
+    retryWrites: true,
+    retryReads: true,
+};
 
 mongoose.connection.on('connected', () => {
     log('MongoDB connected');
@@ -71,6 +80,10 @@ mongoose.connection.on('connected', () => {
 
 mongoose.connection.on('error', err => {
     log('MongoDB connection error:', err);
+})
+
+mongoose.connection.on('disconnected', () => {
+    log('MongoDB disconnected');
 })
 
 const app = express()
@@ -195,10 +208,62 @@ process.on('uncaughtException', (error: Error) => {
 });
 
 const port = process.env.PORT || 8080
-server.listen(port, () => {
-    const host = process.env.HOST || 'localhost';
-    const protocol = process.env.NODE_ENV === 'production' ? 'https' : 'http';
-    const url = `${protocol}://${host}:${port}`;
-    log(`Server running at ${url}`);
-})
+
+// Wait for MongoDB connection before starting server
+const startServer = async () => {
+    try {
+        // Ensure MongoDB is connected before starting server
+        // readyState: 0 = disconnected, 1 = connected, 2 = connecting, 3 = disconnecting
+        if (mongoose.connection.readyState === 0) {
+            // Not connected, establish connection
+            await mongoose.connect(mongoUri, mongooseOptions);
+        }
+
+        // Wait until connection is fully established (readyState === 1)
+        // This handles cases where connection is in progress (state 2) or disconnecting (state 3)
+        if (mongoose.connection.readyState !== 1) {
+            await new Promise<void>((resolve, reject) => {
+                const timeout = setTimeout(() => {
+                    mongoose.connection.removeListener('connected', onConnected);
+                    mongoose.connection.removeListener('error', onError);
+                    reject(new Error('MongoDB connection timeout'));
+                }, 10000);
+
+                const onConnected = () => {
+                    clearTimeout(timeout);
+                    mongoose.connection.removeListener('connected', onConnected);
+                    mongoose.connection.removeListener('error', onError);
+                    resolve();
+                };
+
+                const onError = (err: Error) => {
+                    clearTimeout(timeout);
+                    mongoose.connection.removeListener('connected', onConnected);
+                    mongoose.connection.removeListener('error', onError);
+                    reject(err);
+                };
+
+                mongoose.connection.once('connected', onConnected);
+                mongoose.connection.once('error', onError);
+            });
+        }
+
+        // Final verification that connection is established
+        if (mongoose.connection.readyState !== 1) {
+            throw new Error('MongoDB connection not established');
+        }
+
+        server.listen(port, () => {
+            const host = process.env.HOST || 'localhost';
+            const protocol = process.env.NODE_ENV === 'production' ? 'https' : 'http';
+            const url = `${protocol}://${host}:${port}`;
+            log(`Server running at ${url}`);
+        });
+    } catch (error) {
+        log('Failed to start server:', error);
+        process.exit(1);
+    }
+};
+
+startServer();
 
