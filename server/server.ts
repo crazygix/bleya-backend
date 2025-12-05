@@ -6,6 +6,7 @@ import compression from 'compression'
 import cors from 'cors'
 import helmet from 'helmet'
 import path from 'path'
+import fs from 'fs'
 import authRoutes from '../routes/auth.js'
 import roomRoutes from '../routes/rooms.js'
 import userRoutes from '../routes/users.js'
@@ -165,7 +166,7 @@ process.on('unhandledRejection', (reason: any, promise: Promise<any>) => {
     };
 
     // Write synchronously to ensure logs are flushed before exit
-    process.stderr.writeSync(`Unhandled Promise Rejection: ${JSON.stringify(errorData, null, 2)}\n`);
+    fs.writeSync(process.stderr.fd, `Unhandled Promise Rejection: ${JSON.stringify(errorData, null, 2)}\n`);
 
     // Set exit code and exit immediately (log is already flushed synchronously)
     // Process manager (e.g., Railway) will restart the process
@@ -185,7 +186,7 @@ process.on('uncaughtException', (error: Error) => {
     };
 
     // Write synchronously to ensure logs are flushed before exit
-    process.stderr.writeSync(`Uncaught Exception: ${JSON.stringify(errorData, null, 2)}\n`);
+    fs.writeSync(process.stderr.fd, `Uncaught Exception: ${JSON.stringify(errorData, null, 2)}\n`);
 
     // Set exit code and exit immediately (log is already flushed synchronously)
     // Process manager (e.g., Railway) will restart the process
