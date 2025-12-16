@@ -10,7 +10,7 @@ import { ValidationError, UnauthorizedError, NotFoundError, ErrorCode, InternalE
 const router = express.Router();
 
 // Token config (defaults if env not set)
-const ACCESS_TOKEN_TTL: string | number = process.env.ACCESS_TOKEN_TTL || '5m';
+const ACCESS_TOKEN_TTL: string | number = process.env.ACCESS_TOKEN_TTL || '1m';
 const REFRESH_TOKEN_TTL_DAYS = Number(process.env.REFRESH_TOKEN_TTL_DAYS || 1);
 
 // Code expiration time (10 minutes)
