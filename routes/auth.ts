@@ -191,7 +191,13 @@ router.post('/verify-code', rateLimiter(5, 15 * 60 * 1000), asyncHandler(async (
 
     setRefreshCookie(res, refreshToken);
 
-    res.json({ token: accessToken });
+    // Check if user needs to set username
+    const requiresUsername = !user.username || user.username.trim().length === 0;
+
+    res.json({
+        token: accessToken,
+        requiresUsername
+    });
 }));
 
 // Example protected route
@@ -255,6 +261,57 @@ router.post('/refresh', rateLimiter(5, 15 * 60 * 1000), asyncHandler(async (req:
     setRefreshCookie(res, newRefresh);
 
     res.json({ token: accessToken });
+}));
+
+// Set username (only allowed if user doesn't have one yet)
+router.post('/set-username', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
+    const { username } = req.body;
+
+    if (!username) {
+        throw new ValidationError('Username is required');
+    }
+
+    if (typeof username !== 'string' || username.trim().length === 0) {
+        throw new ValidationError('Username must be a non-empty string');
+    }
+
+    const normalizedUsername = username.trim().toLowerCase();
+
+    // Validate username format
+    if (!/^[a-z0-9_]{3,30}$/.test(normalizedUsername)) {
+        throw new ValidationError('Username must be 3-30 characters and contain only lowercase letters, numbers, and underscores');
+    }
+
+    const user = await User.findOne({ phoneNumber: req.user?.phoneNumber });
+    if (!user) {
+        throw new NotFoundError('User not found', ErrorCode.USER_NOT_FOUND);
+    }
+
+    // Check if user already has a username
+    if (user.username && user.username.trim().length > 0) {
+        throw new ValidationError('Username is already set and cannot be changed');
+    }
+
+    // Check if username is already taken
+    const existingUser = await User.findOne({ username: normalizedUsername });
+    if (existingUser) {
+        throw new ValidationError('Username is already taken');
+    }
+
+    // Set username
+    user.username = normalizedUsername;
+    user.updatedAt = new Date();
+    await user.save();
+
+    res.json({
+        phoneNumber: user.phoneNumber,
+        username: user.username,
+        bio: user.bio,
+        profileImageUrl: user.profileImageUrl,
+        createdAt: user.createdAt,
+        updatedAt: user.updatedAt,
+        lastLogin: user.lastLogin
+    });
 }));
 
 // Logout: clear refresh token cookie and invalidate stored hash
