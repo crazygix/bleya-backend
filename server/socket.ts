@@ -54,8 +54,8 @@ export function setupSocketIO(server: HTTPServer) {
                     return;
                 }
 
-                // Get user document and persist room join
-                const userDoc = await User.findById(user.userId);
+                // Get user document with populated rooms (single fetch to avoid race conditions)
+                const userDoc = await User.findById(user.userId).populate('joinedRooms');
                 if (!userDoc) {
                     socket.emit('error', { message: 'User not found' });
                     return;
@@ -69,15 +69,23 @@ export function setupSocketIO(server: HTTPServer) {
                 );
 
                 if (!isAlreadyJoined) {
-                    // Check limit
-                    if (userDoc.joinedRooms.length >= 5) {
-                        socket.emit('error', {
-                            message: 'You can only join up to 5 rooms at a time'
-                        });
-                        return;
+                    // Check limit for public rooms only (5 max)
+                    const roomType = (room as any).type || 'public';
+                    if (roomType === 'public') {
+                        // Use the already-populated userDoc to check limit
+                        const publicRoomCount = (userDoc.joinedRooms as any[]).filter((r: any) => {
+                            return !r.type || r.type === 'public';
+                        }).length;
+
+                        if (publicRoomCount >= 5) {
+                            socket.emit('error', {
+                                message: 'You can only join up to 5 group chats at a time'
+                            });
+                            return;
+                        }
                     }
 
-                    // Add to joined rooms
+                    // Add to joined rooms (no limit for private chats)
                     userDoc.joinedRooms.push(roomObjectId);
                     await userDoc.save();
                 }
@@ -112,12 +120,30 @@ export function setupSocketIO(server: HTTPServer) {
                     createdAt: msg.createdAt.toISOString(),
                 }));
 
+                // Prepare room info
+                let roomName = room.name;
+                let otherUserId = null;
+
+                // For private chats, get the other user's info
+                if ((room as any).type === 'private' && (room as any).participants) {
+                    const participants = (room as any).participants as string[];
+                    const otherParticipantId = participants.find((id: string) => id !== user.userId);
+                    if (otherParticipantId) {
+                        const otherUser = await User.findById(otherParticipantId).select('username').lean();
+                        roomName = otherUser?.username || 'Unknown User';
+                        otherUserId = otherParticipantId;
+                    }
+                }
+
                 // Send room info and messages
                 socket.emit('room_joined', {
                     room: {
                         id: room._id.toString(),
-                        name: room.name,
-                        description: room.description,
+                        name: roomName,
+                        description: (room as any).description,
+                        type: (room as any).type || 'public',
+                        participants: (room as any).participants || [],
+                        otherUserId: otherUserId,
                     },
                     messages: formattedMessages,
                 });

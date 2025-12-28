@@ -6,6 +6,18 @@ import mongoose from 'mongoose';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { NotFoundError, ValidationError, ConflictError, ErrorCode } from '../utils/errors.js';
 
+// Helper function to count public rooms for a user
+async function countPublicRooms(userId: string): Promise<number> {
+    const user = await User.findById(userId).populate('joinedRooms').lean();
+    if (!user) return 0;
+
+    const publicRooms = (user.joinedRooms || []).filter((room: any) => {
+        return !room.type || room.type === 'public';
+    });
+
+    return publicRooms.length;
+}
+
 const router = express.Router();
 
 // Preset rooms - city based
@@ -30,28 +42,49 @@ async function initializeRooms() {
     }
 }
 
-// Get all available rooms
+// Get all available public rooms (excludes private DMs)
 router.get('/', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
     // Initialize rooms on first request
     await initializeRooms();
 
-    const rooms = await Room.find().sort({ name: 1 }).lean();
+    // Only return public rooms - private DMs should not appear in the join dialog
+    const rooms = await Room.find({ type: { $ne: 'private' } }).sort({ name: 1 }).lean();
     res.json(rooms.map(room => ({
         id: room._id.toString(),
         name: room.name,
+        type: room.type || 'public', // Include type for safety
     })));
 }));
 
-// Get user's joined rooms
+// Get user's joined rooms (both public and private)
 router.get('/joined', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
-    const user = await User.findById(req.user!.userId).populate('joinedRooms').lean();
+    const userId = req.user!.userId;
+    const user = await User.findById(userId).populate('joinedRooms').lean();
     if (!user) {
         throw new NotFoundError('User not found', ErrorCode.USER_NOT_FOUND);
     }
 
-    const joinedRooms = (user.joinedRooms || []).map((room: any) => ({
-        id: room._id.toString(),
-        name: room.name,
+    const joinedRooms = await Promise.all((user.joinedRooms || []).map(async (room: any) => {
+        let roomName = room.name;
+        let otherUserId = null;
+
+        // For private chats, get the other user's info
+        if (room.type === 'private' && room.participants) {
+            const otherParticipantId = room.participants.find((id: string) => id !== userId);
+            if (otherParticipantId) {
+                const otherUser = await User.findById(otherParticipantId).select('username').lean();
+                roomName = otherUser?.username || 'Unknown User';
+                otherUserId = otherParticipantId;
+            }
+        }
+
+        return {
+            id: room._id.toString(),
+            name: roomName,
+            type: room.type || 'public',
+            participants: room.participants || [],
+            otherUserId: otherUserId,
+        };
     }));
 
     res.json(joinedRooms);
@@ -73,14 +106,15 @@ router.post('/:roomId/join', authenticateUser, asyncHandler(async (req: AuthRequ
         throw new NotFoundError('Room not found', ErrorCode.ROOM_NOT_FOUND);
     }
 
-    // Get user
-    const user = await User.findById(userId);
+    const roomObjectId = new mongoose.Types.ObjectId(roomId);
+
+    // Get user with populated rooms to check count and avoid race condition
+    const user = await User.findById(userId).populate('joinedRooms');
     if (!user) {
         throw new NotFoundError('User not found', ErrorCode.USER_NOT_FOUND);
     }
 
     // Check if already joined
-    const roomObjectId = new mongoose.Types.ObjectId(roomId);
     if (user.joinedRooms.some((id: mongoose.Types.ObjectId) => id.equals(roomObjectId))) {
         return res.json({
             message: 'Already joined this room',
@@ -91,9 +125,14 @@ router.post('/:roomId/join', authenticateUser, asyncHandler(async (req: AuthRequ
         });
     }
 
-    // Check if user has reached the limit
-    if (user.joinedRooms.length >= 5) {
-        throw new ValidationError('You can only join up to 5 rooms at a time');
+    // Check if user has reached the limit for public rooms (5 max)
+    // Use already-populated data to avoid race condition
+    const publicRoomCount = (user.joinedRooms as any[]).filter((r: any) => {
+        return !r.type || r.type === 'public';
+    }).length;
+
+    if (publicRoomCount >= 5) {
+        throw new ValidationError('You can only join up to 5 group chats at a time');
     }
 
     // Add room to joined rooms
@@ -164,6 +203,87 @@ router.post('/:roomId/leave', authenticateUser, asyncHandler(async (req: AuthReq
     await user.save();
 
     res.json({ message: 'Successfully left room' });
+}));
+
+// Create or get direct message room with another user
+router.post('/direct/:otherUserId', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
+    const { otherUserId } = req.params;
+    const currentUserId = req.user!.userId;
+
+    // Validate other user ID format
+    if (!otherUserId.match(/^[0-9a-fA-F]{24}$/)) {
+        throw new ValidationError('Invalid user ID format');
+    }
+
+    // Can't create DM with yourself
+    if (otherUserId === currentUserId) {
+        throw new ValidationError('Cannot create direct message with yourself');
+    }
+
+    // Verify other user exists
+    const otherUser = await User.findById(otherUserId);
+    if (!otherUser) {
+        throw new NotFoundError('User not found', ErrorCode.USER_NOT_FOUND);
+    }
+
+    // Get current user
+    const currentUser = await User.findById(currentUserId);
+    if (!currentUser) {
+        throw new NotFoundError('User not found', ErrorCode.USER_NOT_FOUND);
+    }
+
+    // Sort participant IDs to ensure consistent ordering
+    const participants = [currentUserId, otherUserId].sort();
+
+    // Create hash for unique constraint (prevents duplicate DMs even with concurrent requests)
+    const participantsHash = participants.join('_');
+
+    // Use atomic findOneAndUpdate with upsert to handle concurrent requests gracefully
+    // This prevents race conditions where both requests try to create the same room
+    const room = await Room.findOneAndUpdate(
+        {
+            type: 'private',
+            participantsHash: participantsHash,
+        },
+        {
+            $setOnInsert: {
+                name: `DM: ${currentUser.username || currentUserId} & ${otherUser.username || otherUserId}`,
+                type: 'private',
+                participants: participants,
+                participantsHash: participantsHash,
+            },
+        },
+        {
+            upsert: true, // Create if doesn't exist
+            new: true, // Return the document after update/insert
+        }
+    );
+
+    const roomObjectId = room._id as mongoose.Types.ObjectId;
+
+    // Use atomic operations to add room to both users' joined rooms (prevents race conditions)
+    // $addToSet ensures no duplicates even with concurrent requests
+    await Promise.all([
+        User.updateOne(
+            { _id: currentUserId },
+            { $addToSet: { joinedRooms: roomObjectId } }
+        ),
+        User.updateOne(
+            { _id: otherUserId },
+            { $addToSet: { joinedRooms: roomObjectId } }
+        )
+    ]);
+
+    res.json({
+        message: 'Direct message room ready',
+        room: {
+            id: room._id.toString(),
+            name: otherUser.username || 'Unknown User',
+            type: room.type,
+            participants: room.participants,
+            otherUserId: otherUserId,
+        }
+    });
 }));
 
 export default router;

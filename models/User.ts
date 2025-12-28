@@ -57,12 +57,6 @@ const userSchema = new mongoose.Schema({
         type: [mongoose.Schema.Types.ObjectId],
         ref: 'Room',
         default: [],
-        validate: {
-            validator: function (v: mongoose.Types.ObjectId[]) {
-                return v.length <= 5;
-            },
-            message: 'User can only join up to 5 rooms'
-        }
     }
 });
 
