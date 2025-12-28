@@ -35,8 +35,13 @@ async function initializeRooms() {
     // Create/update preset rooms
     for (const roomData of PRESET_ROOMS) {
         await Room.findOneAndUpdate(
-            { name: roomData.name },
-            { $setOnInsert: roomData },
+            { name: roomData.name, type: 'public' }, // Query by both name and type
+            {
+                $setOnInsert: {
+                    ...roomData,
+                    type: 'public' // Explicitly set type to ensure proper indexing
+                }
+            },
             { upsert: true, new: true }
         );
     }
@@ -64,16 +69,36 @@ router.get('/joined', authenticateUser, asyncHandler(async (req: AuthRequest, re
         throw new NotFoundError('User not found', ErrorCode.USER_NOT_FOUND);
     }
 
-    const joinedRooms = await Promise.all((user.joinedRooms || []).map(async (room: any) => {
+    // Collect all participant IDs from private rooms for bulk fetch (avoids N+1 queries)
+    const participantIds = new Set<string>();
+    (user.joinedRooms || []).forEach((room: any) => {
+        if (room.type === 'private' && room.participants) {
+            room.participants.forEach((id: string) => {
+                if (id !== userId) participantIds.add(id);
+            });
+        }
+    });
+
+    // Bulk fetch all participants in a single query
+    const participantUsers = await User.find({
+        _id: { $in: Array.from(participantIds) }
+    }).select('_id username').lean();
+
+    // Create a map for quick lookup
+    const userMap = new Map(
+        participantUsers.map((u: any) => [u._id.toString(), u.username])
+    );
+
+    // Map rooms with pre-fetched user data
+    const joinedRooms = (user.joinedRooms || []).map((room: any) => {
         let roomName = room.name;
         let otherUserId = null;
 
-        // For private chats, get the other user's info
+        // For private chats, get the other user's info from pre-fetched map
         if (room.type === 'private' && room.participants) {
             const otherParticipantId = room.participants.find((id: string) => id !== userId);
             if (otherParticipantId) {
-                const otherUser = await User.findById(otherParticipantId).select('username').lean();
-                roomName = otherUser?.username || 'Unknown User';
+                roomName = userMap.get(otherParticipantId) || 'Unknown User';
                 otherUserId = otherParticipantId;
             }
         }
@@ -85,7 +110,7 @@ router.get('/joined', authenticateUser, asyncHandler(async (req: AuthRequest, re
             participants: room.participants || [],
             otherUserId: otherUserId,
         };
-    }));
+    });
 
     res.json(joinedRooms);
 }));
@@ -287,4 +312,3 @@ router.post('/direct/:otherUserId', authenticateUser, asyncHandler(async (req: A
 }));
 
 export default router;
-
