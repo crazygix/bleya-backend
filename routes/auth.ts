@@ -78,9 +78,13 @@ router.post('/test', (req, res) => {
     });
 });
 
+// Rate limiting configuration
+const isProd = process.env.NODE_ENV === 'production';
+const authRateLimit = isProd ? 5 : 100; // For verify-code and refresh
+const requestCodeRateLimit = isProd ? 3 : 100; // Stricter for initial request
+
 // Request code (send code to user)
-// Rate limit: 3 requests per 15 minutes per IP to prevent abuse
-router.post('/request-code', rateLimiter(3, 15 * 60 * 1000), asyncHandler(async (req: express.Request, res: express.Response) => {
+router.post('/request-code', rateLimiter(requestCodeRateLimit, 15 * 60 * 1000), asyncHandler(async (req: express.Request, res: express.Response) => {
     const { phoneNumber } = req.body;
 
     if (!phoneNumber) {
@@ -127,8 +131,7 @@ router.post('/request-code', rateLimiter(3, 15 * 60 * 1000), asyncHandler(async 
 }));
 
 // Verify code and get JWT
-// Rate limit: 5 attempts per 15 minutes per IP to prevent brute force
-router.post('/verify-code', rateLimiter(5, 15 * 60 * 1000), asyncHandler(async (req: express.Request, res: express.Response) => {
+router.post('/verify-code', rateLimiter(authRateLimit, 15 * 60 * 1000), asyncHandler(async (req: express.Request, res: express.Response) => {
     const { phoneNumber, code } = req.body;
     if (!phoneNumber || !code) {
         throw new ValidationError('Phone number and code are required');
@@ -218,8 +221,7 @@ router.get('/me', authenticateUser, asyncHandler(async (req: AuthRequest, res: e
 }));
 
 // Exchange refresh token for a new access token (and rotate refresh)
-// Rate limit: 5 requests per 15 minutes per IP
-router.post('/refresh', rateLimiter(5, 15 * 60 * 1000), asyncHandler(async (req: express.Request, res: express.Response) => {
+router.post('/refresh', rateLimiter(authRateLimit, 15 * 60 * 1000), asyncHandler(async (req: express.Request, res: express.Response) => {
     const { refreshToken } = req.cookies || {};
 
     if (!refreshToken) {
