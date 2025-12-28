@@ -321,12 +321,11 @@ router.post('/logout', asyncHandler(async (req: express.Request, res: express.Re
     const { refreshToken } = req.cookies || {};
     if (refreshToken) {
         const hashed = hashRefreshToken(refreshToken);
-        const user = await User.findOne({ refreshTokenHash: hashed });
-        if (user) {
-            user.refreshTokenHash = undefined as unknown as string;
-            user.refreshTokenExpiresAt = undefined as unknown as Date;
-            await user.save();
-        }
+        // Use $unset to properly remove fields from MongoDB document
+        await User.findOneAndUpdate(
+            { refreshTokenHash: hashed },
+            { $unset: { refreshTokenHash: '', refreshTokenExpiresAt: '' } }
+        );
     }
     res.clearCookie('refreshToken', { path: '/' });
     res.json({ success: true });

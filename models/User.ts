@@ -23,7 +23,6 @@ const userSchema = new mongoose.Schema({
         default: '',
         trim: true,
         lowercase: true,
-        sparse: true, // Allows multiple documents with empty username
         validate: {
             validator: function (v: string) {
                 // Allow empty string (for existing users without username)
