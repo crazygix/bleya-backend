@@ -73,8 +73,10 @@ router.get('/joined', authenticateUser, asyncHandler(async (req: AuthRequest, re
     const participantIds = new Set<string>();
     (user.joinedRooms || []).forEach((room: any) => {
         if (room.type === 'private' && room.participants) {
-            room.participants.forEach((id: string) => {
-                if (id !== userId) participantIds.add(id);
+            room.participants.forEach((id: any) => {
+                // Ensure we store as string (handle both string and ObjectId types)
+                const idStr = typeof id === 'string' ? id : id.toString();
+                if (idStr !== userId) participantIds.add(idStr);
             });
         }
     });
@@ -84,7 +86,7 @@ router.get('/joined', authenticateUser, asyncHandler(async (req: AuthRequest, re
         _id: { $in: Array.from(participantIds) }
     }).select('_id username').lean();
 
-    // Create a map for quick lookup
+    // Create a map for quick lookup (keys are strings)
     const userMap = new Map(
         participantUsers.map((u: any) => [u._id.toString(), u.username])
     );
@@ -96,10 +98,17 @@ router.get('/joined', authenticateUser, asyncHandler(async (req: AuthRequest, re
 
         // For private chats, get the other user's info from pre-fetched map
         if (room.type === 'private' && room.participants) {
-            const otherParticipantId = room.participants.find((id: string) => id !== userId);
+            const otherParticipantId = room.participants.find((id: any) => {
+                const idStr = typeof id === 'string' ? id : id.toString();
+                return idStr !== userId;
+            });
             if (otherParticipantId) {
-                roomName = userMap.get(otherParticipantId) || 'Unknown User';
-                otherUserId = otherParticipantId;
+                // Convert to string to match map keys
+                const participantIdStr = typeof otherParticipantId === 'string'
+                    ? otherParticipantId
+                    : otherParticipantId.toString();
+                roomName = userMap.get(participantIdStr) || 'Unknown User';
+                otherUserId = participantIdStr;
             }
         }
 
