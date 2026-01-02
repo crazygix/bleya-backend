@@ -10,7 +10,9 @@ import fs from 'fs'
 import authRoutes from '../routes/auth.js'
 import roomRoutes from '../routes/rooms.js'
 import userRoutes from '../routes/users.js'
+import messageRoutes from '../routes/messages.js'
 import mongoose from 'mongoose'
+import { Room } from '../models/Room.js'
 import dotenv from 'dotenv'
 import { setupSocketIO } from './socket.js'
 import { errorHandler } from '../middleware/errorHandler.js'
@@ -142,6 +144,9 @@ app.use('/api/rooms', roomRoutes)
 // Mount user routes
 app.use('/api/users', userRoutes)
 
+// Mount message routes
+app.use('/api/messages', messageRoutes)
+
 app.get("/", (req: Request, res: Response) => {
     res.json({ message: "Gde si bre zverino?" })
 })
@@ -251,6 +256,25 @@ const startServer = async () => {
         // Final verification that connection is established
         if (mongoose.connection.readyState !== 1) {
             throw new Error('MongoDB connection not established');
+        }
+
+        // Migration: Drop old name_1 index if it exists (replaced by compound index)
+        try {
+            // db is guaranteed to be defined after connection verification (readyState === 1)
+            // Type assertion is safe here because we've verified readyState === 1
+            const db = mongoose.connection.db as NonNullable<typeof mongoose.connection.db>;
+            const collection = db.collection('rooms');
+            const indexes = await collection.indexes();
+            const oldNameIndex = indexes.find((idx: any) => idx.name === 'name_1');
+            if (oldNameIndex) {
+                await collection.dropIndex('name_1');
+                log('Dropped old name_1 index from rooms collection');
+            }
+        } catch (error: any) {
+            // Index might not exist or already dropped, ignore error
+            if (error.code !== 27) { // 27 = IndexNotFound
+                log('Warning: Could not drop old index:', error.message);
+            }
         }
 
         server.listen(port, () => {

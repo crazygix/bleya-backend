@@ -30,34 +30,62 @@ const PRESET_ROOMS = [
     { name: 'Subotica, Serbia' },
 ];
 
-// Initialize preset rooms if they don't exist
+// Flag to ensure rooms are only initialized once
+let roomsInitialized = false;
+const initializationLock = { locked: false };
+
+// Initialize preset rooms if they don't exist (only once)
 async function initializeRooms() {
-    // Create/update preset rooms
-    for (const roomData of PRESET_ROOMS) {
-        await Room.findOneAndUpdate(
-            { name: roomData.name, type: 'public' }, // Query by both name and type
-            {
-                $setOnInsert: {
-                    ...roomData,
-                    type: 'public' // Explicitly set type to ensure proper indexing
+    // Prevent concurrent initialization
+    if (initializationLock.locked) {
+        return;
+    }
+
+    if (roomsInitialized) {
+        return;
+    }
+
+    initializationLock.locked = true;
+
+    try {
+        // Create/update preset rooms
+        for (const roomData of PRESET_ROOMS) {
+            try {
+                await Room.findOneAndUpdate(
+                    { name: roomData.name, type: 'public' }, // Query by both name and type
+                    {
+                        $setOnInsert: {
+                            ...roomData,
+                            type: 'public' // Explicitly set type to ensure proper indexing
+                        }
+                    },
+                    { upsert: true, new: true }
+                );
+            } catch (error: any) {
+                // If duplicate key error, room already exists - that's fine
+                if (error.code !== 11000) {
+                    console.error(`Error initializing room ${roomData.name}:`, error);
                 }
-            },
-            { upsert: true, new: true }
-        );
+            }
+        }
+
+        roomsInitialized = true;
+    } finally {
+        initializationLock.locked = false;
     }
 }
 
 // Get all available public rooms (excludes private DMs)
 router.get('/', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
-    // Initialize rooms on first request
+    // Initialize rooms once (idempotent)
     await initializeRooms();
 
     // Only return public rooms - private DMs should not appear in the join dialog
-    const rooms = await Room.find({ type: { $ne: 'private' } }).sort({ name: 1 }).lean();
+    const rooms = await Room.find({ type: 'public' }).sort({ name: 1 }).lean();
     res.json(rooms.map(room => ({
         id: room._id.toString(),
         name: room.name,
-        type: room.type || 'public', // Include type for safety
+        type: room.type || 'public',
     })));
 }));
 

@@ -99,8 +99,11 @@ export function setupSocketIO(server: HTTPServer) {
                 socket.join(roomId);
                 user.roomId = roomId;
 
-                // Get recent messages (last 50)
-                const messages = await Message.find({ roomId })
+                // Get recent top-level messages only (last 50, excluding thread replies)
+                const messages = await Message.find({
+                    roomId,
+                    parentMessageId: null // Only fetch top-level messages, not thread replies
+                })
                     .sort({ createdAt: -1 })
                     .limit(50)
                     .lean();
@@ -118,6 +121,8 @@ export function setupSocketIO(server: HTTPServer) {
                     username: usernameMap.get(msg.userId) || '',
                     text: msg.text,
                     createdAt: msg.createdAt.toISOString(),
+                    parentMessageId: msg.parentMessageId?.toString() || null,
+                    replyCount: msg.replyCount || 0,
                 }));
 
                 // Prepare room info
@@ -161,16 +166,36 @@ export function setupSocketIO(server: HTTPServer) {
         });
 
         // Send a message
-        socket.on('send_message', async (data: { text: string }) => {
+        socket.on('send_message', async (data: { text: string; parentMessageId?: string }) => {
             try {
                 if (!user.roomId) {
                     socket.emit('error', { message: 'Not in a room' });
                     return;
                 }
 
-                const { text } = data;
+                const { text, parentMessageId } = data;
                 if (!text || text.trim().length === 0) {
                     return;
+                }
+
+                // Validate parentMessageId if provided
+                if (parentMessageId) {
+                    if (!parentMessageId.match(/^[0-9a-fA-F]{24}$/)) {
+                        socket.emit('error', { message: 'Invalid parent message ID format' });
+                        return;
+                    }
+
+                    const parentMessage = await Message.findById(parentMessageId);
+                    if (!parentMessage) {
+                        socket.emit('error', { message: 'Parent message not found' });
+                        return;
+                    }
+
+                    // Ensure parent message is in the same room
+                    if (parentMessage.roomId.toString() !== user.roomId) {
+                        socket.emit('error', { message: 'Parent message not in this room' });
+                        return;
+                    }
                 }
 
                 // Create message
@@ -178,9 +203,17 @@ export function setupSocketIO(server: HTTPServer) {
                     roomId: user.roomId,
                     userId: user.userId,
                     text: text.trim(),
+                    parentMessageId: parentMessageId ? new mongoose.Types.ObjectId(parentMessageId) : null,
                 });
 
                 await message.save();
+
+                // If this is a reply, increment parent message's reply count
+                if (parentMessageId) {
+                    await Message.findByIdAndUpdate(parentMessageId, {
+                        $inc: { replyCount: 1 }
+                    });
+                }
 
                 // Fetch username for the sender
                 const senderUser = await User.findById(user.userId).lean();
@@ -194,12 +227,14 @@ export function setupSocketIO(server: HTTPServer) {
                     username: username,
                     text: message.text,
                     createdAt: message.createdAt.toISOString(),
+                    parentMessageId: message.parentMessageId?.toString() || null,
+                    replyCount: message.replyCount,
                 };
 
                 // Broadcast to all in the room
                 io.to(user.roomId).emit('new_message', messageData);
 
-                console.log(`Message from ${user.userId} in room ${user.roomId}`);
+                console.log(`Message from ${user.userId} in room ${user.roomId}${parentMessageId ? ' (thread reply)' : ''}`);
             } catch (error) {
                 console.error('Error sending message:', error);
                 socket.emit('error', { message: 'Failed to send message' });
