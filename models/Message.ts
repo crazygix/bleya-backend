@@ -30,5 +30,9 @@ const messageSchema = new mongoose.Schema({
 // Index for efficient thread queries
 messageSchema.index({ parentMessageId: 1, createdAt: 1 });
 
+// Index for efficient room message queries (most common query)
+messageSchema.index({ roomId: 1, createdAt: -1 });
+messageSchema.index({ roomId: 1, parentMessageId: 1, createdAt: -1 }); // Compound for filtered queries
+
 export const Message = mongoose.model('Message', messageSchema);
 

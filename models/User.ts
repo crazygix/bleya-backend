@@ -63,4 +63,7 @@ const userSchema = new mongoose.Schema({
 // Create unique sparse index on username (allows multiple empty usernames, but enforces uniqueness for non-empty)
 userSchema.index({ username: 1 }, { unique: true, sparse: true });
 
+// Index for efficient room member queries (finding users by joinedRooms)
+userSchema.index({ joinedRooms: 1 });
+
 export const User = mongoose.model('User', userSchema); 

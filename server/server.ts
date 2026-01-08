@@ -70,8 +70,8 @@ const mongooseOptions = {
     serverSelectionTimeoutMS: 5000, // Timeout after 5s instead of 30s
     socketTimeoutMS: 45000, // Close sockets after 45s of inactivity
     connectTimeoutMS: 10000, // Give up initial connection after 10s
-    maxPoolSize: 10, // Maintain up to 10 socket connections
-    minPoolSize: 2, // Maintain at least 2 socket connections
+    maxPoolSize: 50, // Increased from 10 for better concurrency
+    minPoolSize: 5, // Increased from 2 for faster response
     retryWrites: true,
     retryReads: true,
 };
@@ -151,14 +151,28 @@ app.get("/", (req: Request, res: Response) => {
     res.json({ message: "Gde si bre zverino?" })
 })
 
-// Health check endpoint for Railway
-app.get("/health", (req: Request, res: Response) => {
-    res.json({
+// Enhanced health check endpoint with monitoring
+app.get("/health", async (req: Request, res: Response) => {
+    const health = {
         status: "ok",
         timestamp: new Date().toISOString(),
         environment: process.env.NODE_ENV || 'development',
-        port: process.env.PORT || 8080
-    });
+        port: process.env.PORT || 8080,
+        mongodb: {
+            status: mongoose.connection.readyState === 1 ? "connected" : "disconnected",
+            readyState: mongoose.connection.readyState, // 0=disconnected, 1=connected, 2=connecting, 3=disconnecting
+        },
+        memory: {
+            used: Math.round(process.memoryUsage().heapUsed / 1024 / 1024), // MB
+            total: Math.round(process.memoryUsage().heapTotal / 1024 / 1024), // MB
+            rss: Math.round(process.memoryUsage().rss / 1024 / 1024), // MB
+        },
+        uptime: Math.round(process.uptime()), // seconds
+    };
+
+    // Return 503 if DB is not connected
+    const statusCode = mongoose.connection.readyState === 1 ? 200 : 503;
+    res.status(statusCode).json(health);
 });
 
 // Error handling middleware (must be last)
@@ -276,6 +290,8 @@ const startServer = async () => {
                 log('Warning: Could not drop old index:', error.message);
             }
         }
+
+        // Note: Duplicate room cleanup removed (function not implemented)
 
         server.listen(port, () => {
             const host = process.env.HOST || 'localhost';
