@@ -14,10 +14,15 @@ import messageRoutes from '../routes/messages.js'
 import mongoose from 'mongoose'
 import { Room } from '../models/Room.js'
 import dotenv from 'dotenv'
+import { fileURLToPath } from 'url'
 import { setupSocketIO } from './socket.js'
 import { errorHandler } from '../middleware/errorHandler.js'
 
-dotenv.config();
+// Load .env file from project root
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const envPath = path.resolve(__dirname, '../../.env');
+dotenv.config({ path: envPath });
 
 // Helper function for logging (ensures immediate flush for Railway)
 const log = (message: string, data?: any) => {
@@ -299,8 +304,20 @@ const startServer = async () => {
             const url = `${protocol}://${host}:${port}`;
             log(`Server running at ${url}`);
         });
+
+        server.on('error', (error: NodeJS.ErrnoException) => {
+            if (error.code === 'EADDRINUSE') {
+                log(`Port ${port} is already in use. Please stop the other process or use a different port.`);
+            } else {
+                log('Server error:', error);
+            }
+            process.exit(1);
+        });
     } catch (error) {
         log('Failed to start server:', error);
+        if (error instanceof Error) {
+            log('Error stack:', error.stack);
+        }
         process.exit(1);
     }
 };

@@ -1,17 +1,47 @@
 import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
-// Initialize S3 client for Cloudflare R2
-const r2Client = new S3Client({
-    region: 'auto',
-    endpoint: process.env.R2_ENDPOINT,
-    credentials: {
-        accessKeyId: process.env.R2_ACCESS_KEY_ID || '',
-        secretAccessKey: process.env.R2_SECRET_ACCESS_KEY || '',
-    },
-});
+// Lazy initialization of S3 client for Cloudflare R2
+// This ensures environment variables are loaded before client is created
+let r2Client: S3Client | null = null;
 
-const BUCKET_NAME = process.env.R2_BUCKET_NAME || '';
+function getR2Client(): S3Client {
+    if (!r2Client) {
+        const endpoint = process.env.R2_ENDPOINT;
+        const accessKeyId = process.env.R2_ACCESS_KEY_ID;
+        const secretAccessKey = process.env.R2_SECRET_ACCESS_KEY;
+
+        if (!endpoint || !accessKeyId || !secretAccessKey) {
+            throw new Error(
+                'R2 configuration incomplete. Please set R2_ENDPOINT, R2_ACCESS_KEY_ID, and R2_SECRET_ACCESS_KEY environment variables.'
+            );
+        }
+
+        // forcePathStyle: true is required for R2 (uses path-style URLs instead of virtual-hosted-style)
+        r2Client = new S3Client({
+            region: 'auto',
+            endpoint: endpoint,
+            forcePathStyle: true,
+            credentials: {
+                accessKeyId: accessKeyId,
+                secretAccessKey: secretAccessKey,
+            },
+        });
+    }
+    return r2Client;
+}
+
+// Get bucket name dynamically from environment (not cached at module load)
+function getBucketName(): string {
+    const bucketName = process.env.R2_BUCKET_NAME || '';
+    if (!bucketName || bucketName.trim() === '') {
+        throw new Error(
+            'R2_BUCKET_NAME environment variable is not set or is empty. ' +
+            'Please configure R2_BUCKET_NAME in your environment variables.'
+        );
+    }
+    return bucketName;
+}
 
 export interface UploadResult {
     url: string;
@@ -26,23 +56,25 @@ export async function uploadToR2(
     key: string,
     contentType: string
 ): Promise<UploadResult> {
+    const bucketName = getBucketName();
+    
     try {
         const command = new PutObjectCommand({
-            Bucket: BUCKET_NAME,
+            Bucket: bucketName,
             Key: key,
             Body: buffer,
             ContentType: contentType,
             CacheControl: 'public, max-age=31536000, immutable',
         });
 
-        await r2Client.send(command);
+        await getR2Client().send(command);
 
         // Construct public URL based on environment
         // Use environment-specific public URL if available, otherwise fall back to default
         const isProduction = process.env.NODE_ENV === 'production';
         const publicUrl = isProduction
-            ? (process.env.R2_PUBLIC_URL || `${process.env.R2_ENDPOINT}/${BUCKET_NAME}`)
-            : (process.env.R2_PUBLIC_URL_DEV || process.env.R2_PUBLIC_URL || `${process.env.R2_ENDPOINT}/${BUCKET_NAME}`);
+            ? (process.env.R2_PUBLIC_URL || `${process.env.R2_ENDPOINT}/${bucketName}`)
+            : (process.env.R2_PUBLIC_URL_DEV || process.env.R2_PUBLIC_URL || `${process.env.R2_ENDPOINT}/${bucketName}`);
 
         return {
             url: `${publicUrl}/${key}`,
@@ -58,13 +90,15 @@ export async function uploadToR2(
  * Delete a file from R2
  */
 export async function deleteFromR2(key: string): Promise<void> {
+    const bucketName = getBucketName();
+    
     try {
         const command = new DeleteObjectCommand({
-            Bucket: BUCKET_NAME,
+            Bucket: bucketName,
             Key: key,
         });
 
-        await r2Client.send(command);
+        await getR2Client().send(command);
     } catch (error) {
         console.error('Error deleting from R2:', error);
         // Don't throw - deletion failures shouldn't break the flow
@@ -79,14 +113,16 @@ export async function getPresignedUploadUrl(
     contentType: string,
     expiresIn: number = 3600
 ): Promise<string> {
+    const bucketName = getBucketName();
+    
     try {
         const command = new PutObjectCommand({
-            Bucket: BUCKET_NAME,
+            Bucket: bucketName,
             Key: key,
             ContentType: contentType,
         });
 
-        return await getSignedUrl(r2Client, command, { expiresIn });
+        return await getSignedUrl(getR2Client(), command, { expiresIn });
     } catch (error) {
         console.error('Error generating presigned URL:', error);
         throw new Error('Failed to generate presigned URL');
@@ -100,13 +136,15 @@ export async function getPresignedReadUrl(
     key: string,
     expiresIn: number = 3600
 ): Promise<string> {
+    const bucketName = getBucketName();
+    
     try {
         const command = new GetObjectCommand({
-            Bucket: BUCKET_NAME,
+            Bucket: bucketName,
             Key: key,
         });
 
-        return await getSignedUrl(r2Client, command, { expiresIn });
+        return await getSignedUrl(getR2Client(), command, { expiresIn });
     } catch (error) {
         console.error('Error generating presigned read URL:', error);
         throw new Error('Failed to generate presigned read URL');
@@ -118,16 +156,19 @@ export async function getPresignedReadUrl(
  */
 export function extractKeyFromUrl(url: string): string | null {
     try {
+        const bucketName = process.env.R2_BUCKET_NAME || '';
+        if (!bucketName) return null;
+        
         // If URL contains the bucket name, extract the key
-        if (url.includes(BUCKET_NAME)) {
-            const parts = url.split(`${BUCKET_NAME}/`);
+        if (url.includes(bucketName)) {
+            const parts = url.split(`${bucketName}/`);
             return parts[1] || null;
         }
         // If using custom domain, extract from path
         const isProduction = process.env.NODE_ENV === 'production';
         const publicUrl = isProduction
-            ? (process.env.R2_PUBLIC_URL || `${process.env.R2_ENDPOINT}/${BUCKET_NAME}`)
-            : (process.env.R2_PUBLIC_URL_DEV || process.env.R2_PUBLIC_URL || `${process.env.R2_ENDPOINT}/${BUCKET_NAME}`);
+            ? (process.env.R2_PUBLIC_URL || `${process.env.R2_ENDPOINT}/${bucketName}`)
+            : (process.env.R2_PUBLIC_URL_DEV || process.env.R2_PUBLIC_URL || `${process.env.R2_ENDPOINT}/${bucketName}`);
 
         if (publicUrl && url.startsWith(publicUrl)) {
             return url.replace(publicUrl + '/', '');
