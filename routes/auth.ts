@@ -110,6 +110,7 @@ router.post('/request-code', rateLimiter(requestCodeRateLimit, 15 * 60 * 1000), 
     // Code expires in CODE_EXPIRY_MINUTES minutes
     const codeExpiresAt = new Date();
     codeExpiresAt.setMinutes(codeExpiresAt.getMinutes() + CODE_EXPIRY_MINUTES);
+    const codeSentAt = new Date();
 
     // Find or create user and set code
     let user = await User.findOne({ phoneNumber: normalizedPhone });
@@ -117,17 +118,23 @@ router.post('/request-code', rateLimiter(requestCodeRateLimit, 15 * 60 * 1000), 
         user = await User.create({
             phoneNumber: normalizedPhone,
             code,
-            codeExpiresAt
+            codeExpiresAt,
+            codeSentAt
         });
     } else {
         user.code = code;
         user.codeExpiresAt = codeExpiresAt;
+        user.codeSentAt = codeSentAt;
         await user.save();
     }
 
     // In production, send code via SMS here
     // For now, return code in response for testing (TODO: Remove in production)
-    res.json({ message: 'Verification code sent', code });
+    res.json({
+        message: 'Verification code sent',
+        code,
+        codeSentAt: codeSentAt.toISOString()
+    });
 }));
 
 // Verify code and get JWT
@@ -173,7 +180,7 @@ router.post('/verify-code', rateLimiter(authRateLimit, 15 * 60 * 1000), asyncHan
 
     // Verify code matches
     if (user.code !== code) {
-        throw new UnauthorizedError('Invalid phone number or code');
+        throw new UnauthorizedError('Invalid code. Please try again.');
     }
 
     // Clear the code after successful verification
@@ -200,6 +207,67 @@ router.post('/verify-code', rateLimiter(authRateLimit, 15 * 60 * 1000), asyncHan
     res.json({
         token: accessToken,
         requiresUsername
+    });
+}));
+
+// Resend code (with 1-minute cooldown)
+const RESEND_COOLDOWN_MS = 60 * 1000; // 1 minute
+
+router.post('/resend-code', rateLimiter(requestCodeRateLimit, 15 * 60 * 1000), asyncHandler(async (req: express.Request, res: express.Response) => {
+    const { phoneNumber } = req.body;
+
+    if (!phoneNumber) {
+        throw new ValidationError('Phone number is required');
+    }
+
+    // Validate phone number format (basic validation)
+    if (typeof phoneNumber !== 'string' || phoneNumber.trim().length === 0) {
+        throw new ValidationError('Phone number must be a valid string');
+    }
+
+    // Normalize phone number (remove spaces, dashes, etc.)
+    const normalizedPhone = normalizePhoneNumber(phoneNumber);
+
+    // Validate phone number format
+    if (!validatePhoneNumber(normalizedPhone)) {
+        throw new ValidationError('Phone number must be 10-15 digits');
+    }
+
+    const user = await User.findOne({ phoneNumber: normalizedPhone });
+    if (!user) {
+        throw new NotFoundError('User not found');
+    }
+
+    // Check if code was sent recently (within 1 minute)
+    const now = new Date();
+    if (user.codeSentAt) {
+        const timeSinceLastSent = now.getTime() - user.codeSentAt.getTime();
+        if (timeSinceLastSent < RESEND_COOLDOWN_MS) {
+            const remainingSeconds = Math.ceil((RESEND_COOLDOWN_MS - timeSinceLastSent) / 1000);
+            throw new ValidationError(`Please wait ${remainingSeconds} second${remainingSeconds !== 1 ? 's' : ''} before requesting a new code`);
+        }
+    }
+
+    // Generate a new 6-digit code
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+
+    // Code expires in CODE_EXPIRY_MINUTES minutes
+    const codeExpiresAt = new Date();
+    codeExpiresAt.setMinutes(codeExpiresAt.getMinutes() + CODE_EXPIRY_MINUTES);
+    const codeSentAt = new Date();
+
+    // Update user with new code
+    user.code = code;
+    user.codeExpiresAt = codeExpiresAt;
+    user.codeSentAt = codeSentAt;
+    await user.save();
+
+    // In production, send code via SMS here
+    // For now, return code in response for testing (TODO: Remove in production)
+    res.json({
+        message: 'Verification code resent',
+        code,
+        codeSentAt: codeSentAt.toISOString()
     });
 }));
 

@@ -12,6 +12,9 @@ const userSchema = new mongoose.Schema({
     codeExpiresAt: {
         type: Date,
     },
+    codeSentAt: {
+        type: Date,
+    },
     refreshTokenHash: {
         type: String,
     },
