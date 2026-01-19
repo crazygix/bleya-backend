@@ -1,3 +1,6 @@
+// TODO: ARCHITECTURE IMPROVEMENTS
+// 1. Extract business logic to services/messageService.ts (see architecture_rules.ts section 9)
+
 import express from 'express';
 import { authenticateUser, AuthRequest } from '../middleware/auth.js';
 import { Message } from '../models/Message.js';
@@ -40,7 +43,7 @@ router.get('/:messageId/thread', authenticateUser, asyncHandler(async (req: Auth
         userId: parentMessage.userId,
         username: usernameMap.get(parentMessage.userId) || '',
         text: parentMessage.text,
-        createdAt: parentMessage.createdAt.toISOString(),
+        createdAt: parentMessage.createdAt.getTime(),
         parentMessageId: (parentMessage as any).parentMessageId?.toString() || null,
         replyCount: (parentMessage as any).replyCount || 0,
     };
@@ -52,7 +55,7 @@ router.get('/:messageId/thread', authenticateUser, asyncHandler(async (req: Auth
         userId: msg.userId,
         username: usernameMap.get(msg.userId) || '',
         text: msg.text,
-        createdAt: msg.createdAt.toISOString(),
+        createdAt: msg.createdAt.getTime(),
         parentMessageId: msg.parentMessageId?.toString() || null,
         replyCount: msg.replyCount || 0,
     }));

@@ -17,6 +17,14 @@ import dotenv from 'dotenv'
 import { fileURLToPath } from 'url'
 import { setupSocketIO } from './socket.js'
 import { errorHandler } from '../middleware/errorHandler.js'
+import { buildCorsOptions } from '../utils/cors.js'
+
+// TODO: ARCHITECTURE IMPROVEMENTS
+// 1. Replace custom log() with structured logging library (Winston/Pino) - see architecture_rules.ts section 14
+// 2. Create centralized config module to validate all env vars at startup - see architecture_rules.ts section 13
+// 3. Move index cleanup to migration script - see architecture_rules.ts section 6.1
+// 4. Add request ID middleware for tracing
+// 5. Remove sensitive data from request logging (tokens, passwords)
 
 // Load .env file from project root
 const __filename = fileURLToPath(import.meta.url);
@@ -25,6 +33,7 @@ const envPath = path.resolve(__dirname, '../../.env');
 dotenv.config({ path: envPath });
 
 // Helper function for logging (ensures immediate flush for Railway)
+// TODO: Replace with structured logger (Winston/Pino) - see architecture_rules.ts section 14
 const log = (message: string, data?: any) => {
     const timestamp = new Date().toISOString();
     const logMessage = data
@@ -111,13 +120,8 @@ app.use(helmet({
     crossOriginResourcePolicy: { policy: "cross-origin" }, // Allow R2 resources
 }));
 
-// CORS configuration - more permissive for production
-app.use(cors({
-    origin: true, // Allow all origins in production
-    credentials: true, // Enable credentials for httpOnly cookies
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
-}))
+// CORS configuration (allowlist via CORS_ORIGINS)
+app.use(cors(buildCorsOptions()))
 
 app.use(compression())
 app.use(cookieParser())
@@ -126,8 +130,10 @@ app.use(cookieParser())
 app.use(bodyParser.json({ limit: '10mb' }))
 app.use(bodyParser.urlencoded({ extended: true, limit: '10mb' }))
 
+// TODO: SECURITY - Remove sensitive data from request logging (see architecture_rules.ts section 14)
 // Add request/response logging for debugging
 app.use((req: Request, res: Response, next) => {
+    // TODO: Don't log full request body (may contain tokens/passwords)
     log(`${req.method} ${req.path}`, { body: req.body, query: req.query });
 
     // Log response when it finishes
@@ -277,6 +283,7 @@ const startServer = async () => {
             throw new Error('MongoDB connection not established');
         }
 
+        // TODO: MIGRATION - Move this to a proper migration script (see architecture_rules.ts section 6.1)
         // Migration: Drop old name_1 index if it exists (replaced by compound index)
         try {
             // db is guaranteed to be defined after connection verification (readyState === 1)

@@ -13,6 +13,8 @@
     "server/**/*",
     "routes/**/*",
     "middleware/**/*",
-    "models/**/*"
+    "models/**/*",
+    "services/**/*",
+    "utils/**/*"
   ]
 }

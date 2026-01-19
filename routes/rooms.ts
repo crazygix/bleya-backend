@@ -1,3 +1,7 @@
+// TODO: ARCHITECTURE IMPROVEMENTS
+// 1. Extract business logic to services/roomService.ts (see architecture_rules.ts section 9)
+// 2. Move preset rooms initialization to migration script (see architecture_rules.ts section 6.1)
+
 import express from 'express';
 import { authenticateUser, AuthRequest } from '../middleware/auth.js';
 import { Room } from '../models/Room.js';

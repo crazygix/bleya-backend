@@ -1,0 +1,5 @@
+# Bleya Backend - Cursor Rules
+
+Follow these architectural and system design rules when working on the backend:
+
+@core/architecture_rules.ts

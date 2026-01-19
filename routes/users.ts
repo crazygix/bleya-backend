@@ -1,3 +1,7 @@
+// TODO: ARCHITECTURE IMPROVEMENTS
+// 1. Extract business logic to services/userService.ts (see architecture_rules.ts section 9)
+// 2. Add input sanitization for username and bio (use sanitizeUsername, sanitizePlainText from utils/sanitize.ts)
+
 import express from 'express';
 import multer from 'multer';
 import path from 'path';
@@ -44,8 +48,8 @@ router.get('/me', authenticateUser, asyncHandler(async (req: AuthRequest, res: e
         username: user.username,
         bio: user.bio,
         profileImageUrl: user.profileImageUrl,
-        createdAt: user.createdAt,
-        updatedAt: user.updatedAt
+        createdAt: user.createdAt.getTime(),
+        updatedAt: user.updatedAt.getTime()
     });
 }));
 
@@ -91,9 +95,9 @@ router.put('/profile', authenticateUser, asyncHandler(async (req: AuthRequest, r
         username: user.username,
         bio: user.bio,
         profileImageUrl: user.profileImageUrl,
-        createdAt: user.createdAt,
-        updatedAt: user.updatedAt,
-        lastLogin: user.lastLogin
+        createdAt: user.createdAt.getTime(),
+        updatedAt: user.updatedAt.getTime(),
+        lastLogin: user.lastLogin.getTime()
     });
 }));
 
@@ -144,9 +148,9 @@ router.post('/profile-image', authenticateUser, upload.single('image'), asyncHan
         username: user.username,
         bio: user.bio,
         profileImageUrl: user.profileImageUrl,
-        createdAt: user.createdAt,
-        updatedAt: user.updatedAt,
-        lastLogin: user.lastLogin
+        createdAt: user.createdAt.getTime(),
+        updatedAt: user.updatedAt.getTime(),
+        lastLogin: user.lastLogin.getTime()
     });
 }));
 

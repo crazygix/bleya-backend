@@ -1,3 +1,8 @@
+// TODO: ARCHITECTURE IMPROVEMENTS
+// 1. Extract business logic to services (roomService, messageService) - see architecture_rules.ts section 9
+// 2. Add rate limiting for Socket.IO events - see architecture_rules.ts section 5.1
+// 3. Use structured logger instead of console.log - see architecture_rules.ts section 14
+
 import { Server as SocketIOServer } from 'socket.io';
 import { Server as HTTPServer } from 'http';
 import jwt from 'jsonwebtoken';
@@ -5,6 +10,8 @@ import mongoose from 'mongoose';
 import { Room } from '../models/Room.js';
 import { Message } from '../models/Message.js';
 import { User } from '../models/User.js';
+import { buildSocketCors } from '../utils/cors.js';
+import { sanitizePlainText } from '../utils/sanitize.js';
 
 interface AuthenticatedSocket {
     userId: string;
@@ -13,11 +20,7 @@ interface AuthenticatedSocket {
 
 export function setupSocketIO(server: HTTPServer) {
     const io = new SocketIOServer(server, {
-        cors: {
-            origin: true,
-            credentials: true,
-            methods: ['GET', 'POST'],
-        },
+        cors: buildSocketCors(),
     });
 
     // Authentication middleware for Socket.io
@@ -120,7 +123,7 @@ export function setupSocketIO(server: HTTPServer) {
                     userId: msg.userId,
                     username: usernameMap.get(msg.userId) || '',
                     text: msg.text,
-                    createdAt: msg.createdAt.toISOString(),
+                    createdAt: msg.createdAt.getTime(),
                     parentMessageId: msg.parentMessageId?.toString() || null,
                     replyCount: msg.replyCount || 0,
                 }));
@@ -174,7 +177,13 @@ export function setupSocketIO(server: HTTPServer) {
                 }
 
                 const { text, parentMessageId } = data;
-                if (!text || text.trim().length === 0) {
+                const sanitizedText = sanitizePlainText(text || '', {
+                    maxLength: 2000,
+                    collapseWhitespace: true,
+                    escapeHtml: true,
+                });
+
+                if (!sanitizedText || sanitizedText.trim().length === 0) {
                     return;
                 }
 
@@ -202,7 +211,7 @@ export function setupSocketIO(server: HTTPServer) {
                 const message = new Message({
                     roomId: user.roomId,
                     userId: user.userId,
-                    text: text.trim(),
+                    text: sanitizedText,
                     parentMessageId: parentMessageId ? new mongoose.Types.ObjectId(parentMessageId) : null,
                 });
 
@@ -226,7 +235,7 @@ export function setupSocketIO(server: HTTPServer) {
                     userId: message.userId,
                     username: username,
                     text: message.text,
-                    createdAt: message.createdAt.toISOString(),
+                    createdAt: message.createdAt.getTime(),
                     parentMessageId: message.parentMessageId?.toString() || null,
                     replyCount: message.replyCount,
                 };

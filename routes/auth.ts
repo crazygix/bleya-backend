@@ -1,3 +1,8 @@
+// TODO: ARCHITECTURE IMPROVEMENTS
+// 1. Extract business logic to services/authService.ts (see architecture_rules.ts section 9)
+// 2. Add input sanitization for phone numbers (use sanitizePhoneNumber from utils/sanitize.ts)
+// 3. Move token config to centralized config module (see architecture_rules.ts section 13)
+
 import express from 'express';
 import jwt, { Secret } from 'jsonwebtoken';
 import crypto from 'crypto';
@@ -63,21 +68,6 @@ function setRefreshCookie(res: express.Response, refreshToken: string) {
     });
 }
 
-// Test endpoint to debug request body parsing
-// TODO: Remove or protect this endpoint in production
-router.post('/test', (req, res) => {
-    console.log('Test endpoint hit');
-    console.log('Headers:', req.headers);
-    console.log('Body:', req.body);
-    console.log('Body type:', typeof req.body);
-    res.json({
-        message: 'Test endpoint working',
-        body: req.body,
-        bodyType: typeof req.body,
-        headers: req.headers
-    });
-});
-
 // Rate limiting configuration
 const isProd = process.env.NODE_ENV === 'production';
 const authRateLimit = isProd ? 5 : 100; // For verify-code and refresh
@@ -133,7 +123,7 @@ router.post('/request-code', rateLimiter(requestCodeRateLimit, 15 * 60 * 1000), 
     res.json({
         message: 'Verification code sent',
         code,
-        codeSentAt: codeSentAt.toISOString()
+        codeSentAt: codeSentAt.getTime()
     });
 }));
 
@@ -267,7 +257,7 @@ router.post('/resend-code', rateLimiter(requestCodeRateLimit, 15 * 60 * 1000), a
     res.json({
         message: 'Verification code resent',
         code,
-        codeSentAt: codeSentAt.toISOString()
+        codeSentAt: codeSentAt.getTime()
     });
 }));
 
