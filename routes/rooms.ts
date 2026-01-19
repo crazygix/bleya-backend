@@ -194,7 +194,7 @@ router.post('/:roomId/join', authenticateUser, asyncHandler(async (req: AuthRequ
     }).length;
 
     if (publicRoomCount >= 5) {
-        throw new ValidationError('You can only join up to 5 group chats at a time');
+        throw new ValidationError("You can only join up to 5 group chats at a time.");
     }
 
     // Add room to joined rooms
@@ -279,7 +279,7 @@ router.post('/direct/:otherUserId', authenticateUser, asyncHandler(async (req: A
 
     // Can't create DM with yourself
     if (otherUserId === currentUserId) {
-        throw new ValidationError('Cannot create direct message with yourself');
+        throw new ValidationError("You can't message yourself.");
     }
 
     // Verify other user exists

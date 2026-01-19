@@ -88,12 +88,12 @@ router.post('/request-code', rateLimiter(requestCodeRateLimit, 15 * 60 * 1000), 
     const { phoneNumber } = req.body;
 
     if (!phoneNumber) {
-        throw new ValidationError('Phone number is required');
+        throw new ValidationError("What's your number?");
     }
 
     // Validate phone number format (basic validation)
     if (typeof phoneNumber !== 'string' || phoneNumber.trim().length === 0) {
-        throw new ValidationError('Phone number must be a valid string');
+        throw new ValidationError("What's your number?");
     }
 
     // Normalize phone number (remove spaces, dashes, etc.)
@@ -101,7 +101,7 @@ router.post('/request-code', rateLimiter(requestCodeRateLimit, 15 * 60 * 1000), 
 
     // Validate phone number format
     if (!validatePhoneNumber(normalizedPhone)) {
-        throw new ValidationError('Phone number must be 10-15 digits');
+        throw new ValidationError("That doesn't look like a valid number. Try again?");
     }
 
     // Generate a 6-digit code
@@ -141,17 +141,17 @@ router.post('/request-code', rateLimiter(requestCodeRateLimit, 15 * 60 * 1000), 
 router.post('/verify-code', rateLimiter(authRateLimit, 15 * 60 * 1000), asyncHandler(async (req: express.Request, res: express.Response) => {
     const { phoneNumber, code } = req.body;
     if (!phoneNumber || !code) {
-        throw new ValidationError('Phone number and code are required');
+        throw new ValidationError("We need both your number and the code.");
     }
 
     // Validate phone number format (basic validation)
     if (typeof phoneNumber !== 'string' || phoneNumber.trim().length === 0) {
-        throw new ValidationError('Phone number must be a valid string');
+        throw new ValidationError("What's your number?");
     }
 
     // Validate code format (must be 6 digits)
     if (typeof code !== 'string' || !/^[0-9]{6}$/.test(code)) {
-        throw new ValidationError('Code must be a 6-digit number');
+        throw new ValidationError("That code doesn't look complete. Try again?");
     }
 
     // Normalize phone number (same as in request-code)
@@ -161,12 +161,12 @@ router.post('/verify-code', rateLimiter(authRateLimit, 15 * 60 * 1000), asyncHan
 
     // Check if user exists
     if (!user) {
-        throw new UnauthorizedError('Invalid phone number or code');
+        throw new UnauthorizedError("That code doesn't look right. Try again?");
     }
 
     // Check if code exists and hasn't expired
     if (!user.code || !user.codeExpiresAt) {
-        throw new UnauthorizedError('No verification code found. Please request a new code.');
+        throw new UnauthorizedError("No code found. Request a new one?");
     }
 
     const now = new Date();
@@ -175,12 +175,12 @@ router.post('/verify-code', rateLimiter(authRateLimit, 15 * 60 * 1000), asyncHan
         user.code = undefined;
         user.codeExpiresAt = undefined;
         await user.save();
-        throw new UnauthorizedError('Verification code has expired. Please request a new code.');
+        throw new UnauthorizedError("That code expired. Request a new one?");
     }
 
     // Verify code matches
     if (user.code !== code) {
-        throw new UnauthorizedError('Invalid code. Please try again.');
+        throw new UnauthorizedError("That code doesn't look right. Try again?");
     }
 
     // Clear the code after successful verification
@@ -217,12 +217,12 @@ router.post('/resend-code', rateLimiter(requestCodeRateLimit, 15 * 60 * 1000), a
     const { phoneNumber } = req.body;
 
     if (!phoneNumber) {
-        throw new ValidationError('Phone number is required');
+        throw new ValidationError("What's your number?");
     }
 
     // Validate phone number format (basic validation)
     if (typeof phoneNumber !== 'string' || phoneNumber.trim().length === 0) {
-        throw new ValidationError('Phone number must be a valid string');
+        throw new ValidationError("What's your number?");
     }
 
     // Normalize phone number (remove spaces, dashes, etc.)
@@ -230,7 +230,7 @@ router.post('/resend-code', rateLimiter(requestCodeRateLimit, 15 * 60 * 1000), a
 
     // Validate phone number format
     if (!validatePhoneNumber(normalizedPhone)) {
-        throw new ValidationError('Phone number must be 10-15 digits');
+        throw new ValidationError("That doesn't look like a valid number. Try again?");
     }
 
     const user = await User.findOne({ phoneNumber: normalizedPhone });
@@ -244,7 +244,7 @@ router.post('/resend-code', rateLimiter(requestCodeRateLimit, 15 * 60 * 1000), a
         const timeSinceLastSent = now.getTime() - user.codeSentAt.getTime();
         if (timeSinceLastSent < RESEND_COOLDOWN_MS) {
             const remainingSeconds = Math.ceil((RESEND_COOLDOWN_MS - timeSinceLastSent) / 1000);
-            throw new ValidationError(`Please wait ${remainingSeconds} second${remainingSeconds !== 1 ? 's' : ''} before requesting a new code`);
+            throw new ValidationError(`Hold on! Wait ${remainingSeconds} second${remainingSeconds !== 1 ? 's' : ''} before requesting a new code.`);
         }
     }
 
@@ -338,18 +338,18 @@ router.post('/set-username', authenticateUser, asyncHandler(async (req: AuthRequ
     const { username } = req.body;
 
     if (!username) {
-        throw new ValidationError('Username is required');
+        throw new ValidationError("How should we call you?");
     }
 
     if (typeof username !== 'string' || username.trim().length === 0) {
-        throw new ValidationError('Username must be a non-empty string');
+        throw new ValidationError("How should we call you?");
     }
 
     const normalizedUsername = username.trim().toLowerCase();
 
     // Validate username format
     if (!/^[a-z0-9_]{3,30}$/.test(normalizedUsername)) {
-        throw new ValidationError('Username must be 3-30 characters and contain only lowercase letters, numbers, and underscores');
+        throw new ValidationError("Keep it simple: 3-30 characters, just letters, numbers, and underscores.");
     }
 
     const user = await User.findOne({ phoneNumber: req.user?.phoneNumber });
@@ -359,13 +359,13 @@ router.post('/set-username', authenticateUser, asyncHandler(async (req: AuthRequ
 
     // Check if user already has a username
     if (user.username && user.username.trim().length > 0) {
-        throw new ValidationError('Username is already set and cannot be changed');
+        throw new ValidationError("You've already set your username and can't change it.");
     }
 
     // Check if username is already taken
     const existingUser = await User.findOne({ username: normalizedUsername });
     if (existingUser) {
-        throw new ValidationError('Username is already taken');
+        throw new ValidationError("That username's taken. Try another one?");
     }
 
     // Set username

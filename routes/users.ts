@@ -27,7 +27,7 @@ const upload = multer({
         if (hasValidExtension || hasValidMimetype) {
             return cb(null, true);
         } else {
-            cb(new ValidationError('Only image files are allowed (jpeg, jpg, png, gif, webp)'));
+            cb(new ValidationError("Only images work here (jpeg, jpg, png, gif, webp)."));
         }
     }
 });
@@ -62,7 +62,7 @@ router.put('/profile', authenticateUser, asyncHandler(async (req: AuthRequest, r
 
     if (username !== undefined) {
         if (typeof username !== 'string' || username.trim().length === 0) {
-            throw new ValidationError('Username must be a non-empty string');
+            throw new ValidationError("Username can't be empty.");
         }
         if (user.username !== username.trim()) {
             user.username = username.trim();
@@ -71,7 +71,7 @@ router.put('/profile', authenticateUser, asyncHandler(async (req: AuthRequest, r
     }
     if (bio !== undefined) {
         if (typeof bio !== 'string') {
-            throw new ValidationError('Bio must be a string');
+            throw new ValidationError("Bio needs to be text.");
         }
         if (user.bio !== bio) {
             user.bio = bio;
@@ -100,7 +100,7 @@ router.put('/profile', authenticateUser, asyncHandler(async (req: AuthRequest, r
 // Upload profile image
 router.post('/profile-image', authenticateUser, upload.single('image'), asyncHandler(async (req: AuthRequest, res: express.Response) => {
     if (!req.file) {
-        throw new ValidationError('No image file provided');
+        throw new ValidationError("No image selected. Pick one?");
     }
 
     const user = await User.findOne({ phoneNumber: req.user?.phoneNumber });
