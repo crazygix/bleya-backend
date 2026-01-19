@@ -333,6 +333,33 @@ router.post('/refresh', rateLimiter(authRateLimit, 15 * 60 * 1000), asyncHandler
     res.json({ token: accessToken });
 }));
 
+// Check username availability
+router.post('/check-username', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
+    const { username } = req.body;
+
+    if (!username) {
+        throw new ValidationError("How should we call you?");
+    }
+
+    if (typeof username !== 'string' || username.trim().length === 0) {
+        throw new ValidationError("How should we call you?");
+    }
+
+    const normalizedUsername = username.trim().toLowerCase();
+
+    // Validate username format
+    if (!/^[a-z0-9_]{3,30}$/.test(normalizedUsername)) {
+        res.json({ available: false });
+        return;
+    }
+
+    // Check if username is already taken
+    const existingUser = await User.findOne({ username: normalizedUsername });
+    const available = !existingUser;
+
+    res.json({ available });
+}));
+
 // Set username (only allowed if user doesn't have one yet)
 router.post('/set-username', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
     const { username } = req.body;
