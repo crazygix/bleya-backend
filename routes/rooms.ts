@@ -9,19 +9,7 @@ import { User } from '../models/User.js';
 import { Message } from '../models/Message.js';
 import mongoose from 'mongoose';
 import { asyncHandler } from '../middleware/errorHandler.js';
-import { NotFoundError, ValidationError, ConflictError, ErrorCode } from '../utils/errors.js';
-
-// Helper function to count public rooms for a user
-async function countPublicRooms(userId: string): Promise<number> {
-    const user = await User.findById(userId).populate('joinedRooms').lean();
-    if (!user) return 0;
-
-    const publicRooms = (user.joinedRooms || []).filter((room: any) => {
-        return !room.type || room.type === 'public';
-    });
-
-    return publicRooms.length;
-}
+import { NotFoundError, ValidationError, ErrorCode } from '../utils/errors.js';
 
 const router = express.Router();
 

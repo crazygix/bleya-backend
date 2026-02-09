@@ -74,33 +74,15 @@ export class UnauthorizedError extends AppError {
   }
 }
 
-export class ForbiddenError extends AppError {
-  constructor(message: string = 'Forbidden') {
-    super(ErrorCode.FORBIDDEN, message, 403);
-  }
-}
-
 export class NotFoundError extends AppError {
   constructor(message: string = 'Resource not found', code: ErrorCode = ErrorCode.NOT_FOUND) {
     super(code, message, 404);
   }
 }
 
-export class ConflictError extends AppError {
-  constructor(message: string, details?: any) {
-    super(ErrorCode.CONFLICT, message, 409, details);
-  }
-}
-
 export class TooManyRequestsError extends AppError {
   constructor(message: string = 'Too many requests') {
     super(ErrorCode.TOO_MANY_REQUESTS, message, 429);
-  }
-}
-
-export class InternalError extends AppError {
-  constructor(message: string = 'Internal server error', details?: any) {
-    super(ErrorCode.INTERNAL_ERROR, message, 500, details, false);
   }
 }
 

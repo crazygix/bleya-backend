@@ -1,5 +1,4 @@
-import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
-import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { S3Client, PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 
 // Lazy initialization of S3 client for Cloudflare R2
 // This ensures environment variables are loaded before client is created
@@ -105,51 +104,6 @@ export async function deleteFromR2(key: string): Promise<void> {
     }
 }
 
-/**
- * Generate a presigned URL for direct client uploads (optional, for future use)
- */
-export async function getPresignedUploadUrl(
-    key: string,
-    contentType: string,
-    expiresIn: number = 3600
-): Promise<string> {
-    const bucketName = getBucketName();
-    
-    try {
-        const command = new PutObjectCommand({
-            Bucket: bucketName,
-            Key: key,
-            ContentType: contentType,
-        });
-
-        return await getSignedUrl(getR2Client(), command, { expiresIn });
-    } catch (error) {
-        console.error('Error generating presigned URL:', error);
-        throw new Error('Failed to generate presigned URL');
-    }
-}
-
-/**
- * Generate a presigned URL for reading (if bucket is private)
- */
-export async function getPresignedReadUrl(
-    key: string,
-    expiresIn: number = 3600
-): Promise<string> {
-    const bucketName = getBucketName();
-    
-    try {
-        const command = new GetObjectCommand({
-            Bucket: bucketName,
-            Key: key,
-        });
-
-        return await getSignedUrl(getR2Client(), command, { expiresIn });
-    } catch (error) {
-        console.error('Error generating presigned read URL:', error);
-        throw new Error('Failed to generate presigned read URL');
-    }
-}
 
 /**
  * Extract key from R2 URL (for deletion purposes)

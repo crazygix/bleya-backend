@@ -10,7 +10,7 @@ import { authenticateUser, AuthRequest } from '../middleware/auth.js';
 import { User } from '../models/User.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { rateLimiter } from '../middleware/rateLimiter.js';
-import { ValidationError, UnauthorizedError, NotFoundError, ErrorCode, InternalError } from '../utils/errors.js';
+import { ValidationError, UnauthorizedError, NotFoundError, ErrorCode } from '../utils/errors.js';
 
 const router = express.Router();
 

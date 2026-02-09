@@ -8,15 +8,15 @@
 // ASCII control chars except \t, \n, \r
 const CONTROL_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
 
-export function normalizeWhitespace(input: string): string {
+function normalizeWhitespace(input: string): string {
   return input.replace(/\s+/g, ' ').trim();
 }
 
-export function stripControlChars(input: string): string {
+function stripControlChars(input: string): string {
   return input.replace(CONTROL_CHARS, '');
 }
 
-export function escapeHtml(input: string): string {
+function escapeHtml(input: string): string {
   return input
     .replaceAll('&', '&amp;')
     .replaceAll('<', '&lt;')
@@ -40,12 +40,3 @@ export function sanitizePlainText(
   if (out.length > maxLength) out = out.slice(0, maxLength);
   return out;
 }
-
-export function sanitizePhoneNumber(input: string): string {
-  // Keep leading +, digits only otherwise. Also trims.
-  const raw = String(input).trim();
-  const plus = raw.startsWith('+') ? '+' : '';
-  const digits = raw.replace(/[^\d]/g, '');
-  return plus + digits;
-}
-

@@ -9,7 +9,7 @@ import { authenticateUser, AuthRequest } from '../middleware/auth.js';
 import { User } from '../models/User.js';
 import { uploadToR2, deleteFromR2, extractKeyFromUrl } from '../services/r2Service.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
-import { NotFoundError, ValidationError, ErrorCode, InternalError } from '../utils/errors.js';
+import { NotFoundError, ValidationError, ErrorCode } from '../utils/errors.js';
 
 const router = express.Router();
 
