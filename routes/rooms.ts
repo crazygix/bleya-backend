@@ -6,6 +6,7 @@ import express from 'express';
 import { authenticateUser, AuthRequest } from '../middleware/auth.js';
 import { Room } from '../models/Room.js';
 import { User } from '../models/User.js';
+import { Message } from '../models/Message.js';
 import mongoose from 'mongoose';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { NotFoundError, ValidationError, ConflictError, ErrorCode } from '../utils/errors.js';
@@ -101,41 +102,62 @@ router.get('/joined', authenticateUser, asyncHandler(async (req: AuthRequest, re
         throw new NotFoundError('User not found', ErrorCode.USER_NOT_FOUND);
     }
 
-    // Collect all participant IDs from private rooms for bulk fetch (avoids N+1 queries)
-    const participantIds = new Set<string>();
+    // Collect room IDs for last message aggregation
+    const roomIds = (user.joinedRooms || []).map((room: any) => room._id);
+
+    // Fetch last message for each room in a single aggregation query
+    const lastMessages = await Message.aggregate([
+        { $match: { roomId: { $in: roomIds }, parentMessageId: null } },
+        { $sort: { createdAt: -1 } },
+        {
+            $group: {
+                _id: '$roomId',
+                lastMessageText: { $first: '$text' },
+                lastMessageTime: { $first: '$createdAt' },
+                lastMessageUserId: { $first: '$userId' },
+            }
+        }
+    ]);
+
+    // Create map for quick lookup
+    const lastMessageMap = new Map(
+        lastMessages.map((msg: any) => [msg._id.toString(), msg])
+    );
+
+    // Collect all user IDs (participants + message senders) for bulk fetch
+    const userIds = new Set<string>();
     (user.joinedRooms || []).forEach((room: any) => {
         if (room.type === 'private' && room.participants) {
             room.participants.forEach((id: any) => {
-                // Ensure we store as string (handle both string and ObjectId types)
                 const idStr = typeof id === 'string' ? id : id.toString();
-                if (idStr !== userId) participantIds.add(idStr);
+                if (idStr !== userId) userIds.add(idStr);
             });
         }
     });
+    lastMessages.forEach((msg: any) => {
+        if (msg.lastMessageUserId) userIds.add(msg.lastMessageUserId);
+    });
 
-    // Bulk fetch all participants in a single query
-    const participantUsers = await User.find({
-        _id: { $in: Array.from(participantIds) }
+    // Bulk fetch all users in a single query
+    const users = await User.find({
+        _id: { $in: Array.from(userIds) }
     }).select('_id username').lean();
 
-    // Create a map for quick lookup (keys are strings)
     const userMap = new Map(
-        participantUsers.map((u: any) => [u._id.toString(), u.username])
+        users.map((u: any) => [u._id.toString(), u.username])
     );
 
-    // Map rooms with pre-fetched user data
+    // Map rooms with pre-fetched data
     const joinedRooms = (user.joinedRooms || []).map((room: any) => {
         let roomName = room.name;
         let otherUserId = null;
 
-        // For private chats, get the other user's info from pre-fetched map
         if (room.type === 'private' && room.participants) {
             const otherParticipantId = room.participants.find((id: any) => {
                 const idStr = typeof id === 'string' ? id : id.toString();
                 return idStr !== userId;
             });
             if (otherParticipantId) {
-                // Convert to string to match map keys
                 const participantIdStr = typeof otherParticipantId === 'string'
                     ? otherParticipantId
                     : otherParticipantId.toString();
@@ -144,12 +166,21 @@ router.get('/joined', authenticateUser, asyncHandler(async (req: AuthRequest, re
             }
         }
 
+        const lastMessage = lastMessageMap.get(room._id.toString());
+        const lastMessageUsername = lastMessage?.lastMessageUserId
+            ? userMap.get(lastMessage.lastMessageUserId) || 'Unknown'
+            : null;
+
         return {
             id: room._id.toString(),
             name: roomName,
             type: room.type || 'public',
             participants: room.participants || [],
             otherUserId: otherUserId,
+            lastMessageText: lastMessage?.lastMessageText || null,
+            lastMessageTime: lastMessage?.lastMessageTime || null,
+            lastMessageUserId: lastMessage?.lastMessageUserId || null,
+            lastMessageUsername: lastMessageUsername,
         };
     });
 
