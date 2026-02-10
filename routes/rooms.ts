@@ -288,7 +288,7 @@ router.get('/:roomId/messages', authenticateUser, asyncHandler(async (req: AuthR
 
     // Fetch one extra message to determine if more history exists
     const rawMessages = await Message.find(filter)
-        .sort({ createdAt: -1 })
+        .sort({ createdAt: -1, _id: -1 })
         .limit(pageSize + 1)
         .lean();
 
@@ -316,9 +316,11 @@ router.get('/:roomId/messages', authenticateUser, asyncHandler(async (req: AuthR
         replyCount: msg.replyCount || 0,
     }));
 
+    // Use an exclusive upper-bound cursor (+1ms) so the next page can include
+    // same-timestamp messages at the page boundary without skipping.
     const nextCursor =
         formattedMessages.length > 0
-            ? formattedMessages[0].createdAt
+            ? formattedMessages[0].createdAt + 1
             : null;
 
     res.json({
@@ -385,6 +387,95 @@ router.post('/:roomId/leave', authenticateUser, asyncHandler(async (req: AuthReq
     await user.save();
 
     res.json({ message: 'Successfully left room' });
+}));
+
+// Mark messages in a room as read for the current user
+router.post('/:roomId/read', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
+    const { roomId } = req.params;
+    const userId = req.user!.userId;
+
+    // Validate room ID format
+    if (!roomId.match(/^[0-9a-fA-F]{24}$/)) {
+        throw new ValidationError('Invalid room ID format');
+    }
+
+    const roomObjectId = new mongoose.Types.ObjectId(roomId);
+
+    // Verify room exists
+    const room = await Room.findById(roomObjectId).select('_id');
+    if (!room) {
+        throw new NotFoundError('Room not found', ErrorCode.ROOM_NOT_FOUND);
+    }
+
+    // Verify user exists and is a room member
+    const user = await User.findById(userId).select('joinedRooms');
+    if (!user) {
+        throw new NotFoundError('User not found', ErrorCode.USER_NOT_FOUND);
+    }
+
+    const isJoined = user.joinedRooms.some(
+        (id: mongoose.Types.ObjectId) => id.equals(roomObjectId)
+    );
+
+    if (!isJoined) {
+        throw new ValidationError('You are not a member of this room.');
+    }
+
+    const now = new Date();
+
+    // First try to update an existing pointer.
+    const updatedExisting = await User.updateOne(
+        {
+            _id: userId,
+            'roomReadPointers.roomId': roomObjectId,
+        },
+        {
+            $set: {
+                'roomReadPointers.$.lastReadAt': now,
+            },
+        }
+    );
+
+    // If no pointer exists yet, insert one exactly once.
+    if (updatedExisting.matchedCount === 0) {
+        const inserted = await User.updateOne(
+            {
+                _id: userId,
+                roomReadPointers: {
+                    $not: { $elemMatch: { roomId: roomObjectId } },
+                },
+            },
+            {
+                $push: {
+                    roomReadPointers: {
+                        roomId: roomObjectId,
+                        lastReadAt: now,
+                    },
+                },
+            }
+        );
+
+        // If another request inserted concurrently, make sure we still update
+        // that pointer to `now`.
+        if (inserted.matchedCount === 0) {
+            await User.updateOne(
+                {
+                    _id: userId,
+                    'roomReadPointers.roomId': roomObjectId,
+                },
+                {
+                    $set: {
+                        'roomReadPointers.$.lastReadAt': now,
+                    },
+                }
+            );
+        }
+    }
+
+    res.json({
+        message: 'Room marked as read',
+        lastReadAt: now.getTime(),
+    });
 }));
 
 // Create or get direct message room with another user

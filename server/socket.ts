@@ -117,7 +117,7 @@ export function setupSocketIO(server: HTTPServer) {
                     roomId,
                     parentMessageId: null, // Only fetch top-level messages, not thread replies
                 })
-                    .sort({ createdAt: -1 })
+                    .sort({ createdAt: -1, _id: -1 })
                     .limit(ROOM_MESSAGES_PAGE_SIZE + 1) // Fetch one extra to detect hasMore
                     .lean();
 
@@ -145,11 +145,30 @@ export function setupSocketIO(server: HTTPServer) {
                     replyCount: msg.replyCount || 0,
                 }));
 
-                // Determine cursor for loading older history (based on oldest message)
+                // Determine cursor for loading older history.
+                // Use +1ms so same-timestamp boundary messages are not skipped.
                 const nextCursor =
                     formattedMessages.length > 0
-                        ? formattedMessages[0].createdAt
+                        ? formattedMessages[0].createdAt + 1
                         : null;
+
+                // Look up this user's lastReadAt pointer for the room, if any.
+                let lastReadAt: number | null = null;
+                const readPointers = (userDoc as any).roomReadPointers as
+                    | { roomId: mongoose.Types.ObjectId; lastReadAt: Date }[]
+                    | undefined;
+                if (readPointers && readPointers.length > 0) {
+                    for (const pointer of readPointers) {
+                        if (pointer.roomId.toString() !== roomId || !pointer.lastReadAt) {
+                            continue;
+                        }
+
+                        const pointerTime = pointer.lastReadAt.getTime();
+                        if (lastReadAt === null || pointerTime > lastReadAt) {
+                            lastReadAt = pointerTime;
+                        }
+                    }
+                }
 
                 // Prepare room info
                 let roomName = room.name;
@@ -181,6 +200,7 @@ export function setupSocketIO(server: HTTPServer) {
                         hasMore,
                         nextCursor,
                     },
+                    lastReadAt,
                 });
 
                 // Notify others in the room
@@ -334,4 +354,3 @@ export function setupSocketIO(server: HTTPServer) {
 
     return io;
 }
-
