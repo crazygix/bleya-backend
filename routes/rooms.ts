@@ -38,6 +38,16 @@ interface LeanUser {
     profileImageUrl?: string;
 }
 
+interface RoomReadPointer {
+    roomId: mongoose.Types.ObjectId;
+    lastReadAt?: Date | null;
+}
+
+interface LeanJoinedRoomsUser {
+    joinedRooms: mongoose.Types.ObjectId[];
+    roomReadPointers?: RoomReadPointer[];
+}
+
 interface LastMessageAgg {
     _id: mongoose.Types.ObjectId;
     lastMessageText?: string;
@@ -66,7 +76,9 @@ router.get('/', authenticateUser, asyncHandler(async (_req: AuthRequest, res: ex
 
 router.get('/joined', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
     const userId = req.user!.userId;
-    const user = await User.findById(userId).select('joinedRooms').lean<{ joinedRooms: mongoose.Types.ObjectId[] } | null>();
+    const user = await User.findById(userId)
+        .select('joinedRooms roomReadPointers')
+        .lean<LeanJoinedRoomsUser | null>();
 
     if (!user) {
         throw new NotFoundError('User not found', ErrorCode.USER_NOT_FOUND);
@@ -95,6 +107,42 @@ router.get('/joined', authenticateUser, asyncHandler(async (req: AuthRequest, re
 
     const lastMessages = lastMessagesRaw as LastMessageAgg[];
     const lastMessageMap = new Map(lastMessages.map((msg) => [msg._id.toString(), msg]));
+    const currentUserObjectId = new mongoose.Types.ObjectId(userId);
+
+    const lastReadAtByRoomId = new Map<string, Date>();
+    for (const pointer of user.roomReadPointers || []) {
+        if (!pointer.roomId || !pointer.lastReadAt) {
+            continue;
+        }
+
+        const roomId = pointer.roomId.toString();
+        const currentLastReadAt = lastReadAtByRoomId.get(roomId);
+        if (!currentLastReadAt || pointer.lastReadAt > currentLastReadAt) {
+            lastReadAtByRoomId.set(roomId, pointer.lastReadAt);
+        }
+    }
+
+    const unreadCountEntries = await Promise.all(joinedRoomIds.map(async (roomId) => {
+        const roomIdStr = roomId.toString();
+        const roomLastReadAt = lastReadAtByRoomId.get(roomIdStr);
+
+        const unreadFilter: {
+            roomId: mongoose.Types.ObjectId;
+            userId: { $ne: mongoose.Types.ObjectId };
+            createdAt?: { $gt: Date };
+        } = {
+            roomId,
+            userId: { $ne: currentUserObjectId },
+        };
+
+        if (roomLastReadAt) {
+            unreadFilter.createdAt = { $gt: roomLastReadAt };
+        }
+
+        const unreadCount = await Message.countDocuments(unreadFilter);
+        return [roomIdStr, unreadCount] as const;
+    }));
+    const unreadCountByRoomId = new Map<string, number>(unreadCountEntries);
 
     const userIdSet = new Set<string>();
 
@@ -149,6 +197,7 @@ router.get('/joined', authenticateUser, asyncHandler(async (req: AuthRequest, re
             lastMessageTime,
             lastMessageUserId,
             lastMessageUsername: lastMessageUserId ? userMap.get(lastMessageUserId) || 'Unknown' : null,
+            unreadCount: unreadCountByRoomId.get(room._id.toString()) ?? 0,
         };
     });
 
