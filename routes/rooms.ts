@@ -128,10 +128,12 @@ router.get('/joined', authenticateUser, asyncHandler(async (req: AuthRequest, re
 
         const unreadFilter: {
             roomId: mongoose.Types.ObjectId;
+            parentMessageId: null;
             userId: { $ne: mongoose.Types.ObjectId };
             createdAt?: { $gt: Date };
         } = {
             roomId,
+            parentMessageId: null,
             userId: { $ne: currentUserObjectId },
         };
 

@@ -403,20 +403,23 @@ export function setupSocketIO(server: HTTPServer) {
 
                 io.to(user.roomId).emit('new_message', messageData);
 
-                const summaryPayload = {
-                    roomId: messageData.roomId,
-                    lastMessageText: messageData.text,
-                    lastMessageTime: messageData.createdAt,
-                    lastMessageUserId: messageData.userId,
-                    lastMessageUsername: messageData.username,
-                };
+                // Room-level summaries intentionally track top-level messages only.
+                if (!parentObjectId) {
+                    const summaryPayload = {
+                        roomId: messageData.roomId,
+                        lastMessageText: messageData.text,
+                        lastMessageTime: messageData.createdAt,
+                        lastMessageUserId: messageData.userId,
+                        lastMessageUsername: messageData.username,
+                    };
 
-                const memberUsers = await User.find({ joinedRooms: roomObjectId })
-                    .select('_id')
-                    .lean<Array<{ _id: mongoose.Types.ObjectId }>>();
+                    const memberUsers = await User.find({ joinedRooms: roomObjectId })
+                        .select('_id')
+                        .lean<Array<{ _id: mongoose.Types.ObjectId }>>();
 
-                for (const member of memberUsers) {
-                    io.to(`user:${member._id.toString()}`).emit('room_summary_updated', summaryPayload);
+                    for (const member of memberUsers) {
+                        io.to(`user:${member._id.toString()}`).emit('room_summary_updated', summaryPayload);
+                    }
                 }
 
                 logger.info('socket.message_sent', {
