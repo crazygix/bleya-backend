@@ -10,11 +10,14 @@
     "strict": true,
   },
   "include": [
+    "config/**/*",
     "server/**/*",
     "routes/**/*",
     "middleware/**/*",
     "models/**/*",
     "services/**/*",
-    "utils/**/*"
+    "utils/**/*",
+    "migrations/**/*",
+    "tests/**/*"
   ]
 }

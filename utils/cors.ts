@@ -1,17 +1,14 @@
 import type { CorsOptions } from 'cors';
+import { config } from '../config/index.js';
 
 function parseAllowedOrigins(): string[] {
-  const raw = process.env.CORS_ORIGINS || '';
-  return raw
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
+  return config.corsOrigins;
 }
 
 export function buildCorsOptions(): CorsOptions {
   const allowed = parseAllowedOrigins();
-  const allowAllInDev = process.env.CORS_ALLOW_ALL_IN_DEV === 'true';
-  const isDev = (process.env.NODE_ENV || 'development') !== 'production';
+  const allowAllInDev = config.corsAllowAllInDev;
+  const isDev = !config.isProduction;
 
   return {
     credentials: true,
@@ -30,10 +27,19 @@ export function buildCorsOptions(): CorsOptions {
   };
 }
 
-export function buildSocketCors(): { origin: any; credentials: boolean; methods: string[] } {
+type SocketCorsCallback = (err: Error | null, ok: boolean) => void;
+type SocketCorsOrigin = (originHeader: string | undefined, callback: SocketCorsCallback) => void;
+
+export interface SocketCorsOptions {
+  origin: SocketCorsOrigin;
+  credentials: boolean;
+  methods: string[];
+}
+
+export function buildSocketCors(): SocketCorsOptions {
   const allowed = parseAllowedOrigins();
-  const allowAllInDev = process.env.CORS_ALLOW_ALL_IN_DEV === 'true';
-  const isDev = (process.env.NODE_ENV || 'development') !== 'production';
+  const allowAllInDev = config.corsAllowAllInDev;
+  const isDev = !config.isProduction;
 
   // socket.io accepts `origin` as string|string[]|boolean|function depending on version.
   const origin = (originHeader: string | undefined, callback: (err: Error | null, ok: boolean) => void) => {
@@ -49,4 +55,3 @@ export function buildSocketCors(): { origin: any; credentials: boolean; methods:
     methods: ['GET', 'POST'],
   };
 }
-

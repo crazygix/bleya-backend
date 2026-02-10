@@ -1,38 +1,32 @@
 import { S3Client, PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
+import { config } from '../config/index.js';
+import logger from '../utils/logger.js';
 
-// Lazy initialization of S3 client for Cloudflare R2
-// This ensures environment variables are loaded before client is created
 let r2Client: S3Client | null = null;
 
 function getR2Client(): S3Client {
     if (!r2Client) {
-        const endpoint = process.env.R2_ENDPOINT;
-        const accessKeyId = process.env.R2_ACCESS_KEY_ID;
-        const secretAccessKey = process.env.R2_SECRET_ACCESS_KEY;
-
-        if (!endpoint || !accessKeyId || !secretAccessKey) {
+        if (!config.r2.endpoint || !config.r2.accessKeyId || !config.r2.secretAccessKey) {
             throw new Error(
                 'R2 configuration incomplete. Please set R2_ENDPOINT, R2_ACCESS_KEY_ID, and R2_SECRET_ACCESS_KEY environment variables.'
             );
         }
 
-        // forcePathStyle: true is required for R2 (uses path-style URLs instead of virtual-hosted-style)
         r2Client = new S3Client({
             region: 'auto',
-            endpoint: endpoint,
+            endpoint: config.r2.endpoint,
             forcePathStyle: true,
             credentials: {
-                accessKeyId: accessKeyId,
-                secretAccessKey: secretAccessKey,
+                accessKeyId: config.r2.accessKeyId,
+                secretAccessKey: config.r2.secretAccessKey,
             },
         });
     }
     return r2Client;
 }
 
-// Get bucket name dynamically from environment (not cached at module load)
 function getBucketName(): string {
-    const bucketName = process.env.R2_BUCKET_NAME || '';
+    const bucketName = config.r2.bucketName;
     if (!bucketName || bucketName.trim() === '') {
         throw new Error(
             'R2_BUCKET_NAME environment variable is not set or is empty. ' +
@@ -42,21 +36,26 @@ function getBucketName(): string {
     return bucketName;
 }
 
+function getPublicBaseUrl(bucketName: string): string {
+    if (config.isProduction) {
+        return config.r2.publicUrl || `${config.r2.endpoint}/${bucketName}`;
+    }
+
+    return config.r2.publicUrlDev || config.r2.publicUrl || `${config.r2.endpoint}/${bucketName}`;
+}
+
 export interface UploadResult {
     url: string;
     key: string;
 }
 
-/**
- * Upload a file buffer to R2
- */
 export async function uploadToR2(
     buffer: Buffer,
     key: string,
     contentType: string
 ): Promise<UploadResult> {
     const bucketName = getBucketName();
-    
+
     try {
         const command = new PutObjectCommand({
             Bucket: bucketName,
@@ -68,29 +67,24 @@ export async function uploadToR2(
 
         await getR2Client().send(command);
 
-        // Construct public URL based on environment
-        // Use environment-specific public URL if available, otherwise fall back to default
-        const isProduction = process.env.NODE_ENV === 'production';
-        const publicUrl = isProduction
-            ? (process.env.R2_PUBLIC_URL || `${process.env.R2_ENDPOINT}/${bucketName}`)
-            : (process.env.R2_PUBLIC_URL_DEV || process.env.R2_PUBLIC_URL || `${process.env.R2_ENDPOINT}/${bucketName}`);
+        const publicUrl = getPublicBaseUrl(bucketName);
 
         return {
             url: `${publicUrl}/${key}`,
-            key: key,
+            key,
         };
     } catch (error) {
-        console.error('Error uploading to R2:', error);
+        logger.error('r2.upload.failed', {
+            key,
+            error: error instanceof Error ? error.message : String(error),
+        });
         throw new Error('Failed to upload file to R2');
     }
 }
 
-/**
- * Delete a file from R2
- */
 export async function deleteFromR2(key: string): Promise<void> {
     const bucketName = getBucketName();
-    
+
     try {
         const command = new DeleteObjectCommand({
             Bucket: bucketName,
@@ -99,37 +93,30 @@ export async function deleteFromR2(key: string): Promise<void> {
 
         await getR2Client().send(command);
     } catch (error) {
-        console.error('Error deleting from R2:', error);
-        // Don't throw - deletion failures shouldn't break the flow
+        logger.warn('r2.delete.failed', {
+            key,
+            error: error instanceof Error ? error.message : String(error),
+        });
     }
 }
 
-
-/**
- * Extract key from R2 URL (for deletion purposes)
- */
 export function extractKeyFromUrl(url: string): string | null {
     try {
-        const bucketName = process.env.R2_BUCKET_NAME || '';
+        const bucketName = config.r2.bucketName;
         if (!bucketName) return null;
-        
-        // If URL contains the bucket name, extract the key
+
         if (url.includes(bucketName)) {
             const parts = url.split(`${bucketName}/`);
             return parts[1] || null;
         }
-        // If using custom domain, extract from path
-        const isProduction = process.env.NODE_ENV === 'production';
-        const publicUrl = isProduction
-            ? (process.env.R2_PUBLIC_URL || `${process.env.R2_ENDPOINT}/${bucketName}`)
-            : (process.env.R2_PUBLIC_URL_DEV || process.env.R2_PUBLIC_URL || `${process.env.R2_ENDPOINT}/${bucketName}`);
 
+        const publicUrl = getPublicBaseUrl(bucketName);
         if (publicUrl && url.startsWith(publicUrl)) {
-            return url.replace(publicUrl + '/', '');
+            return url.replace(`${publicUrl}/`, '');
         }
+
         return null;
     } catch {
         return null;
     }
 }
-

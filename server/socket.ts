@@ -1,9 +1,4 @@
-// TODO: ARCHITECTURE IMPROVEMENTS
-// 1. Extract business logic to services (roomService, messageService) - see architecture_rules.ts section 9
-// 2. Add rate limiting for Socket.IO events - see architecture_rules.ts section 5.1
-// 3. Use structured logger instead of console.log - see architecture_rules.ts section 14
-
-import { Server as SocketIOServer } from 'socket.io';
+import { Server as SocketIOServer, Socket } from 'socket.io';
 import { Server as HTTPServer } from 'http';
 import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
@@ -12,188 +7,303 @@ import { Message } from '../models/Message.js';
 import { User } from '../models/User.js';
 import { buildSocketCors } from '../utils/cors.js';
 import { sanitizePlainText } from '../utils/sanitize.js';
+import { ErrorCode } from '../utils/errors.js';
+import { config } from '../config/index.js';
+import logger from '../utils/logger.js';
 
 interface AuthenticatedSocket {
     userId: string;
     roomId?: string;
 }
 
-// Number of top-level messages to load per page when joining a room
-// and when fetching older history via pagination.
-// Kept at 50 for now to keep initial payloads small
+interface EventRateState {
+    count: number;
+    resetAt: number;
+}
+
+interface SocketDataState {
+    user?: AuthenticatedSocket;
+    eventRateLimits?: Map<string, EventRateState>;
+}
+
+type SocketWithState = Socket & { data: SocketDataState };
+
+interface LeanRoom {
+    _id: mongoose.Types.ObjectId;
+    name: string;
+    description?: string;
+    type?: 'public' | 'private';
+    participants?: mongoose.Types.ObjectId[];
+}
+
+interface LeanMessage {
+    _id: mongoose.Types.ObjectId;
+    roomId: mongoose.Types.ObjectId;
+    userId: mongoose.Types.ObjectId;
+    text: string;
+    createdAt: Date;
+    parentMessageId?: mongoose.Types.ObjectId | null;
+    replyCount?: number;
+}
+
+interface LeanUser {
+    _id: mongoose.Types.ObjectId;
+    username?: string;
+}
+
+interface RoomReadPointer {
+    roomId: mongoose.Types.ObjectId;
+    lastReadAt: Date;
+}
+
+interface LeanSocketUser {
+    _id: mongoose.Types.ObjectId;
+    joinedRooms: mongoose.Types.ObjectId[];
+    roomReadPointers?: RoomReadPointer[];
+}
+
 const ROOM_MESSAGES_PAGE_SIZE = 50;
+const MAX_PUBLIC_ROOMS = 5;
+const OBJECT_ID_REGEX = /^[0-9a-fA-F]{24}$/;
+
+const EVENT_RATE_LIMITS: Record<string, { max: number; windowMs: number }> = {
+    join_room: { max: 20, windowMs: 60_000 },
+    send_message: { max: 60, windowMs: 60_000 },
+};
+
+function emitSocketError(socket: SocketWithState, code: ErrorCode, message: string): void {
+    socket.emit('error', {
+        error: {
+            code,
+            message,
+        },
+    });
+}
+
+function consumeEventBudget(socket: SocketWithState, eventName: keyof typeof EVENT_RATE_LIMITS): boolean {
+    const limits = EVENT_RATE_LIMITS[eventName];
+    if (!socket.data.eventRateLimits) {
+        socket.data.eventRateLimits = new Map();
+    }
+
+    const now = Date.now();
+    const existing = socket.data.eventRateLimits.get(eventName);
+
+    if (!existing || existing.resetAt <= now) {
+        socket.data.eventRateLimits.set(eventName, {
+            count: 1,
+            resetAt: now + limits.windowMs,
+        });
+        return true;
+    }
+
+    if (existing.count >= limits.max) {
+        return false;
+    }
+
+    existing.count += 1;
+    socket.data.eventRateLimits.set(eventName, existing);
+    return true;
+}
+
+function parseSocketToken(socket: Socket): string | null {
+    const authToken = socket.handshake.auth.token;
+    if (typeof authToken === 'string' && authToken.trim().length > 0) {
+        return authToken;
+    }
+
+    const authorization = socket.handshake.headers.authorization;
+    if (typeof authorization === 'string' && authorization.startsWith('Bearer ')) {
+        return authorization.replace('Bearer ', '');
+    }
+
+    return null;
+}
+
+function requireObjectId(value: string, fieldName: string): mongoose.Types.ObjectId {
+    if (!OBJECT_ID_REGEX.test(value)) {
+        throw new Error(`Invalid ${fieldName} format`);
+    }
+
+    return new mongoose.Types.ObjectId(value);
+}
+
+function getSocketUser(socket: SocketWithState): AuthenticatedSocket {
+    const user = socket.data.user;
+    if (!user) {
+        throw new Error('Socket user not initialized');
+    }
+
+    return user;
+}
 
 export function setupSocketIO(server: HTTPServer) {
     const io = new SocketIOServer(server, {
         cors: buildSocketCors(),
     });
 
-    // Authentication middleware for Socket.io
-    io.use((socket, next) => {
-        const token = socket.handshake.auth.token || socket.handshake.headers.authorization?.replace('Bearer ', '');
+    io.use((rawSocket, next) => {
+        const socket = rawSocket as SocketWithState;
+        const token = parseSocketToken(socket);
 
         if (!token) {
             return next(new Error('Authentication error: No token provided'));
         }
 
         try {
-            const decoded = jwt.verify(token, process.env.JWT_SECRET!) as { userId: string };
-            (socket as any).user = decoded;
+            const decoded = jwt.verify(token, config.jwtSecret);
+            if (typeof decoded !== 'object' || decoded === null) {
+                return next(new Error('Authentication error: Invalid token payload'));
+            }
+
+            const payload = decoded as { userId?: unknown };
+            if (typeof payload.userId !== 'string') {
+                return next(new Error('Authentication error: Invalid user ID payload'));
+            }
+
+            socket.data.user = { userId: payload.userId };
+            socket.data.eventRateLimits = new Map();
             next();
-        } catch (err) {
+        } catch {
             next(new Error('Authentication error: Invalid token'));
         }
     });
 
-    io.on('connection', (socket) => {
-        const user = (socket as any).user as AuthenticatedSocket;
+    io.on('connection', (rawSocket) => {
+        const socket = rawSocket as SocketWithState;
+        const user = getSocketUser(socket);
 
-        console.log(`User ${user.userId} connected`);
+        logger.info('socket.connected', { userId: user.userId, socketId: socket.id });
 
-        // Join a per-user room so we can emit cross-room updates (e.g. dashboard)
         const userRoom = `user:${user.userId}`;
         socket.join(userRoom);
 
-        // Join a room
         socket.on('join_room', async (data: { roomId: string }) => {
+            if (!consumeEventBudget(socket, 'join_room')) {
+                emitSocketError(socket, ErrorCode.TOO_MANY_REQUESTS, 'Too many join requests. Please slow down.');
+                return;
+            }
+
             try {
-                const { roomId } = data;
+                const roomObjectId = requireObjectId(data.roomId, 'room ID');
+                const roomId = roomObjectId.toString();
 
-                // Verify room exists
-                const room = await Room.findById(roomId);
+                const room = await Room.findById(roomObjectId).lean<LeanRoom | null>();
                 if (!room) {
-                    socket.emit('error', { message: 'Room not found' });
+                    emitSocketError(socket, ErrorCode.ROOM_NOT_FOUND, 'Room not found');
                     return;
                 }
 
-                // Get user document with populated rooms (single fetch to avoid race conditions)
-                const userDoc = await User.findById(user.userId).populate('joinedRooms');
+                const userDoc = await User.findById(user.userId)
+                    .select('joinedRooms roomReadPointers')
+                    .lean<LeanSocketUser | null>();
+
                 if (!userDoc) {
-                    socket.emit('error', { message: 'User not found' });
+                    emitSocketError(socket, ErrorCode.USER_NOT_FOUND, 'User not found');
                     return;
                 }
 
-                const roomObjectId = new mongoose.Types.ObjectId(roomId);
-
-                // Check if already in joinedRooms
-                const isAlreadyJoined = userDoc.joinedRooms.some(
-                    (id: any) => id.equals(roomObjectId)
-                );
+                const isAlreadyJoined = userDoc.joinedRooms.some((id) => id.equals(roomObjectId));
 
                 if (!isAlreadyJoined) {
-                    // Check limit for public rooms only (5 max)
-                    const roomType = (room as any).type || 'public';
-                    if (roomType === 'public') {
-                        // Use the already-populated userDoc to check limit
-                        const publicRoomCount = (userDoc.joinedRooms as any[]).filter((r: any) => {
-                            return !r.type || r.type === 'public';
-                        }).length;
+                    if ((room.type || 'public') === 'public') {
+                        const publicRoomCount = await Room.countDocuments({
+                            _id: { $in: userDoc.joinedRooms },
+                            type: 'public',
+                        });
 
-                        if (publicRoomCount >= 5) {
-                            socket.emit('error', {
-                                message: 'You can only join up to 5 group chats at a time'
-                            });
+                        if (publicRoomCount >= MAX_PUBLIC_ROOMS) {
+                            emitSocketError(socket, ErrorCode.VALIDATION_ERROR, 'You can only join up to 5 group chats at a time');
                             return;
                         }
                     }
 
-                    // Add to joined rooms (no limit for private chats)
-                    userDoc.joinedRooms.push(roomObjectId);
-                    await userDoc.save();
+                    await User.updateOne(
+                        { _id: user.userId, joinedRooms: { $ne: roomObjectId } },
+                        { $addToSet: { joinedRooms: roomObjectId } }
+                    );
                 }
 
-                // Leave previous room if any
                 if (user.roomId) {
                     socket.leave(user.roomId);
                 }
 
-                // Join new room
                 socket.join(roomId);
                 user.roomId = roomId;
 
-                // Get recent top-level messages only (excluding thread replies),
-                // using a fixed page size and reporting if more history exists.
                 const rawMessages = await Message.find({
-                    roomId,
-                    parentMessageId: null, // Only fetch top-level messages, not thread replies
+                    roomId: roomObjectId,
+                    parentMessageId: null,
                 })
                     .sort({ createdAt: -1, _id: -1 })
-                    .limit(ROOM_MESSAGES_PAGE_SIZE + 1) // Fetch one extra to detect hasMore
-                    .lean();
+                    .limit(ROOM_MESSAGES_PAGE_SIZE + 1)
+                    .lean<LeanMessage[]>();
 
                 const hasMore = rawMessages.length > ROOM_MESSAGES_PAGE_SIZE;
                 const pageMessages = hasMore
                     ? rawMessages.slice(0, ROOM_MESSAGES_PAGE_SIZE)
                     : rawMessages;
 
-                // Fetch usernames for all unique user IDs
-                const userIds = [...new Set(pageMessages.map((msg: any) => msg.userId))];
-                const users = await User.find({ _id: { $in: userIds } }).lean();
-                const usernameMap = new Map(
-                    users.map((u: any) => [u._id.toString(), u.username || ''])
-                );
+                const userIds = [...new Set(pageMessages.map((msg) => msg.userId.toString()))]
+                    .map((id) => new mongoose.Types.ObjectId(id));
 
-                // Format messages for client (ascending by createdAt)
-                const formattedMessages = pageMessages.reverse().map((msg: any) => ({
+                const users = userIds.length > 0
+                    ? await User.find({ _id: { $in: userIds } }).select('_id username').lean<LeanUser[]>()
+                    : [];
+
+                const usernameMap = new Map(users.map((u) => [u._id.toString(), u.username || '']));
+
+                const formattedMessages = pageMessages.reverse().map((msg) => ({
                     id: msg._id.toString(),
                     roomId: msg.roomId.toString(),
-                    userId: msg.userId,
-                    username: usernameMap.get(msg.userId) || '',
+                    userId: msg.userId.toString(),
+                    username: usernameMap.get(msg.userId.toString()) || '',
                     text: msg.text,
                     createdAt: msg.createdAt.getTime(),
                     parentMessageId: msg.parentMessageId?.toString() || null,
                     replyCount: msg.replyCount || 0,
                 }));
 
-                // Determine cursor for loading older history.
-                // Use +1ms so same-timestamp boundary messages are not skipped.
-                const nextCursor =
-                    formattedMessages.length > 0
-                        ? formattedMessages[0].createdAt + 1
-                        : null;
+                const nextCursor = formattedMessages.length > 0
+                    ? formattedMessages[0].createdAt + 1
+                    : null;
 
-                // Look up this user's lastReadAt pointer for the room, if any.
                 let lastReadAt: number | null = null;
-                const readPointers = (userDoc as any).roomReadPointers as
-                    | { roomId: mongoose.Types.ObjectId; lastReadAt: Date }[]
-                    | undefined;
-                if (readPointers && readPointers.length > 0) {
-                    for (const pointer of readPointers) {
-                        if (pointer.roomId.toString() !== roomId || !pointer.lastReadAt) {
-                            continue;
-                        }
+                for (const pointer of userDoc.roomReadPointers || []) {
+                    if (!pointer.lastReadAt || pointer.roomId.toString() !== roomId) {
+                        continue;
+                    }
 
-                        const pointerTime = pointer.lastReadAt.getTime();
-                        if (lastReadAt === null || pointerTime > lastReadAt) {
-                            lastReadAt = pointerTime;
-                        }
+                    const pointerTime = pointer.lastReadAt.getTime();
+                    if (lastReadAt === null || pointerTime > lastReadAt) {
+                        lastReadAt = pointerTime;
                     }
                 }
 
-                // Prepare room info
                 let roomName = room.name;
-                let otherUserId = null;
+                let otherUserId: string | null = null;
 
-                // For private chats, get the other user's info
-                if ((room as any).type === 'private' && (room as any).participants) {
-                    const participants = (room as any).participants as string[];
-                    const otherParticipantId = participants.find((id: string) => id !== user.userId);
-                    if (otherParticipantId) {
-                        const otherUser = await User.findById(otherParticipantId).select('username').lean();
+                if ((room.type || 'public') === 'private' && room.participants) {
+                    const otherParticipant = room.participants.find((id) => id.toString() !== user.userId);
+                    if (otherParticipant) {
+                        const otherParticipantId = otherParticipant.toString();
+                        const otherUser = await User.findById(otherParticipantId)
+                            .select('username')
+                            .lean<LeanUser | null>();
+
                         roomName = otherUser?.username || 'Unknown User';
                         otherUserId = otherParticipantId;
                     }
                 }
 
-                // Send room info and messages
                 socket.emit('room_joined', {
                     room: {
                         id: room._id.toString(),
                         name: roomName,
-                        description: (room as any).description,
-                        type: (room as any).type || 'public',
-                        participants: (room as any).participants || [],
-                        otherUserId: otherUserId,
+                        description: room.description,
+                        type: room.type || 'public',
+                        participants: (room.participants || []).map((participant) => participant.toString()),
+                        otherUserId,
                     },
                     messages: formattedMessages,
                     pagination: {
@@ -203,95 +313,96 @@ export function setupSocketIO(server: HTTPServer) {
                     lastReadAt,
                 });
 
-                // Notify others in the room
-                socket.to(roomId).emit('user_joined', {
-                    userId: user.userId
-                });
-
-                console.log(`User ${user.userId} joined room ${room.name}`);
+                socket.to(roomId).emit('user_joined', { userId: user.userId });
+                logger.info('socket.room_joined', { userId: user.userId, roomId });
             } catch (error) {
-                console.error('Error joining room:', error);
-                socket.emit('error', { message: 'Failed to join room' });
+                logger.error('socket.join_room.failed', {
+                    userId: user.userId,
+                    error: error instanceof Error ? error.message : String(error),
+                });
+                emitSocketError(socket, ErrorCode.INTERNAL_ERROR, 'Failed to join room');
             }
         });
 
-        // Send a message
         socket.on('send_message', async (data: { text: string; parentMessageId?: string }) => {
+            if (!consumeEventBudget(socket, 'send_message')) {
+                emitSocketError(socket, ErrorCode.TOO_MANY_REQUESTS, 'Too many messages. Please slow down.');
+                return;
+            }
+
             try {
                 if (!user.roomId) {
-                    socket.emit('error', { message: 'Not in a room' });
+                    emitSocketError(socket, ErrorCode.VALIDATION_ERROR, 'Not in a room');
                     return;
                 }
 
-                const { text, parentMessageId } = data;
-                const sanitizedText = sanitizePlainText(text || '', {
+                const roomObjectId = requireObjectId(user.roomId, 'room ID');
+                const senderObjectId = requireObjectId(user.userId, 'user ID');
+
+                const sanitizedText = sanitizePlainText(data.text || '', {
                     maxLength: 2000,
                     collapseWhitespace: true,
                     escapeHtml: true,
                 });
 
                 if (!sanitizedText || sanitizedText.trim().length === 0) {
+                    emitSocketError(socket, ErrorCode.VALIDATION_ERROR, 'Message cannot be empty');
                     return;
                 }
 
-                // Validate parentMessageId if provided
-                if (parentMessageId) {
-                    if (!parentMessageId.match(/^[0-9a-fA-F]{24}$/)) {
-                        socket.emit('error', { message: 'Invalid parent message ID format' });
+                let parentObjectId: mongoose.Types.ObjectId | null = null;
+                if (data.parentMessageId) {
+                    if (!OBJECT_ID_REGEX.test(data.parentMessageId)) {
+                        emitSocketError(socket, ErrorCode.VALIDATION_ERROR, 'Invalid parent message ID format');
                         return;
                     }
 
-                    const parentMessage = await Message.findById(parentMessageId);
+                    parentObjectId = new mongoose.Types.ObjectId(data.parentMessageId);
+                    const parentMessage = await Message.findById(parentObjectId).lean<LeanMessage | null>();
+
                     if (!parentMessage) {
-                        socket.emit('error', { message: 'Parent message not found' });
+                        emitSocketError(socket, ErrorCode.NOT_FOUND, 'Parent message not found');
                         return;
                     }
 
-                    // Ensure parent message is in the same room
                     if (parentMessage.roomId.toString() !== user.roomId) {
-                        socket.emit('error', { message: 'Parent message not in this room' });
+                        emitSocketError(socket, ErrorCode.VALIDATION_ERROR, 'Parent message not in this room');
                         return;
                     }
                 }
 
-                // Create message
                 const message = new Message({
-                    roomId: user.roomId,
-                    userId: user.userId,
+                    roomId: roomObjectId,
+                    userId: senderObjectId,
                     text: sanitizedText,
-                    parentMessageId: parentMessageId ? new mongoose.Types.ObjectId(parentMessageId) : null,
+                    parentMessageId: parentObjectId,
                 });
 
                 await message.save();
 
-                // If this is a reply, increment parent message's reply count
-                if (parentMessageId) {
-                    await Message.findByIdAndUpdate(parentMessageId, {
-                        $inc: { replyCount: 1 }
-                    });
+                if (parentObjectId) {
+                    await Message.updateOne(
+                        { _id: parentObjectId },
+                        { $inc: { replyCount: 1 } }
+                    );
                 }
 
-                // Fetch username for the sender
-                const senderUser = await User.findById(user.userId).lean();
+                const senderUser = await User.findById(senderObjectId).select('username').lean<LeanUser | null>();
                 const username = senderUser?.username || '';
 
-                // Populate room info for response
                 const messageData = {
                     id: message._id.toString(),
                     roomId: message.roomId.toString(),
-                    userId: message.userId,
-                    username: username,
+                    userId: message.userId.toString(),
+                    username,
                     text: message.text,
                     createdAt: message.createdAt.getTime(),
                     parentMessageId: message.parentMessageId?.toString() || null,
                     replyCount: message.replyCount,
                 };
 
-                // Broadcast to all in the room
                 io.to(user.roomId).emit('new_message', messageData);
 
-                // Emit a lightweight room summary update to all users who joined this room.
-                // The mobile dashboard listens to this to update last message and unread badges.
                 const summaryPayload = {
                     roomId: messageData.roomId,
                     lastMessageText: messageData.text,
@@ -300,55 +411,54 @@ export function setupSocketIO(server: HTTPServer) {
                     lastMessageUsername: messageData.username,
                 };
 
-                try {
-                    const memberUsers = await User.find({
-                        joinedRooms: new mongoose.Types.ObjectId(user.roomId),
-                    })
-                        .select('_id')
-                        .lean();
+                const memberUsers = await User.find({ joinedRooms: roomObjectId })
+                    .select('_id')
+                    .lean<Array<{ _id: mongoose.Types.ObjectId }>>();
 
-                    for (const member of memberUsers) {
-                        const targetUserId = member._id.toString();
-                        const targetRoom = `user:${targetUserId}`;
-                        io.to(targetRoom).emit('room_summary_updated', summaryPayload);
-                    }
-                } catch (err) {
-                    console.error('Error emitting room_summary_updated:', err);
+                for (const member of memberUsers) {
+                    io.to(`user:${member._id.toString()}`).emit('room_summary_updated', summaryPayload);
                 }
 
-                console.log(`Message from ${user.userId} in room ${user.roomId}${parentMessageId ? ' (thread reply)' : ''}`);
+                logger.info('socket.message_sent', {
+                    userId: user.userId,
+                    roomId: user.roomId,
+                    parentMessageId: parentObjectId?.toString() || null,
+                });
             } catch (error) {
-                console.error('Error sending message:', error);
-                socket.emit('error', { message: 'Failed to send message' });
+                logger.error('socket.send_message.failed', {
+                    userId: user.userId,
+                    roomId: user.roomId,
+                    error: error instanceof Error ? error.message : String(error),
+                });
+                emitSocketError(socket, ErrorCode.INTERNAL_ERROR, 'Failed to send message');
             }
         });
 
-        // Leave room
         socket.on('leave_room', async () => {
-            if (user.roomId) {
-                const roomId = user.roomId;
-                user.roomId = undefined;
-
-                socket.to(roomId).emit('user_left', { userId: user.userId });
-                socket.leave(roomId);
-
-                try {
-                    const room = await Room.findById(roomId);
-                    console.log(`User ${user.userId} left room ${room?.name}`);
-                } catch (error) {
-                    console.log(`User ${user.userId} left room ${roomId}`);
-                }
+            if (!user.roomId) {
+                return;
             }
+
+            const roomId = user.roomId;
+            user.roomId = undefined;
+
+            socket.to(roomId).emit('user_left', { userId: user.userId });
+            socket.leave(roomId);
+
+            const room = await Room.findById(roomId).select('name').lean<{ name?: string } | null>();
+            logger.info('socket.room_left', {
+                userId: user.userId,
+                roomId,
+                roomName: room?.name,
+            });
         });
 
-        // Disconnect
         socket.on('disconnect', () => {
             if (user.roomId) {
-                socket.to(user.roomId).emit('user_left', {
-                    userId: user.userId,
-                });
+                socket.to(user.roomId).emit('user_left', { userId: user.userId });
             }
-            console.log(`User ${user.userId} disconnected`);
+
+            logger.info('socket.disconnected', { userId: user.userId, socketId: socket.id });
         });
     });
 

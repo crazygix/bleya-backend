@@ -1,51 +1,69 @@
 import { Request, Response, NextFunction } from 'express';
-import { AppError, ErrorResponse, ErrorCode } from '../utils/errors.js';
 import mongoose from 'mongoose';
+import { AppError, ErrorResponse, ErrorCode } from '../utils/errors.js';
+import logger from '../utils/logger.js';
 
-// Helper function for structured logging
-const logError = (error: Error, req: Request, context?: any) => {
-  const timestamp = new Date().toISOString();
-  const logData = {
-    timestamp,
+interface RequestWithUser extends Request {
+  user?: {
+    userId?: string;
+  };
+}
+
+function hasErrorCode(value: unknown): value is { code: string } {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+
+  const candidate = value as { code?: unknown };
+  return typeof candidate.code === 'string';
+}
+
+const logError = (error: Error, req: Request, context?: Record<string, unknown>) => {
+  logger.error('request.error', {
     method: req.method,
     path: req.path,
     error: {
       name: error.name,
       message: error.message,
-      ...(error instanceof AppError && {
-        code: error.code,
-        statusCode: error.statusCode,
-        details: error.details,
-      }),
+      ...(error instanceof AppError
+        ? {
+            code: error.code,
+            statusCode: error.statusCode,
+            details: error.details,
+          }
+        : {}),
       stack: process.env.NODE_ENV === 'development' ? error.stack : undefined,
     },
     ...context,
-  };
-  console.error(JSON.stringify(logData, null, 2));
+  });
 };
 
 export const errorHandler = (
   error: Error | AppError,
   req: Request,
   res: Response,
-  next: NextFunction
+  _next: NextFunction
 ) => {
-  // Handle known AppError
   if (error instanceof AppError) {
-    logError(error, req, { userId: (req as any).user?.userId });
-    
+    const userId = (req as RequestWithUser).user?.userId;
+    logError(error, req, { userId });
+
+    const responseError: ErrorResponse['error'] = {
+      code: error.code,
+      message: error.message,
+    };
+
+    if (error.details !== undefined) {
+      responseError.details = error.details;
+    }
+
     const response: ErrorResponse = {
-      error: {
-        code: error.code,
-        message: error.message,
-        ...(error.details && { details: error.details }),
-      },
+      error: responseError,
     };
 
     return res.status(error.statusCode).json(response);
   }
 
-  // Handle Mongoose validation errors
   if (error instanceof mongoose.Error.ValidationError) {
     const details = Object.values(error.errors).map((err) => ({
       field: err.path,
@@ -53,7 +71,7 @@ export const errorHandler = (
     }));
 
     logError(error, req);
-    
+
     const response: ErrorResponse = {
       error: {
         code: ErrorCode.VALIDATION_ERROR,
@@ -65,10 +83,9 @@ export const errorHandler = (
     return res.status(400).json(response);
   }
 
-  // Handle Mongoose cast errors (invalid ObjectId, etc.)
   if (error instanceof mongoose.Error.CastError) {
     logError(error, req);
-    
+
     const response: ErrorResponse = {
       error: {
         code: ErrorCode.INVALID_INPUT,
@@ -79,10 +96,9 @@ export const errorHandler = (
     return res.status(400).json(response);
   }
 
-  // Handle Multer errors (file upload)
-  if ((error as any).code === 'LIMIT_FILE_SIZE') {
-    logError(error, req);
-    
+  if (hasErrorCode(error) && error.code === 'LIMIT_FILE_SIZE') {
+    logError(error instanceof Error ? error : new Error('File size limit exceeded'), req);
+
     const response: ErrorResponse = {
       error: {
         code: ErrorCode.VALIDATION_ERROR,
@@ -93,14 +109,13 @@ export const errorHandler = (
     return res.status(400).json(response);
   }
 
-  // Handle unknown errors
   logError(error, req, { unexpected: true });
-  
+
   const response: ErrorResponse = {
     error: {
       code: ErrorCode.INTERNAL_ERROR,
-      message: process.env.NODE_ENV === 'production' 
-        ? 'An unexpected error occurred' 
+      message: process.env.NODE_ENV === 'production'
+        ? 'An unexpected error occurred'
         : error.message,
     },
   };
@@ -108,12 +123,10 @@ export const errorHandler = (
   return res.status(500).json(response);
 };
 
-// Async handler wrapper to catch errors in async route handlers
-export const asyncHandler = (
-  fn: (req: Request, res: Response, next: NextFunction) => Promise<any> | any
+export const asyncHandler = <TReq extends Request = Request>(
+  fn: (req: TReq, res: Response, next: NextFunction) => Promise<unknown> | unknown
 ) => {
   return (req: Request, res: Response, next: NextFunction) => {
-    Promise.resolve(fn(req, res, next)).catch(next);
+    Promise.resolve(fn(req as TReq, res, next)).catch(next);
   };
 };
-

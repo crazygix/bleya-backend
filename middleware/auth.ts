@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { UnauthorizedError } from '../utils/errors.js';
+import { config } from '../config/index.js';
 
 export interface AuthRequest extends Request {
     user?: {
@@ -18,10 +19,10 @@ export const authenticateUser = (
     if (authHeader && authHeader.startsWith('Bearer ')) {
         const token = authHeader.split(' ')[1];
         try {
-            const decoded = jwt.verify(token, process.env.JWT_SECRET!);
+            const decoded = jwt.verify(token, config.jwtSecret);
             req.user = decoded as { userId: string; phoneNumber: string };
             next();
-        } catch (err) {
+        } catch {
             return next(new UnauthorizedError('Invalid or expired token'));
         }
     } else {

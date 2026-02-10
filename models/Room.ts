@@ -14,7 +14,8 @@ const roomSchema = new mongoose.Schema({
         default: 'public',
     },
     participants: {
-        type: [String], // Array of user IDs for private chats
+        type: [mongoose.Schema.Types.ObjectId],
+        ref: 'User',
         default: [],
     },
     participantsHash: {
@@ -33,4 +34,3 @@ roomSchema.index({ name: 1, type: 1 }, { unique: true, sparse: true, partialFilt
 roomSchema.index({ participantsHash: 1, type: 1 }, { unique: true, sparse: true, partialFilterExpression: { type: 'private' } });
 
 export const Room = mongoose.model('Room', roomSchema);
-

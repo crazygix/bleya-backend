@@ -40,3 +40,22 @@ export function sanitizePlainText(
   if (out.length > maxLength) out = out.slice(0, maxLength);
   return out;
 }
+
+export function sanitizePhoneNumber(input: string): string {
+  return sanitizePlainText(input, {
+    maxLength: 32,
+    collapseWhitespace: true,
+    escapeHtml: false,
+  }).replace(/[\s\-\(\)]/g, '');
+}
+
+export function sanitizeUsername(input: string): string {
+  return sanitizePlainText(input, {
+    maxLength: 30,
+    collapseWhitespace: true,
+    escapeHtml: false,
+  })
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_]/g, '');
+}

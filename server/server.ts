@@ -1,333 +1,241 @@
-import express, { Request, Response } from 'express'
-import http from 'http'
-import bodyParser from 'body-parser'
-import cookieParser from 'cookie-parser'
-import compression from 'compression'
-import cors from 'cors'
-import helmet from 'helmet'
-import path from 'path'
-import fs from 'fs'
-import authRoutes from '../routes/auth.js'
-import roomRoutes from '../routes/rooms.js'
-import userRoutes from '../routes/users.js'
-import messageRoutes from '../routes/messages.js'
-import mongoose from 'mongoose'
-import { Room } from '../models/Room.js'
-import dotenv from 'dotenv'
-import { fileURLToPath } from 'url'
-import { setupSocketIO } from './socket.js'
-import { errorHandler } from '../middleware/errorHandler.js'
-import { buildCorsOptions } from '../utils/cors.js'
+import express, { Request, Response } from 'express';
+import http from 'http';
+import bodyParser from 'body-parser';
+import cookieParser from 'cookie-parser';
+import compression from 'compression';
+import cors from 'cors';
+import helmet from 'helmet';
+import crypto from 'crypto';
+import mongoose from 'mongoose';
+import authRoutes from '../routes/auth.js';
+import roomRoutes from '../routes/rooms.js';
+import userRoutes from '../routes/users.js';
+import messageRoutes from '../routes/messages.js';
+import { setupSocketIO } from './socket.js';
+import { errorHandler } from '../middleware/errorHandler.js';
+import { buildCorsOptions } from '../utils/cors.js';
+import logger from '../utils/logger.js';
+import { config, validateR2Config } from '../config/index.js';
 
-// TODO: ARCHITECTURE IMPROVEMENTS
-// 1. Replace custom log() with structured logging library (Winston/Pino) - see architecture_rules.ts section 14
-// 2. Create centralized config module to validate all env vars at startup - see architecture_rules.ts section 13
-// 3. Move index cleanup to migration script - see architecture_rules.ts section 6.1
-// 4. Add request ID middleware for tracing
-// 5. Remove sensitive data from request logging (tokens, passwords)
-
-// Load .env file from project root
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const envPath = path.resolve(__dirname, '../../.env');
-dotenv.config({ path: envPath });
-
-// Helper function for logging (ensures immediate flush for Railway)
-// TODO: Replace with structured logger (Winston/Pino) - see architecture_rules.ts section 14
-const log = (message: string, data?: any) => {
-    const timestamp = new Date().toISOString();
-    const logMessage = data
-        ? `[${timestamp}] ${message} ${JSON.stringify(data)}`
-        : `[${timestamp}] ${message}`;
-    console.log(logMessage);
-};
-
-const mongoUri = process.env.MONGODB_URI;
-if (!mongoUri) {
-    throw new Error('MONGODB_URI environment variable is not set');
+interface RequestWithId extends Request {
+    requestId?: string;
 }
 
-const jwtSecret = process.env.JWT_SECRET;
-if (!jwtSecret) {
-    throw new Error('JWT_SECRET environment variable is not set');
-}
-
-// Validate R2 configuration (required for file uploads)
-const r2Endpoint = process.env.R2_ENDPOINT;
-const r2AccessKeyId = process.env.R2_ACCESS_KEY_ID;
-const r2SecretAccessKey = process.env.R2_SECRET_ACCESS_KEY;
-const r2BucketName = process.env.R2_BUCKET_NAME;
-
-const isProduction = process.env.NODE_ENV === 'production';
-const r2ConfigMissing = !r2Endpoint || !r2AccessKeyId || !r2SecretAccessKey || !r2BucketName;
-
-if (r2ConfigMissing) {
-    const missingVars = {
-        R2_ENDPOINT: r2Endpoint ? 'set' : 'missing',
-        R2_ACCESS_KEY_ID: r2AccessKeyId ? 'set' : 'missing',
-        R2_SECRET_ACCESS_KEY: r2SecretAccessKey ? 'set' : 'missing',
-        R2_BUCKET_NAME: r2BucketName ? 'set' : 'missing',
-    };
-
-    if (isProduction) {
-        // In production, R2 is required - fail fast
-        throw new Error(`R2 configuration incomplete in production. Missing: ${JSON.stringify(missingVars)}`);
-    } else {
-        // In development, warn but allow server to start
-        log('Warning: R2 configuration incomplete. File uploads will fail.');
-        log('Required R2 env vars:', missingVars);
+const r2Validation = validateR2Config();
+if (!r2Validation.complete) {
+    if (config.isProduction) {
+        throw new Error(`R2 configuration incomplete in production. Missing: ${r2Validation.missing.join(', ')}`);
     }
+
+    logger.warn('r2.config.incomplete', {
+        missing: r2Validation.missing,
+        note: 'File uploads will fail until R2 env vars are configured',
+    });
 }
 
-// MongoDB connection options
-const mongooseOptions = {
-    serverSelectionTimeoutMS: 5000, // Timeout after 5s instead of 30s
-    socketTimeoutMS: 45000, // Close sockets after 45s of inactivity
-    connectTimeoutMS: 10000, // Give up initial connection after 10s
-    maxPoolSize: 50, // Increased from 10 for better concurrency
-    minPoolSize: 5, // Increased from 2 for faster response
+const mongooseOptions: mongoose.ConnectOptions = {
+    serverSelectionTimeoutMS: 5000,
+    socketTimeoutMS: 45000,
+    connectTimeoutMS: 10000,
+    maxPoolSize: 50,
+    minPoolSize: 5,
     retryWrites: true,
     retryReads: true,
 };
 
 mongoose.connection.on('connected', () => {
-    log('MongoDB connected');
-})
+    logger.info('mongodb.connected');
+});
 
-mongoose.connection.on('error', err => {
-    log('MongoDB connection error:', err);
-})
+mongoose.connection.on('error', (err) => {
+    logger.error('mongodb.error', {
+        message: err.message,
+        name: err.name,
+    });
+});
 
 mongoose.connection.on('disconnected', () => {
-    log('MongoDB disconnected');
-})
+    logger.warn('mongodb.disconnected');
+});
 
-const app = express()
+const app = express();
 
-// Security headers with helmet
-// Configure helmet for production security
 app.use(helmet({
     contentSecurityPolicy: {
         directives: {
             defaultSrc: ["'self'"],
             styleSrc: ["'self'", "'unsafe-inline'"],
             scriptSrc: ["'self'"],
-            imgSrc: ["'self'", "data:", "https:"], // Allow images from R2/CDN
+            imgSrc: ["'self'", 'data:', 'https:'],
             connectSrc: ["'self'"],
         },
     },
-    crossOriginEmbedderPolicy: false, // Allow embedding for Socket.io
-    crossOriginResourcePolicy: { policy: "cross-origin" }, // Allow R2 resources
+    crossOriginEmbedderPolicy: false,
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
 }));
 
-// CORS configuration (allowlist via CORS_ORIGINS)
-app.use(cors(buildCorsOptions()))
+app.use(cors(buildCorsOptions()));
+app.use(compression());
+app.use(cookieParser());
+app.use(bodyParser.json({ limit: '10mb' }));
+app.use(bodyParser.urlencoded({ extended: true, limit: '10mb' }));
 
-app.use(compression())
-app.use(cookieParser())
-
-// Body parser configuration - more explicit for production
-app.use(bodyParser.json({ limit: '10mb' }))
-app.use(bodyParser.urlencoded({ extended: true, limit: '10mb' }))
-
-// TODO: SECURITY - Remove sensitive data from request logging (see architecture_rules.ts section 14)
-// Add request/response logging for debugging
 app.use((req: Request, res: Response, next) => {
-    // TODO: Don't log full request body (may contain tokens/passwords)
-    log(`${req.method} ${req.path}`, { body: req.body, query: req.query });
+    const requestId = crypto.randomUUID();
+    const request = req as RequestWithId;
+    request.requestId = requestId;
+    const startedAt = Date.now();
 
-    // Log response when it finishes
-    const originalSend = res.send;
-    res.send = function (body) {
-        log(`${req.method} ${req.path} - Response:`, { status: res.statusCode, body: typeof body === 'string' ? body.substring(0, 200) : body });
-        return originalSend.call(this, body);
-    };
+    logger.info('http.request.start', {
+        requestId,
+        method: req.method,
+        path: req.path,
+    });
 
-    next()
-})
+    res.on('finish', () => {
+        logger.info('http.request.finish', {
+            requestId,
+            method: req.method,
+            path: req.path,
+            statusCode: res.statusCode,
+            durationMs: Date.now() - startedAt,
+        });
+    });
 
-// Mount auth routes
-app.use('/api/auth', authRoutes)
+    next();
+});
 
-// Mount room routes
-app.use('/api/rooms', roomRoutes)
+app.use('/api/auth', authRoutes);
+app.use('/api/rooms', roomRoutes);
+app.use('/api/users', userRoutes);
+app.use('/api/messages', messageRoutes);
 
-// Mount user routes
-app.use('/api/users', userRoutes)
+app.get('/', (_req: Request, res: Response) => {
+    res.json({ message: 'Gde si bre zverino?' });
+});
 
-// Mount message routes
-app.use('/api/messages', messageRoutes)
-
-app.get("/", (req: Request, res: Response) => {
-    res.json({ message: "Gde si bre zverino?" })
-})
-
-// Enhanced health check endpoint with monitoring
-app.get("/health", async (req: Request, res: Response) => {
+app.get('/health', async (_req: Request, res: Response) => {
     const health = {
-        status: "ok",
-        timestamp: new Date().toISOString(),
-        environment: process.env.NODE_ENV || 'development',
-        port: process.env.PORT || 8080,
+        status: 'ok',
+        timestamp: Date.now(),
+        environment: config.nodeEnv,
+        port: config.port,
         mongodb: {
-            status: mongoose.connection.readyState === 1 ? "connected" : "disconnected",
-            readyState: mongoose.connection.readyState, // 0=disconnected, 1=connected, 2=connecting, 3=disconnecting
+            status: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
+            readyState: mongoose.connection.readyState,
         },
         memory: {
-            used: Math.round(process.memoryUsage().heapUsed / 1024 / 1024), // MB
-            total: Math.round(process.memoryUsage().heapTotal / 1024 / 1024), // MB
-            rss: Math.round(process.memoryUsage().rss / 1024 / 1024), // MB
+            used: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+            total: Math.round(process.memoryUsage().heapTotal / 1024 / 1024),
+            rss: Math.round(process.memoryUsage().rss / 1024 / 1024),
         },
-        uptime: Math.round(process.uptime()), // seconds
+        uptime: Math.round(process.uptime()),
     };
 
-    // Return 503 if DB is not connected
     const statusCode = mongoose.connection.readyState === 1 ? 200 : 503;
     res.status(statusCode).json(health);
 });
 
-// Error handling middleware (must be last)
 app.use(errorHandler);
 
-const server = http.createServer(app)
+const server = http.createServer(app);
+setupSocketIO(server);
 
-// Setup Socket.io
-setupSocketIO(server)
-
-// Global error handlers for unhandled rejections and exceptions
-process.on('unhandledRejection', (reason: any, promise: Promise<any>) => {
+process.on('unhandledRejection', (reason: unknown, promise: Promise<unknown>) => {
     const error = reason instanceof Error ? reason : new Error(String(reason));
-    const errorData = {
-        timestamp: new Date().toISOString(),
-        type: 'unhandledRejection',
+
+    logger.error('process.unhandled_rejection', {
         error: {
             name: error.name,
             message: error.message,
             stack: error.stack,
         },
-        promise: promise.toString(),
-    };
+        promiseType: Object.prototype.toString.call(promise),
+    });
 
-    // Write synchronously to ensure logs are flushed before exit
-    fs.writeSync(process.stderr.fd, `Unhandled Promise Rejection: ${JSON.stringify(errorData, null, 2)}\n`);
-
-    // Set exit code and exit immediately (log is already flushed synchronously)
-    // Process manager (e.g., Railway) will restart the process
-    process.exitCode = 1;
     process.exit(1);
 });
 
 process.on('uncaughtException', (error: Error) => {
-    const errorData = {
-        timestamp: new Date().toISOString(),
-        type: 'uncaughtException',
+    logger.error('process.uncaught_exception', {
         error: {
             name: error.name,
             message: error.message,
             stack: error.stack,
         },
-    };
+    });
 
-    // Write synchronously to ensure logs are flushed before exit
-    fs.writeSync(process.stderr.fd, `Uncaught Exception: ${JSON.stringify(errorData, null, 2)}\n`);
-
-    // Set exit code and exit immediately (log is already flushed synchronously)
-    // Process manager (e.g., Railway) will restart the process
-    process.exitCode = 1;
     process.exit(1);
 });
 
-const port = process.env.PORT || 8080
+const waitForMongoConnection = async (): Promise<void> => {
+    if (mongoose.connection.readyState === 0) {
+        await mongoose.connect(config.mongoUri, mongooseOptions);
+    }
 
-// Wait for MongoDB connection before starting server
+    if (mongoose.connection.readyState === 1) {
+        return;
+    }
+
+    await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+            mongoose.connection.removeListener('connected', onConnected);
+            mongoose.connection.removeListener('error', onError);
+            reject(new Error('MongoDB connection timeout'));
+        }, 10000);
+
+        const onConnected = () => {
+            clearTimeout(timeout);
+            mongoose.connection.removeListener('connected', onConnected);
+            mongoose.connection.removeListener('error', onError);
+            resolve();
+        };
+
+        const onError = (err: Error) => {
+            clearTimeout(timeout);
+            mongoose.connection.removeListener('connected', onConnected);
+            mongoose.connection.removeListener('error', onError);
+            reject(err);
+        };
+
+        mongoose.connection.once('connected', onConnected);
+        mongoose.connection.once('error', onError);
+    });
+};
+
 const startServer = async () => {
     try {
-        // Ensure MongoDB is connected before starting server
-        // readyState: 0 = disconnected, 1 = connected, 2 = connecting, 3 = disconnecting
-        if (mongoose.connection.readyState === 0) {
-            // Not connected, establish connection
-            await mongoose.connect(mongoUri, mongooseOptions);
-        }
+        await waitForMongoConnection();
 
-        // Wait until connection is fully established (readyState === 1)
-        // This handles cases where connection is in progress (state 2) or disconnecting (state 3)
-        if (mongoose.connection.readyState !== 1) {
-            await new Promise<void>((resolve, reject) => {
-                const timeout = setTimeout(() => {
-                    mongoose.connection.removeListener('connected', onConnected);
-                    mongoose.connection.removeListener('error', onError);
-                    reject(new Error('MongoDB connection timeout'));
-                }, 10000);
-
-                const onConnected = () => {
-                    clearTimeout(timeout);
-                    mongoose.connection.removeListener('connected', onConnected);
-                    mongoose.connection.removeListener('error', onError);
-                    resolve();
-                };
-
-                const onError = (err: Error) => {
-                    clearTimeout(timeout);
-                    mongoose.connection.removeListener('connected', onConnected);
-                    mongoose.connection.removeListener('error', onError);
-                    reject(err);
-                };
-
-                mongoose.connection.once('connected', onConnected);
-                mongoose.connection.once('error', onError);
-            });
-        }
-
-        // Final verification that connection is established
         if (mongoose.connection.readyState !== 1) {
             throw new Error('MongoDB connection not established');
         }
 
-        // TODO: MIGRATION - Move this to a proper migration script (see architecture_rules.ts section 6.1)
-        // Migration: Drop old name_1 index if it exists (replaced by compound index)
-        try {
-            // db is guaranteed to be defined after connection verification (readyState === 1)
-            // Type assertion is safe here because we've verified readyState === 1
-            const db = mongoose.connection.db as NonNullable<typeof mongoose.connection.db>;
-            const collection = db.collection('rooms');
-            const indexes = await collection.indexes();
-            const oldNameIndex = indexes.find((idx: any) => idx.name === 'name_1');
-            if (oldNameIndex) {
-                await collection.dropIndex('name_1');
-                log('Dropped old name_1 index from rooms collection');
-            }
-        } catch (error: any) {
-            // Index might not exist or already dropped, ignore error
-            if (error.code !== 27) { // 27 = IndexNotFound
-                log('Warning: Could not drop old index:', error.message);
-            }
-        }
-
-        // Note: Duplicate room cleanup removed (function not implemented)
-
-        server.listen(port, () => {
-            const host = process.env.HOST || 'localhost';
-            const protocol = process.env.NODE_ENV === 'production' ? 'https' : 'http';
-            const url = `${protocol}://${host}:${port}`;
-            log(`Server running at ${url}`);
+        server.listen(config.port, () => {
+            const protocol = config.isProduction ? 'https' : 'http';
+            const url = `${protocol}://${config.host}:${config.port}`;
+            logger.info('server.started', { url });
         });
 
         server.on('error', (error: NodeJS.ErrnoException) => {
             if (error.code === 'EADDRINUSE') {
-                log(`Port ${port} is already in use. Please stop the other process or use a different port.`);
+                logger.error('server.port_in_use', { port: config.port });
             } else {
-                log('Server error:', error);
+                logger.error('server.error', {
+                    code: error.code,
+                    message: error.message,
+                });
             }
             process.exit(1);
         });
     } catch (error) {
-        log('Failed to start server:', error);
-        if (error instanceof Error) {
-            log('Error stack:', error.stack);
-        }
+        const normalizedError = error instanceof Error ? error : new Error(String(error));
+        logger.error('server.start_failed', {
+            message: normalizedError.message,
+            stack: normalizedError.stack,
+        });
         process.exit(1);
     }
 };
 
 startServer();
-

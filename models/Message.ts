@@ -1,7 +1,3 @@
-// TODO: DATA MODEL CONSISTENCY (see architecture_rules.ts section 4)
-// Change userId from String to mongoose.Schema.Types.ObjectId for consistency
-// This requires a migration to update existing data
-
 import mongoose from 'mongoose';
 
 const messageSchema = new mongoose.Schema({
@@ -11,7 +7,8 @@ const messageSchema = new mongoose.Schema({
         required: true,
     },
     userId: {
-        type: String, // TODO: Change to mongoose.Schema.Types.ObjectId
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
         required: true,
     },
     text: {
@@ -39,4 +36,3 @@ messageSchema.index({ roomId: 1, createdAt: -1 });
 messageSchema.index({ roomId: 1, parentMessageId: 1, createdAt: -1 }); // Compound for filtered queries
 
 export const Message = mongoose.model('Message', messageSchema);
-

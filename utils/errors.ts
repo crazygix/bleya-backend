@@ -1,5 +1,3 @@
-import { Response } from 'express';
-
 export enum ErrorCode {
   // Validation errors (400)
   VALIDATION_ERROR = 'VALIDATION_ERROR',
@@ -36,21 +34,21 @@ export interface ErrorResponse {
   error: {
     code: ErrorCode;
     message: string;
-    details?: any;
+    details?: unknown;
   };
 }
 
 export class AppError extends Error {
   public readonly code: ErrorCode;
   public readonly statusCode: number;
-  public readonly details?: any;
+  public readonly details?: unknown;
   public readonly isOperational: boolean;
 
   constructor(
     code: ErrorCode,
     message: string,
     statusCode: number = 500,
-    details?: any,
+    details?: unknown,
     isOperational: boolean = true
   ) {
     super(message);
@@ -63,7 +61,7 @@ export class AppError extends Error {
 }
 
 export class ValidationError extends AppError {
-  constructor(message: string, details?: any) {
+  constructor(message: string, details?: unknown) {
     super(ErrorCode.VALIDATION_ERROR, message, 400, details);
   }
 }
@@ -85,4 +83,3 @@ export class TooManyRequestsError extends AppError {
     super(ErrorCode.TOO_MANY_REQUESTS, message, 429);
   }
 }
-

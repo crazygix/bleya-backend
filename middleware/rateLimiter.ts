@@ -51,16 +51,15 @@ export const rateLimiter = (
         // Set rate limit headers
         res.setHeader('X-RateLimit-Limit', maxRequests.toString());
         res.setHeader('X-RateLimit-Remaining', Math.max(0, maxRequests - store.count).toString());
-        res.setHeader('X-RateLimit-Reset', new Date(store.resetTime).toISOString());
+        res.setHeader('X-RateLimit-Reset', store.resetTime.toString());
 
         // Check if limit exceeded
         if (store.count > maxRequests) {
             return next(new TooManyRequestsError(
-                `Too many requests. Please try again after ${new Date(store.resetTime).toISOString()}`
+                `Too many requests. Please try again after ${store.resetTime}`
             ));
         }
 
         next();
     };
 };
-

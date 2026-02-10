@@ -1,46 +1,36 @@
-// TODO: ARCHITECTURE IMPROVEMENTS
-// 1. Extract business logic to services/authService.ts (see architecture_rules.ts section 9)
-// 2. Add input sanitization for phone numbers (use sanitizePhoneNumber from utils/sanitize.ts)
-// 3. Move token config to centralized config module (see architecture_rules.ts section 13)
-
 import express from 'express';
-import jwt, { Secret } from 'jsonwebtoken';
+import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import { authenticateUser, AuthRequest } from '../middleware/auth.js';
 import { User } from '../models/User.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { rateLimiter } from '../middleware/rateLimiter.js';
 import { ValidationError, UnauthorizedError, NotFoundError, ErrorCode } from '../utils/errors.js';
+import { sanitizePhoneNumber, sanitizeUsername } from '../utils/sanitize.js';
+import { config } from '../config/index.js';
 
 const router = express.Router();
 
-// Token config (defaults if env not set)
-const ACCESS_TOKEN_TTL: string | number = process.env.ACCESS_TOKEN_TTL || '1h';
-const REFRESH_TOKEN_TTL_DAYS = Number(process.env.REFRESH_TOKEN_TTL_DAYS || 365);
-
-// Code expiration time (10 minutes)
+const ACCESS_TOKEN_TTL = config.accessTokenTtl as jwt.SignOptions['expiresIn'];
+const REFRESH_TOKEN_TTL_DAYS = config.refreshTokenTtlDays;
 const CODE_EXPIRY_MINUTES = 10;
+const RESEND_COOLDOWN_MS = 60 * 1000;
 
-/**
- * Normalize phone number by removing spaces, dashes, and parentheses
- * This ensures consistent storage and comparison
- */
-function normalizePhoneNumber(phoneNumber: string): string {
-    return phoneNumber.trim().replace(/[\s\-\(\)]/g, '');
-}
-
-/**
- * Validate phone number format
- * Must be 10-15 digits, optionally starting with +
- */
 function validatePhoneNumber(phoneNumber: string): boolean {
     return /^\+?[0-9]{10,15}$/.test(phoneNumber);
 }
 
-function signAccessToken(payload: { userId: string; phoneNumber: string }) {
-    const secret: Secret = process.env.JWT_SECRET as Secret;
-    const options: jwt.SignOptions = { expiresIn: ACCESS_TOKEN_TTL as any, algorithm: 'HS256' };
-    return jwt.sign(payload, secret, options);
+function normalizePhoneNumber(phoneNumber: string): string {
+    return sanitizePhoneNumber(phoneNumber);
+}
+
+function signAccessToken(payload: { userId: string; phoneNumber: string }): string {
+    const options: jwt.SignOptions = {
+        expiresIn: ACCESS_TOKEN_TTL,
+        algorithm: 'HS256',
+    };
+
+    return jwt.sign(payload, config.jwtSecret, options);
 }
 
 function generateRefreshToken(): string {
@@ -57,168 +47,135 @@ function getRefreshExpiryDate(): Date {
     return expiry;
 }
 
-function setRefreshCookie(res: express.Response, refreshToken: string) {
-    const isProd = process.env.NODE_ENV === 'production';
+function setRefreshCookie(res: express.Response, refreshToken: string): void {
     res.cookie('refreshToken', refreshToken, {
         httpOnly: true,
-        secure: isProd,
+        secure: config.isProduction,
         sameSite: 'lax',
         expires: getRefreshExpiryDate(),
-        path: '/'
+        path: '/',
     });
 }
 
-// Rate limiting configuration
-const isProd = process.env.NODE_ENV === 'production';
-const authRateLimit = isProd ? 5 : 100; // For verify-code and refresh
-const requestCodeRateLimit = isProd ? 3 : 100; // Stricter for initial request
+const authRateLimit = config.isProduction ? 5 : 100;
+const requestCodeRateLimit = config.isProduction ? 3 : 100;
 
-// Request code (send code to user)
 router.post('/request-code', rateLimiter(requestCodeRateLimit, 15 * 60 * 1000), asyncHandler(async (req: express.Request, res: express.Response) => {
     const { phoneNumber } = req.body;
 
-    if (!phoneNumber) {
-        throw new ValidationError("What's your number?");
-    }
-
-    // Validate phone number format (basic validation)
     if (typeof phoneNumber !== 'string' || phoneNumber.trim().length === 0) {
         throw new ValidationError("What's your number?");
     }
 
-    // Normalize phone number (remove spaces, dashes, etc.)
     const normalizedPhone = normalizePhoneNumber(phoneNumber);
 
-    // Validate phone number format
     if (!validatePhoneNumber(normalizedPhone)) {
         throw new ValidationError("That doesn't look like a valid number. Try again?");
     }
 
-    // Generate a 6-digit code
     const code = Math.floor(100000 + Math.random() * 900000).toString();
-
-    // Code expires in CODE_EXPIRY_MINUTES minutes
     const codeExpiresAt = new Date();
     codeExpiresAt.setMinutes(codeExpiresAt.getMinutes() + CODE_EXPIRY_MINUTES);
     const codeSentAt = new Date();
 
-    // Find or create user and set code
-    let user = await User.findOne({ phoneNumber: normalizedPhone });
+    const user = await User.findOneAndUpdate(
+        { phoneNumber: normalizedPhone },
+        {
+            $set: {
+                code,
+                codeExpiresAt,
+                codeSentAt,
+            },
+            $setOnInsert: {
+                phoneNumber: normalizedPhone,
+            },
+        },
+        {
+            upsert: true,
+            new: true,
+            setDefaultsOnInsert: true,
+        }
+    );
+
     if (!user) {
-        user = await User.create({
-            phoneNumber: normalizedPhone,
-            code,
-            codeExpiresAt,
-            codeSentAt
-        });
-    } else {
-        user.code = code;
-        user.codeExpiresAt = codeExpiresAt;
-        user.codeSentAt = codeSentAt;
-        await user.save();
+        throw new Error('Failed to create or update user for OTP request');
     }
 
-    // In production, send code via SMS here
-    // For now, return code in response for testing (TODO: Remove in production)
     res.json({
         message: 'Verification code sent',
         code,
-        codeSentAt: codeSentAt.getTime()
+        codeSentAt: codeSentAt.getTime(),
     });
 }));
 
-// Verify code and get JWT
 router.post('/verify-code', rateLimiter(authRateLimit, 15 * 60 * 1000), asyncHandler(async (req: express.Request, res: express.Response) => {
     const { phoneNumber, code } = req.body;
+
     if (!phoneNumber || !code) {
-        throw new ValidationError("We need both your number and the code.");
+        throw new ValidationError('We need both your number and the code.');
     }
 
-    // Validate phone number format (basic validation)
     if (typeof phoneNumber !== 'string' || phoneNumber.trim().length === 0) {
         throw new ValidationError("What's your number?");
     }
 
-    // Validate code format (must be 6 digits)
     if (typeof code !== 'string' || !/^[0-9]{6}$/.test(code)) {
         throw new ValidationError("That code doesn't look complete. Try again?");
     }
 
-    // Normalize phone number (same as in request-code)
     const normalizedPhone = normalizePhoneNumber(phoneNumber);
-
     const user = await User.findOne({ phoneNumber: normalizedPhone });
 
-    // Check if user exists
     if (!user) {
         throw new UnauthorizedError("That code doesn't look right. Try again?");
     }
 
-    // Check if code exists and hasn't expired
     if (!user.code || !user.codeExpiresAt) {
-        throw new UnauthorizedError("No code found. Request a new one?");
+        throw new UnauthorizedError('No code found. Request a new one?');
     }
 
     const now = new Date();
     if (user.codeExpiresAt < now) {
-        // Code expired, clear it
         user.code = undefined;
         user.codeExpiresAt = undefined;
         await user.save();
-        throw new UnauthorizedError("That code expired. Request a new one?");
+        throw new UnauthorizedError('That code expired. Request a new one?');
     }
 
-    // Verify code matches
     if (user.code !== code) {
         throw new UnauthorizedError("That code doesn't look right. Try again?");
     }
 
-    // Clear the code after successful verification
     user.code = undefined;
     user.codeExpiresAt = undefined;
-    // Update last login timestamp only on successful authentication
-    user.lastLogin = new Date();
-    await user.save();
-
-    // Issue access token and refresh token (rotated)
-    const payload = { phoneNumber: user.phoneNumber, userId: user._id.toString() };
-    const accessToken = signAccessToken(payload);
+    user.lastLogin = now;
 
     const refreshToken = generateRefreshToken();
     user.refreshTokenHash = hashRefreshToken(refreshToken);
     user.refreshTokenExpiresAt = getRefreshExpiryDate();
     await user.save();
 
+    const payload = { phoneNumber: user.phoneNumber, userId: user._id.toString() };
+    const accessToken = signAccessToken(payload);
+
     setRefreshCookie(res, refreshToken);
 
-    // Check if user needs to set username
     const requiresUsername = !user.username || user.username.trim().length === 0;
-
     res.json({
         token: accessToken,
-        requiresUsername
+        requiresUsername,
     });
 }));
-
-// Resend code (with 1-minute cooldown)
-const RESEND_COOLDOWN_MS = 60 * 1000; // 1 minute
 
 router.post('/resend-code', rateLimiter(requestCodeRateLimit, 15 * 60 * 1000), asyncHandler(async (req: express.Request, res: express.Response) => {
     const { phoneNumber } = req.body;
 
-    if (!phoneNumber) {
-        throw new ValidationError("What's your number?");
-    }
-
-    // Validate phone number format (basic validation)
     if (typeof phoneNumber !== 'string' || phoneNumber.trim().length === 0) {
         throw new ValidationError("What's your number?");
     }
 
-    // Normalize phone number (remove spaces, dashes, etc.)
     const normalizedPhone = normalizePhoneNumber(phoneNumber);
 
-    // Validate phone number format
     if (!validatePhoneNumber(normalizedPhone)) {
         throw new ValidationError("That doesn't look like a valid number. Try again?");
     }
@@ -228,7 +185,6 @@ router.post('/resend-code', rateLimiter(requestCodeRateLimit, 15 * 60 * 1000), a
         throw new NotFoundError('User not found');
     }
 
-    // Check if code was sent recently (within 1 minute)
     const now = new Date();
     if (user.codeSentAt) {
         const timeSinceLastSent = now.getTime() - user.codeSentAt.getTime();
@@ -238,47 +194,41 @@ router.post('/resend-code', rateLimiter(requestCodeRateLimit, 15 * 60 * 1000), a
         }
     }
 
-    // Generate a new 6-digit code
     const code = Math.floor(100000 + Math.random() * 900000).toString();
-
-    // Code expires in CODE_EXPIRY_MINUTES minutes
     const codeExpiresAt = new Date();
     codeExpiresAt.setMinutes(codeExpiresAt.getMinutes() + CODE_EXPIRY_MINUTES);
     const codeSentAt = new Date();
 
-    // Update user with new code
     user.code = code;
     user.codeExpiresAt = codeExpiresAt;
     user.codeSentAt = codeSentAt;
     await user.save();
 
-    // In production, send code via SMS here
-    // For now, return code in response for testing (TODO: Remove in production)
     res.json({
         message: 'Verification code resent',
         code,
-        codeSentAt: codeSentAt.getTime()
+        codeSentAt: codeSentAt.getTime(),
     });
 }));
 
-// Example protected route
 router.get('/me', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
     const user = await User.findOne({ phoneNumber: req.user?.phoneNumber });
     if (!user) {
         throw new NotFoundError('User not found', ErrorCode.USER_NOT_FOUND);
     }
+
     res.json({
+        id: user._id.toString(),
         phoneNumber: user.phoneNumber,
         username: user.username,
         bio: user.bio,
         profileImageUrl: user.profileImageUrl,
-        createdAt: user.createdAt,
-        updatedAt: user.updatedAt,
-        lastLogin: user.lastLogin
+        createdAt: user.createdAt.getTime(),
+        updatedAt: user.updatedAt.getTime(),
+        lastLogin: user.lastLogin.getTime(),
     });
 }));
 
-// Exchange refresh token for a new access token (and rotate refresh)
 router.post('/refresh', rateLimiter(authRateLimit, 15 * 60 * 1000), asyncHandler(async (req: express.Request, res: express.Response) => {
     const { refreshToken } = req.cookies || {};
 
@@ -289,9 +239,6 @@ router.post('/refresh', rateLimiter(authRateLimit, 15 * 60 * 1000), asyncHandler
 
     const hashed = hashRefreshToken(refreshToken);
     const now = new Date();
-
-    // Atomically find and update the user with the matching refresh token hash
-    // This prevents race conditions when multiple refresh requests occur simultaneously
     const newRefresh = generateRefreshToken();
     const newRefreshHash = hashRefreshToken(newRefresh);
     const newExpiry = getRefreshExpiryDate();
@@ -299,15 +246,15 @@ router.post('/refresh', rateLimiter(authRateLimit, 15 * 60 * 1000), asyncHandler
     const user = await User.findOneAndUpdate(
         {
             refreshTokenHash: hashed,
-            refreshTokenExpiresAt: { $gt: now } // Ensure token hasn't expired
+            refreshTokenExpiresAt: { $gt: now },
         },
         {
             $set: {
                 refreshTokenHash: newRefreshHash,
-                refreshTokenExpiresAt: newExpiry
-            }
+                refreshTokenExpiresAt: newExpiry,
+            },
         },
-        { new: true } // Return the updated document
+        { new: true }
     );
 
     if (!user) {
@@ -323,50 +270,34 @@ router.post('/refresh', rateLimiter(authRateLimit, 15 * 60 * 1000), asyncHandler
     res.json({ token: accessToken });
 }));
 
-// Check username availability
 router.post('/check-username', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
     const { username } = req.body;
 
-    if (!username) {
-        throw new ValidationError("How should we call you?");
-    }
-
     if (typeof username !== 'string' || username.trim().length === 0) {
-        throw new ValidationError("How should we call you?");
+        throw new ValidationError('How should we call you?');
     }
 
-    const normalizedUsername = username.trim().toLowerCase();
+    const normalizedUsername = sanitizeUsername(username);
 
-    // Validate username format
     if (!/^[a-z0-9_]{3,30}$/.test(normalizedUsername)) {
         res.json({ available: false });
         return;
     }
 
-    // Check if username is already taken
-    const existingUser = await User.findOne({ username: normalizedUsername });
-    const available = !existingUser;
-
-    res.json({ available });
+    const existingUser = await User.findOne({ username: normalizedUsername }).select('_id').lean();
+    res.json({ available: !existingUser });
 }));
 
-// Set username (only allowed if user doesn't have one yet)
 router.post('/set-username', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
     const { username } = req.body;
 
-    if (!username) {
-        throw new ValidationError("How should we call you?");
-    }
-
     if (typeof username !== 'string' || username.trim().length === 0) {
-        throw new ValidationError("How should we call you?");
+        throw new ValidationError('How should we call you?');
     }
 
-    const normalizedUsername = username.trim().toLowerCase();
-
-    // Validate username format
+    const normalizedUsername = sanitizeUsername(username);
     if (!/^[a-z0-9_]{3,30}$/.test(normalizedUsername)) {
-        throw new ValidationError("Keep it simple: 3-30 characters, just letters, numbers, and underscores.");
+        throw new ValidationError('Keep it simple: 3-30 characters, just letters, numbers, and underscores.');
     }
 
     const user = await User.findOne({ phoneNumber: req.user?.phoneNumber });
@@ -374,18 +305,15 @@ router.post('/set-username', authenticateUser, asyncHandler(async (req: AuthRequ
         throw new NotFoundError('User not found', ErrorCode.USER_NOT_FOUND);
     }
 
-    // Check if user already has a username
     if (user.username && user.username.trim().length > 0) {
         throw new ValidationError("You've already set your username and can't change it.");
     }
 
-    // Check if username is already taken
-    const existingUser = await User.findOne({ username: normalizedUsername });
+    const existingUser = await User.findOne({ username: normalizedUsername }).select('_id').lean();
     if (existingUser) {
         throw new ValidationError("That username's taken. Try another one?");
     }
 
-    // Set username
     user.username = normalizedUsername;
     user.updatedAt = new Date();
     await user.save();
@@ -395,18 +323,16 @@ router.post('/set-username', authenticateUser, asyncHandler(async (req: AuthRequ
         username: user.username,
         bio: user.bio,
         profileImageUrl: user.profileImageUrl,
-        createdAt: user.createdAt,
-        updatedAt: user.updatedAt,
-        lastLogin: user.lastLogin
+        createdAt: user.createdAt.getTime(),
+        updatedAt: user.updatedAt.getTime(),
+        lastLogin: user.lastLogin.getTime(),
     });
 }));
 
-// Logout: clear refresh token cookie and invalidate stored hash
 router.post('/logout', asyncHandler(async (req: express.Request, res: express.Response) => {
     const { refreshToken } = req.cookies || {};
     if (refreshToken) {
         const hashed = hashRefreshToken(refreshToken);
-        // Use $unset to properly remove fields from MongoDB document
         await User.findOneAndUpdate(
             { refreshTokenHash: hashed },
             { $unset: { refreshTokenHash: '', refreshTokenExpiresAt: '' } }
