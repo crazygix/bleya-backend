@@ -18,6 +18,11 @@ interface AuthenticatedSocket {
     roomId?: string;
 }
 
+// Number of top-level messages to load per page when joining a room
+// and when fetching older history via pagination.
+// Kept at 50 for now to keep initial payloads small
+const ROOM_MESSAGES_PAGE_SIZE = 50;
+
 export function setupSocketIO(server: HTTPServer) {
     const io = new SocketIOServer(server, {
         cors: buildSocketCors(),
@@ -102,22 +107,30 @@ export function setupSocketIO(server: HTTPServer) {
                 socket.join(roomId);
                 user.roomId = roomId;
 
-                // Get recent top-level messages only (last 50, excluding thread replies)
-                const messages = await Message.find({
+                // Get recent top-level messages only (excluding thread replies),
+                // using a fixed page size and reporting if more history exists.
+                const rawMessages = await Message.find({
                     roomId,
-                    parentMessageId: null // Only fetch top-level messages, not thread replies
+                    parentMessageId: null, // Only fetch top-level messages, not thread replies
                 })
                     .sort({ createdAt: -1 })
-                    .limit(50)
+                    .limit(ROOM_MESSAGES_PAGE_SIZE + 1) // Fetch one extra to detect hasMore
                     .lean();
 
-                // Fetch usernames for all unique user IDs
-                const userIds = [...new Set(messages.map((msg: any) => msg.userId))];
-                const users = await User.find({ _id: { $in: userIds } }).lean();
-                const usernameMap = new Map(users.map((u: any) => [u._id.toString(), u.username || '']));
+                const hasMore = rawMessages.length > ROOM_MESSAGES_PAGE_SIZE;
+                const pageMessages = hasMore
+                    ? rawMessages.slice(0, ROOM_MESSAGES_PAGE_SIZE)
+                    : rawMessages;
 
-                // Format messages for client
-                const formattedMessages = messages.reverse().map((msg: any) => ({
+                // Fetch usernames for all unique user IDs
+                const userIds = [...new Set(pageMessages.map((msg: any) => msg.userId))];
+                const users = await User.find({ _id: { $in: userIds } }).lean();
+                const usernameMap = new Map(
+                    users.map((u: any) => [u._id.toString(), u.username || ''])
+                );
+
+                // Format messages for client (ascending by createdAt)
+                const formattedMessages = pageMessages.reverse().map((msg: any) => ({
                     id: msg._id.toString(),
                     roomId: msg.roomId.toString(),
                     userId: msg.userId,
@@ -127,6 +140,12 @@ export function setupSocketIO(server: HTTPServer) {
                     parentMessageId: msg.parentMessageId?.toString() || null,
                     replyCount: msg.replyCount || 0,
                 }));
+
+                // Determine cursor for loading older history (based on oldest message)
+                const nextCursor =
+                    formattedMessages.length > 0
+                        ? formattedMessages[0].createdAt
+                        : null;
 
                 // Prepare room info
                 let roomName = room.name;
@@ -154,6 +173,10 @@ export function setupSocketIO(server: HTTPServer) {
                         otherUserId: otherUserId,
                     },
                     messages: formattedMessages,
+                    pagination: {
+                        hasMore,
+                        nextCursor,
+                    },
                 });
 
                 // Notify others in the room

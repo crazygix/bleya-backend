@@ -233,6 +233,92 @@ router.post('/:roomId/join', authenticateUser, asyncHandler(async (req: AuthRequ
     });
 }));
 
+// Get paginated top-level messages for a specific room
+router.get('/:roomId/messages', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
+    const { roomId } = req.params;
+    const { before, limit } = req.query;
+
+    // Validate room ID format
+    if (!roomId.match(/^[0-9a-fA-F]{24}$/)) {
+        throw new ValidationError('Invalid room ID format');
+    }
+
+    // Verify room exists (keeps error messages consistent with other routes)
+    const room = await Room.findById(roomId);
+    if (!room) {
+        throw new NotFoundError('Room not found', ErrorCode.ROOM_NOT_FOUND);
+    }
+
+    // Determine page size with a sensible upper bound
+    const DEFAULT_PAGE_SIZE = 50;
+    const MAX_PAGE_SIZE = 100;
+    let pageSize = DEFAULT_PAGE_SIZE;
+
+    if (typeof limit === 'string') {
+        const parsedLimit = Number.parseInt(limit, 10);
+        if (!Number.isNaN(parsedLimit) && parsedLimit > 0) {
+            pageSize = Math.min(parsedLimit, MAX_PAGE_SIZE);
+        }
+    }
+
+    // Build base query for top-level messages only
+    const filter: any = {
+        roomId,
+        parentMessageId: null,
+    };
+
+    if (typeof before === 'string') {
+        const beforeMs = Number(before);
+        if (Number.isNaN(beforeMs)) {
+            throw new ValidationError('Invalid before cursor');
+        }
+        filter.createdAt = { $lt: new Date(beforeMs) };
+    }
+
+    // Fetch one extra message to determine if more history exists
+    const rawMessages = await Message.find(filter)
+        .sort({ createdAt: -1 })
+        .limit(pageSize + 1)
+        .lean();
+
+    const hasMore = rawMessages.length > pageSize;
+    const pageMessages = hasMore ? rawMessages.slice(0, pageSize) : rawMessages;
+
+    // Fetch usernames for all unique user IDs
+    const userIds = [...new Set(pageMessages.map((msg: any) => msg.userId))];
+    const users = await User.find({ _id: { $in: userIds } })
+        .select('_id username')
+        .lean();
+    const usernameMap = new Map(
+        users.map((u: any) => [u._id.toString(), u.username || ''])
+    );
+
+    // Format messages for client (ascending by createdAt)
+    const formattedMessages = pageMessages.reverse().map((msg: any) => ({
+        id: msg._id.toString(),
+        roomId: msg.roomId.toString(),
+        userId: msg.userId,
+        username: usernameMap.get(msg.userId) || '',
+        text: msg.text,
+        createdAt: msg.createdAt.getTime(),
+        parentMessageId: msg.parentMessageId?.toString() || null,
+        replyCount: msg.replyCount || 0,
+    }));
+
+    const nextCursor =
+        formattedMessages.length > 0
+            ? formattedMessages[0].createdAt
+            : null;
+
+    res.json({
+        messages: formattedMessages,
+        pagination: {
+            hasMore,
+            nextCursor,
+        },
+    });
+}));
+
 // Get room members
 router.get('/:roomId/members', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
     const { roomId } = req.params;
