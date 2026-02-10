@@ -172,6 +172,17 @@ router.get('/joined', authenticateUser, asyncHandler(async (req: AuthRequest, re
         };
     });
 
+    // Sort by last message time (newest first). Rooms without messages go last.
+    joinedRooms.sort((a: any, b: any) => {
+        const aTime = a.lastMessageTime
+            ? new Date(a.lastMessageTime).getTime()
+            : 0;
+        const bTime = b.lastMessageTime
+            ? new Date(b.lastMessageTime).getTime()
+            : 0;
+        return bTime - aTime;
+    });
+
     res.json(joinedRooms);
 }));
 
