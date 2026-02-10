@@ -50,6 +50,10 @@ export function setupSocketIO(server: HTTPServer) {
 
         console.log(`User ${user.userId} connected`);
 
+        // Join a per-user room so we can emit cross-room updates (e.g. dashboard)
+        const userRoom = `user:${user.userId}`;
+        socket.join(userRoom);
+
         // Join a room
         socket.on('join_room', async (data: { roomId: string }) => {
             try {
@@ -265,6 +269,32 @@ export function setupSocketIO(server: HTTPServer) {
 
                 // Broadcast to all in the room
                 io.to(user.roomId).emit('new_message', messageData);
+
+                // Emit a lightweight room summary update to all users who joined this room.
+                // The mobile dashboard listens to this to update last message and unread badges.
+                const summaryPayload = {
+                    roomId: messageData.roomId,
+                    lastMessageText: messageData.text,
+                    lastMessageTime: messageData.createdAt,
+                    lastMessageUserId: messageData.userId,
+                    lastMessageUsername: messageData.username,
+                };
+
+                try {
+                    const memberUsers = await User.find({
+                        joinedRooms: new mongoose.Types.ObjectId(user.roomId),
+                    })
+                        .select('_id')
+                        .lean();
+
+                    for (const member of memberUsers) {
+                        const targetUserId = member._id.toString();
+                        const targetRoom = `user:${targetUserId}`;
+                        io.to(targetRoom).emit('room_summary_updated', summaryPayload);
+                    }
+                } catch (err) {
+                    console.error('Error emitting room_summary_updated:', err);
+                }
 
                 console.log(`Message from ${user.userId} in room ${user.roomId}${parentMessageId ? ' (thread reply)' : ''}`);
             } catch (error) {
