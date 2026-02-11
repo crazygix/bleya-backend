@@ -5,6 +5,7 @@ import mongoose from 'mongoose';
 import { Room } from '../models/Room.js';
 import { Message } from '../models/Message.js';
 import { User } from '../models/User.js';
+import { NotificationService } from '../services/NotificationService.js';
 import { buildSocketCors } from '../utils/cors.js';
 import { sanitizePlainText } from '../utils/sanitize.js';
 import { ErrorCode } from '../utils/errors.js';
@@ -401,7 +402,53 @@ export function setupSocketIO(server: HTTPServer) {
                     replyCount: message.replyCount,
                 };
 
+
                 io.to(user.roomId).emit('new_message', messageData);
+
+                // Notify if it's a reply
+                if (parentObjectId) {
+                    try {
+                        const targets = await NotificationService.createReplyNotification({
+                            senderId: message.userId.toString(),
+                            roomId: message.roomId.toString(),
+                            parentMessageId: parentObjectId.toString(),
+                            replyMessageId: message._id.toString(),
+                        });
+
+                        for (const target of targets) {
+                            // Populate sender info before emitting
+                            const populatedNotification = await target.notification.populate({
+                                path: 'sender',
+                                select: 'username profileImageUrl',
+                            });
+
+                            // Convert to plain object with sender populated
+                            const notificationData = {
+                                _id: populatedNotification._id.toString(),
+                                recipient: populatedNotification.recipient.toString(),
+                                sender: {
+                                    id: populatedNotification.sender._id.toString(),
+                                    username: (populatedNotification.sender as any).username || 'Unknown',
+                                    profileImageUrl: (populatedNotification.sender as any).profileImageUrl || null,
+                                },
+                                type: populatedNotification.type,
+                                room: populatedNotification.room.toString(),
+                                message: populatedNotification.message.toString(),
+                                thread: populatedNotification.thread.toString(),
+                                read: populatedNotification.read,
+                                createdAt: populatedNotification.createdAt.toISOString(),
+                                updatedAt: populatedNotification.updatedAt.toISOString(),
+                            };
+
+                            io.to(`user:${target.userId}`).emit('new_notification', notificationData);
+                        }
+                    } catch (err) {
+                        logger.error('socket.notification.failed', {
+                            error: err instanceof Error ? err.message : String(err),
+                            messageId: message._id.toString(),
+                        });
+                    }
+                }
 
                 // Room-level summaries intentionally track top-level messages only.
                 if (!parentObjectId) {

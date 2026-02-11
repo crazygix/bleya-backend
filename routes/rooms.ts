@@ -558,4 +558,35 @@ router.post('/direct/:otherUserId', authenticateUser, asyncHandler(async (req: A
     });
 }));
 
+router.get('/:roomId', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
+    const userId = req.user!.userId;
+    const roomObjectId = validateObjectId(req.params.roomId, 'room ID');
+
+    const room = await Room.findById(roomObjectId).lean<LeanRoom | null>();
+    if (!room) {
+        throw new NotFoundError('Room not found', ErrorCode.ROOM_NOT_FOUND);
+    }
+
+    let roomName = room.name;
+    let otherUserId: string | null = null;
+
+    if (room.type === 'private' && room.participants) {
+        const otherParticipant = room.participants.find((id) => id.toString() !== userId);
+        if (otherParticipant) {
+            const participantIdStr = otherParticipant.toString();
+            const otherUser = await User.findById(participantIdStr).select('username').lean<LeanUser | null>();
+            roomName = otherUser?.username || 'Unknown User';
+            otherUserId = participantIdStr;
+        }
+    }
+
+    res.json({
+        id: room._id.toString(),
+        name: roomName,
+        type: room.type || 'public',
+        participants: (room.participants || []).map((participant) => participant.toString()),
+        otherUserId,
+    });
+}));
+
 export default router;

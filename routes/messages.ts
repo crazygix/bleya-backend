@@ -77,4 +77,30 @@ router.get('/:messageId/thread', authenticateUser, asyncHandler(async (req: Auth
     });
 }));
 
+router.get('/:messageId', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
+    const { messageId } = req.params;
+
+    if (!messageId.match(/^[0-9a-fA-F]{24}$/)) {
+        throw new ValidationError('Invalid message ID format');
+    }
+
+    const message = await Message.findById(messageId).lean<LeanMessage | null>();
+    if (!message) {
+        throw new NotFoundError('Message not found', ErrorCode.ROOM_NOT_FOUND);
+    }
+
+    const user = await User.findById(message.userId).select('_id username').lean<LeanUser | null>();
+
+    res.json({
+        id: message._id.toString(),
+        roomId: message.roomId.toString(),
+        userId: message.userId.toString(),
+        username: user?.username || '',
+        text: message.text,
+        createdAt: message.createdAt.getTime(),
+        parentMessageId: message.parentMessageId?.toString() || null,
+        replyCount: message.replyCount || 0,
+    });
+}));
+
 export default router;
