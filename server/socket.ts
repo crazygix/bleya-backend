@@ -29,12 +29,20 @@ interface SocketDataState {
 
 type SocketWithState = Socket & { data: SocketDataState };
 
+interface GeoPoint {
+    type?: 'Point';
+    coordinates?: number[];
+}
+
 interface LeanRoom {
     _id: mongoose.Types.ObjectId;
     name: string;
     description?: string;
     type?: 'public' | 'private';
     participants?: mongoose.Types.ObjectId[];
+    cityKey?: string;
+    imageUrl?: string;
+    geo?: GeoPoint;
 }
 
 interface LeanMessage {
@@ -50,6 +58,7 @@ interface LeanMessage {
 interface LeanUser {
     _id: mongoose.Types.ObjectId;
     username?: string;
+    profileImageUrl?: string;
 }
 
 interface RoomReadPointer {
@@ -136,6 +145,20 @@ function getSocketUser(socket: SocketWithState): AuthenticatedSocket {
     }
 
     return user;
+}
+
+function toRoomLocation(room: { geo?: GeoPoint }): { latitude: number; longitude: number } | null {
+    const coordinates = room.geo?.coordinates;
+    if (!coordinates || coordinates.length < 2) {
+        return null;
+    }
+
+    const [longitude, latitude] = coordinates;
+    if (!Number.isFinite(longitude) || !Number.isFinite(latitude)) {
+        return null;
+    }
+
+    return { latitude, longitude };
 }
 
 export function setupSocketIO(server: HTTPServer) {
@@ -283,16 +306,18 @@ export function setupSocketIO(server: HTTPServer) {
 
                 let roomName = room.name;
                 let otherUserId: string | null = null;
+                let imageUrl: string | null = room.imageUrl || null;
 
                 if ((room.type || 'public') === 'private' && room.participants) {
                     const otherParticipant = room.participants.find((id) => id.toString() !== user.userId);
                     if (otherParticipant) {
                         const otherParticipantId = otherParticipant.toString();
                         const otherUser = await User.findById(otherParticipantId)
-                            .select('username')
+                            .select('username profileImageUrl')
                             .lean<LeanUser | null>();
 
                         roomName = otherUser?.username || 'Unknown User';
+                        imageUrl = otherUser?.profileImageUrl || null;
                         otherUserId = otherParticipantId;
                     }
                 }
@@ -303,6 +328,9 @@ export function setupSocketIO(server: HTTPServer) {
                         name: roomName,
                         description: room.description,
                         type: room.type || 'public',
+                        cityKey: room.cityKey || null,
+                        imageUrl,
+                        location: toRoomLocation(room),
                         participants: (room.participants || []).map((participant) => participant.toString()),
                         otherUserId,
                     },

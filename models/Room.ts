@@ -22,6 +22,45 @@ const roomSchema = new mongoose.Schema({
         type: String, // Unique identifier for private chats (sorted participant IDs joined)
         sparse: true, // Only for private chats
     },
+    cityKey: {
+        type: String,
+        trim: true,
+        lowercase: true,
+        sparse: true,
+    },
+    imageUrl: {
+        type: String,
+        default: '',
+    },
+    geo: {
+        type: {
+            type: String,
+            enum: ['Point'],
+        },
+        coordinates: {
+            type: [Number],
+            validate: {
+                validator: function (coords: number[] | undefined): boolean {
+                    if (!coords || coords.length === 0) {
+                        return true;
+                    }
+
+                    if (coords.length !== 2) {
+                        return false;
+                    }
+
+                    const [longitude, latitude] = coords;
+                    return Number.isFinite(longitude)
+                        && Number.isFinite(latitude)
+                        && longitude >= -180
+                        && longitude <= 180
+                        && latitude >= -90
+                        && latitude <= 90;
+                },
+                message: 'Geo coordinates must be [longitude, latitude]',
+            },
+        },
+    },
 }, {
     timestamps: true, // Automatically adds createdAt and updatedAt fields
 });
@@ -32,5 +71,17 @@ roomSchema.index({ name: 1, type: 1 }, { unique: true, sparse: true, partialFilt
 // Unique index for private rooms by participantsHash (ensures only one DM between two users)
 // This properly prevents duplicate DMs unlike indexing the array field directly
 roomSchema.index({ participantsHash: 1, type: 1 }, { unique: true, sparse: true, partialFilterExpression: { type: 'private' } });
+
+// Stable unique identity for public city rooms discovered from external providers
+roomSchema.index(
+    { cityKey: 1, type: 1 },
+    { unique: true, sparse: true, partialFilterExpression: { type: 'public', cityKey: { $type: 'string' } } }
+);
+
+// Enables geo-radius lookups for nearby public city rooms
+roomSchema.index(
+    { geo: '2dsphere' },
+    { sparse: true, partialFilterExpression: { type: 'public', 'geo.type': 'Point' } }
+);
 
 export const Room = mongoose.model('Room', roomSchema);

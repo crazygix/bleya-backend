@@ -4,8 +4,10 @@ import { authenticateUser, AuthRequest } from '../middleware/auth.js';
 import { Room } from '../models/Room.js';
 import { User } from '../models/User.js';
 import { Message } from '../models/Message.js';
+import { discoverNearbyCities } from '../services/cityDiscoveryService.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { NotFoundError, ValidationError, ErrorCode } from '../utils/errors.js';
+import logger from '../utils/logger.js';
 
 const router = express.Router();
 
@@ -13,12 +15,23 @@ const OBJECT_ID_REGEX = /^[0-9a-fA-F]{24}$/;
 const MAX_PUBLIC_ROOMS = 5;
 const DEFAULT_PAGE_SIZE = 50;
 const MAX_PAGE_SIZE = 100;
+const FIXED_DISCOVERY_RADIUS_KM = 30;
+const DEFAULT_DISCOVERY_LIMIT = 20;
+const MAX_DISCOVERY_LIMIT = 50;
+
+interface GeoPoint {
+    type?: 'Point';
+    coordinates?: number[];
+}
 
 interface LeanRoom {
     _id: mongoose.Types.ObjectId;
     name: string;
     type?: 'public' | 'private';
     participants?: mongoose.Types.ObjectId[];
+    cityKey?: string;
+    imageUrl?: string;
+    geo?: GeoPoint;
 }
 
 interface LeanMessage {
@@ -55,12 +68,263 @@ interface LastMessageAgg {
     lastMessageUserId?: mongoose.Types.ObjectId;
 }
 
+interface NearbyRoomAgg {
+    _id: mongoose.Types.ObjectId;
+    name: string;
+    type?: 'public' | 'private';
+    cityKey?: string;
+    imageUrl?: string;
+    geo?: GeoPoint;
+    distanceMeters: number;
+}
+
 function validateObjectId(id: string, fieldName: string): mongoose.Types.ObjectId {
     if (!OBJECT_ID_REGEX.test(id)) {
         throw new ValidationError(`Invalid ${fieldName} format`);
     }
     return new mongoose.Types.ObjectId(id);
 }
+
+function parseCoordinate(value: unknown, fieldName: string): number {
+    if (typeof value !== 'string') {
+        throw new ValidationError(`${fieldName} is required.`);
+    }
+
+    const parsed = Number.parseFloat(value);
+    if (!Number.isFinite(parsed)) {
+        throw new ValidationError(`${fieldName} must be a number.`);
+    }
+
+    return parsed;
+}
+
+function parseLimit(value: unknown, defaultValue: number, min: number, max: number): number {
+    if (typeof value !== 'string' || value.trim().length === 0) {
+        return defaultValue;
+    }
+
+    const parsed = Number.parseInt(value, 10);
+    if (!Number.isInteger(parsed)) {
+        throw new ValidationError('limit must be an integer.');
+    }
+
+    if (parsed < min || parsed > max) {
+        throw new ValidationError(`limit must be between ${min} and ${max}.`);
+    }
+
+    return parsed;
+}
+
+function toRoomLocation(room: { geo?: GeoPoint }): { latitude: number; longitude: number } | null {
+    const coordinates = room.geo?.coordinates;
+    if (!coordinates || coordinates.length < 2) {
+        return null;
+    }
+
+    const [longitude, latitude] = coordinates;
+    if (!Number.isFinite(longitude) || !Number.isFinite(latitude)) {
+        return null;
+    }
+
+    return { latitude, longitude };
+}
+
+function toRadians(value: number): number {
+    return value * (Math.PI / 180);
+}
+
+function distanceInKm(
+    fromLatitude: number,
+    fromLongitude: number,
+    toLatitude: number,
+    toLongitude: number
+): number {
+    const earthRadiusKm = 6371;
+    const deltaLat = toRadians(toLatitude - fromLatitude);
+    const deltaLon = toRadians(toLongitude - fromLongitude);
+
+    const a = Math.sin(deltaLat / 2) * Math.sin(deltaLat / 2)
+        + Math.cos(toRadians(fromLatitude))
+        * Math.cos(toRadians(toLatitude))
+        * Math.sin(deltaLon / 2)
+        * Math.sin(deltaLon / 2);
+
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return earthRadiusKm * c;
+}
+
+router.get('/nearby', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
+    const userId = req.user!.userId;
+    const latitude = parseCoordinate(req.query.latitude ?? req.query.lat, 'latitude');
+    const longitude = parseCoordinate(req.query.longitude ?? req.query.lng, 'longitude');
+
+    if (latitude < -90 || latitude > 90) {
+        throw new ValidationError('latitude must be between -90 and 90.');
+    }
+
+    if (longitude < -180 || longitude > 180) {
+        throw new ValidationError('longitude must be between -180 and 180.');
+    }
+
+    const radiusKm = FIXED_DISCOVERY_RADIUS_KM;
+
+    const limit = parseLimit(req.query.limit, DEFAULT_DISCOVERY_LIMIT, 1, MAX_DISCOVERY_LIMIT);
+    const radiusMeters = Math.round(radiusKm * 1000);
+
+    const user = await User.findById(userId).select('joinedRooms').lean<{ joinedRooms: mongoose.Types.ObjectId[] } | null>();
+    if (!user) {
+        throw new NotFoundError('User not found', ErrorCode.USER_NOT_FOUND);
+    }
+
+    try {
+        const discoveredCities = await discoverNearbyCities({
+            latitude,
+            longitude,
+            radiusKm,
+            limit,
+        });
+
+        if (discoveredCities.length > 0) {
+            await Room.bulkWrite(discoveredCities.map((city) => {
+                const updateSet: Record<string, unknown> = {
+                    cityKey: city.cityKey,
+                    name: city.name,
+                    geo: {
+                        type: 'Point',
+                        coordinates: [city.longitude, city.latitude],
+                    },
+                };
+
+                if (city.imageUrl) {
+                    updateSet.imageUrl = city.imageUrl;
+                }
+
+                return {
+                    updateOne: {
+                        filter: {
+                            type: 'public',
+                            cityKey: city.cityKey,
+                        },
+                        update: {
+                            $set: updateSet,
+                            $setOnInsert: {
+                                type: 'public',
+                            },
+                        },
+                        upsert: true,
+                    },
+                };
+            }), { ordered: false });
+        }
+    } catch (error) {
+        logger.warn('rooms.nearby.discovery_failed', {
+            userId,
+            latitude,
+            longitude,
+            radiusKm,
+            error: error instanceof Error ? error.message : String(error),
+        });
+    }
+
+    let nearbyRooms: NearbyRoomAgg[] = [];
+
+    try {
+        nearbyRooms = await Room.aggregate<NearbyRoomAgg>([
+            {
+                $geoNear: {
+                    near: {
+                        type: 'Point',
+                        coordinates: [longitude, latitude],
+                    },
+                    key: 'geo',
+                    distanceField: 'distanceMeters',
+                    maxDistance: radiusMeters,
+                    spherical: true,
+                    query: { type: 'public' },
+                },
+            },
+            { $limit: limit },
+            {
+                $project: {
+                    _id: 1,
+                    name: 1,
+                    type: 1,
+                    cityKey: 1,
+                    imageUrl: 1,
+                    geo: 1,
+                    distanceMeters: 1,
+                },
+            },
+        ]);
+    } catch (error) {
+        logger.warn('rooms.nearby.geo_query_failed', {
+            userId,
+            latitude,
+            longitude,
+            radiusKm,
+            error: error instanceof Error ? error.message : String(error),
+        });
+
+        const fallbackRooms = await Room.find({
+            type: 'public',
+            'geo.type': 'Point',
+        })
+            .select('_id name type cityKey imageUrl geo')
+            .lean<LeanRoom[]>();
+
+        const fallbackCandidates: Array<NearbyRoomAgg | null> = fallbackRooms
+            .map((room): NearbyRoomAgg | null => {
+                const roomLocation = toRoomLocation(room);
+                if (!roomLocation) {
+                    return null;
+                }
+
+                const roomDistanceKm = distanceInKm(
+                    latitude,
+                    longitude,
+                    roomLocation.latitude,
+                    roomLocation.longitude
+                );
+
+                if (roomDistanceKm > radiusKm) {
+                    return null;
+                }
+
+                return {
+                    _id: room._id,
+                    name: room.name,
+                    type: room.type,
+                    cityKey: room.cityKey,
+                    imageUrl: room.imageUrl,
+                    geo: room.geo,
+                    distanceMeters: roomDistanceKm * 1000,
+                };
+            });
+
+        nearbyRooms = fallbackCandidates
+            .filter((room): room is NearbyRoomAgg => room !== null)
+            .sort((a, b) => a.distanceMeters - b.distanceMeters)
+            .slice(0, limit);
+    }
+
+    const joinedRoomIds = new Set(user.joinedRooms.map((roomId) => roomId.toString()));
+
+    res.json({
+        rooms: nearbyRooms.map((room) => {
+            const roomLocation = toRoomLocation(room);
+            return {
+                id: room._id.toString(),
+                name: room.name,
+                type: room.type || 'public',
+                cityKey: room.cityKey || null,
+                imageUrl: room.imageUrl || null,
+                location: roomLocation,
+                distanceKm: Number((room.distanceMeters / 1000).toFixed(2)),
+                isJoined: joinedRoomIds.has(room._id.toString()),
+            };
+        }),
+    });
+}));
 
 router.get('/', authenticateUser, asyncHandler(async (_req: AuthRequest, res: express.Response) => {
     const rooms = await Room.find({ type: 'public' })
@@ -71,6 +335,9 @@ router.get('/', authenticateUser, asyncHandler(async (_req: AuthRequest, res: ex
         id: room._id.toString(),
         name: room.name,
         type: room.type || 'public',
+        cityKey: room.cityKey || null,
+        imageUrl: room.imageUrl || null,
+        location: toRoomLocation(room),
     })));
 }));
 
@@ -175,7 +442,7 @@ router.get('/joined', authenticateUser, asyncHandler(async (req: AuthRequest, re
     const joinedRooms = rooms.map((room) => {
         let roomName = room.name;
         let otherUserId: string | null = null;
-        let imageUrl: string | null = null;
+        let imageUrl: string | null = room.imageUrl || null;
 
         if (room.type === 'private' && room.participants) {
             const otherParticipant = room.participants.find((id) => id.toString() !== userId);
@@ -191,14 +458,17 @@ router.get('/joined', authenticateUser, asyncHandler(async (req: AuthRequest, re
         const lastMessage = lastMessageMap.get(room._id.toString());
         const lastMessageTime = lastMessage?.lastMessageTime ? lastMessage.lastMessageTime.getTime() : null;
         const lastMessageUserId = lastMessage?.lastMessageUserId?.toString() || null;
+        const roomLocation = toRoomLocation(room);
 
         return {
             id: room._id.toString(),
             name: roomName,
             type: room.type || 'public',
+            cityKey: room.cityKey || null,
             participants: (room.participants || []).map((participant) => participant.toString()),
             otherUserId,
             imageUrl,
+            location: roomLocation,
             lastMessageText: lastMessage?.lastMessageText || null,
             lastMessageTime,
             lastMessageUserId,
@@ -220,10 +490,19 @@ router.post('/:roomId/join', authenticateUser, asyncHandler(async (req: AuthRequ
     const userId = req.user!.userId;
     const roomObjectId = validateObjectId(req.params.roomId, 'room ID');
 
-    const room = await Room.findById(roomObjectId).select('_id name type').lean<Pick<LeanRoom, '_id' | 'name' | 'type'> | null>();
+    const room = await Room.findById(roomObjectId).select('_id name type imageUrl cityKey geo').lean<LeanRoom | null>();
     if (!room) {
         throw new NotFoundError('Room not found', ErrorCode.ROOM_NOT_FOUND);
     }
+
+    const roomSummary = {
+        id: room._id.toString(),
+        name: room.name,
+        type: room.type || 'public',
+        cityKey: room.cityKey || null,
+        imageUrl: room.imageUrl || null,
+        location: toRoomLocation(room),
+    };
 
     const user = await User.findById(userId).select('joinedRooms').lean<{ joinedRooms: mongoose.Types.ObjectId[] } | null>();
     if (!user) {
@@ -234,10 +513,7 @@ router.post('/:roomId/join', authenticateUser, asyncHandler(async (req: AuthRequ
     if (alreadyJoined) {
         res.json({
             message: 'Already joined this room',
-            room: {
-                id: room._id.toString(),
-                name: room.name,
-            },
+            room: roomSummary,
         });
         return;
     }
@@ -261,10 +537,7 @@ router.post('/:roomId/join', authenticateUser, asyncHandler(async (req: AuthRequ
     if (addResult.modifiedCount === 0) {
         res.json({
             message: 'Already joined this room',
-            room: {
-                id: room._id.toString(),
-                name: room.name,
-            },
+            room: roomSummary,
         });
         return;
     }
@@ -291,10 +564,7 @@ router.post('/:roomId/join', authenticateUser, asyncHandler(async (req: AuthRequ
 
     res.json({
         message: 'Successfully joined room',
-        room: {
-            id: room._id.toString(),
-            name: room.name,
-        },
+        room: roomSummary,
     });
 }));
 
@@ -574,7 +844,7 @@ router.get('/:roomId', authenticateUser, asyncHandler(async (req: AuthRequest, r
 
     let roomName = room.name;
     let otherUserId: string | null = null;
-    let imageUrl: string | null = null;
+    let imageUrl: string | null = room.imageUrl || null;
 
     if (room.type === 'private' && room.participants) {
         const otherParticipant = room.participants.find((id) => id.toString() !== userId);
@@ -591,7 +861,9 @@ router.get('/:roomId', authenticateUser, asyncHandler(async (req: AuthRequest, r
         id: room._id.toString(),
         name: roomName,
         type: room.type || 'public',
+        cityKey: room.cityKey || null,
         imageUrl,
+        location: toRoomLocation(room),
         participants: (room.participants || []).map((participant) => participant.toString()),
         otherUserId,
     });
