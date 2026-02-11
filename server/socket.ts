@@ -264,8 +264,8 @@ export function setupSocketIO(server: HTTPServer) {
                     replyCount: msg.replyCount || 0,
                 }));
 
-                const nextCursor = formattedMessages.length > 0
-                    ? formattedMessages[0].createdAt + 1
+                const nextCursor = pageMessages.length > 0
+                    ? `${pageMessages[pageMessages.length - 1].createdAt.getTime()}_${pageMessages[pageMessages.length - 1]._id.toString()}`
                     : null;
 
                 let lastReadAt: number | null = null;

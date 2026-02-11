@@ -314,6 +314,7 @@ router.get('/:roomId/messages', authenticateUser, asyncHandler(async (req: AuthR
     const filter: {
         roomId: mongoose.Types.ObjectId;
         parentMessageId: null;
+        $or?: Array<{ createdAt: { $lt: Date } } | { createdAt: Date; _id: { $lt: mongoose.Types.ObjectId } }>;
         createdAt?: { $lt: Date };
     } = {
         roomId: roomObjectId,
@@ -321,11 +322,22 @@ router.get('/:roomId/messages', authenticateUser, asyncHandler(async (req: AuthR
     };
 
     if (typeof before === 'string') {
-        const beforeMs = Number(before);
-        if (Number.isNaN(beforeMs)) {
-            throw new ValidationError('Invalid before cursor');
+        const [timestampStr, idStr] = before.split('_');
+        const timestamp = Number(timestampStr);
+
+        if (!Number.isNaN(timestamp)) {
+            const beforeDate = new Date(timestamp);
+            if (idStr && OBJECT_ID_REGEX.test(idStr)) {
+                // Compound cursor: fetched messages before (timestamp, id)
+                filter.$or = [
+                    { createdAt: { $lt: beforeDate } },
+                    { createdAt: beforeDate, _id: { $lt: new mongoose.Types.ObjectId(idStr) } }
+                ];
+            } else {
+                // Legacy cursor fallback (just timestamp)
+                filter.createdAt = { $lt: beforeDate };
+            }
         }
-        filter.createdAt = { $lt: new Date(beforeMs) };
     }
 
     const rawMessages = await Message.find(filter)
@@ -356,9 +368,14 @@ router.get('/:roomId/messages', authenticateUser, asyncHandler(async (req: AuthR
         replyCount: msg.replyCount || 0,
     }));
 
-    const nextCursor = formattedMessages.length > 0
-        ? formattedMessages[0].createdAt + 1
-        : null;
+    // Generate next cursor from the oldest message (which is at index 0 after reverse, 
+    // or last index of pageMessages before reverse).
+    // Actually, pageMessages is sorted DESC. So the last item in pageMessages is the oldest.
+    let nextCursor: string | null = null;
+    if (pageMessages.length > 0) {
+        const oldestMessage = pageMessages[pageMessages.length - 1];
+        nextCursor = `${oldestMessage.createdAt.getTime()}_${oldestMessage._id.toString()}`;
+    }
 
     res.json({
         messages: formattedMessages,
