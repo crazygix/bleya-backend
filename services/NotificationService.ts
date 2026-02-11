@@ -71,7 +71,7 @@ export class NotificationService {
     }
 
     static async getNotifications(userId: string, limit = 20, before?: Date) {
-        const query: any = { recipient: userId };
+        const query: any = { recipient: userId, isDismissed: false };
         if (before) {
             query.createdAt = { $lt: before };
         }
@@ -94,7 +94,9 @@ export class NotificationService {
 
         // Check for more
         const lastNotification = notifications[notifications.length - 1];
-        const nextCursor = lastNotification ? lastNotification.createdAt : null;
+        const nextCursor = (notifications.length === limit && lastNotification)
+            ? lastNotification.createdAt
+            : null;
 
         // Count unread
         const unreadCount = await Notification.countDocuments({ recipient: userId, read: false });
@@ -117,6 +119,20 @@ export class NotificationService {
         return Notification.updateMany(
             { recipient: userId, read: false },
             { $set: { read: true } }
+        );
+    }
+
+    static async dismissNotification(notificationId: string, userId: string) {
+        return Notification.updateOne(
+            { _id: notificationId, recipient: userId },
+            { $set: { isDismissed: true, read: true } } // Also mark as read if dismissed
+        );
+    }
+
+    static async dismissAllNotifications(userId: string) {
+        return Notification.updateMany(
+            { recipient: userId, isDismissed: false },
+            { $set: { isDismissed: true, read: true } }
         );
     }
 }

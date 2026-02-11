@@ -62,6 +62,7 @@ router.get('/', authenticateUser, asyncHandler(async (req: AuthRequest, res: exp
             replyText: n.message ? n.message.text : '',
             previewText: n.message ? n.message.text.substring(0, 100) : '',
             read: n.read,
+            isDismissed: n.isDismissed || false,
             createdAt: n.createdAt.getTime(),
         };
     });
@@ -90,6 +91,25 @@ router.post('/:id/read', authenticateUser, asyncHandler(async (req: AuthRequest,
 router.post('/read-all', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
     const userId = req.user!.userId;
     await NotificationService.markAllAsRead(userId);
+    res.json({ success: true });
+}));
+
+router.post('/:id/dismiss', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
+    const userId = req.user!.userId;
+    const { id } = req.params;
+
+    if (!id.match(/^[0-9a-fA-F]{24}$/)) {
+        res.status(400).json({ error: 'Invalid ID' });
+        return;
+    }
+
+    await NotificationService.dismissNotification(id, userId);
+    res.json({ success: true });
+}));
+
+router.post('/dismiss-all', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
+    const userId = req.user!.userId;
+    await NotificationService.dismissAllNotifications(userId);
     res.json({ success: true });
 }));
 

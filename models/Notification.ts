@@ -35,6 +35,10 @@ const notificationSchema = new mongoose.Schema({
         type: Boolean,
         default: false,
     },
+    isDismissed: {
+        type: Boolean,
+        default: false,
+    },
 }, {
     timestamps: true,
 });
@@ -44,5 +48,8 @@ notificationSchema.index({ recipient: 1, createdAt: -1 });
 
 // Index for counting unread notifications
 notificationSchema.index({ recipient: 1, read: 1 });
+
+// Index for fetching active (not dismissed) notifications
+notificationSchema.index({ recipient: 1, isDismissed: 1, createdAt: -1 });
 
 export const Notification = mongoose.model('Notification', notificationSchema);
