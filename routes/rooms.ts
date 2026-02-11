@@ -167,20 +167,23 @@ router.get('/joined', authenticateUser, asyncHandler(async (req: AuthRequest, re
 
     const userIds = Array.from(userIdSet).map((id) => new mongoose.Types.ObjectId(id));
     const users = userIds.length > 0
-        ? await User.find({ _id: { $in: userIds } }).select('_id username').lean<LeanUser[]>()
+        ? await User.find({ _id: { $in: userIds } }).select('_id username profileImageUrl').lean<LeanUser[]>()
         : [];
 
-    const userMap = new Map(users.map((u) => [u._id.toString(), u.username || '']));
+    const userMap = new Map(users.map((u) => [u._id.toString(), { username: u.username || '', profileImageUrl: u.profileImageUrl || '' }]));
 
     const joinedRooms = rooms.map((room) => {
         let roomName = room.name;
         let otherUserId: string | null = null;
+        let imageUrl: string | null = null;
 
         if (room.type === 'private' && room.participants) {
             const otherParticipant = room.participants.find((id) => id.toString() !== userId);
             if (otherParticipant) {
                 const participantIdStr = otherParticipant.toString();
-                roomName = userMap.get(participantIdStr) || 'Unknown User';
+                const otherUserData = userMap.get(participantIdStr);
+                roomName = otherUserData?.username || 'Unknown User';
+                imageUrl = otherUserData?.profileImageUrl || null;
                 otherUserId = participantIdStr;
             }
         }
@@ -195,10 +198,11 @@ router.get('/joined', authenticateUser, asyncHandler(async (req: AuthRequest, re
             type: room.type || 'public',
             participants: (room.participants || []).map((participant) => participant.toString()),
             otherUserId,
+            imageUrl,
             lastMessageText: lastMessage?.lastMessageText || null,
             lastMessageTime,
             lastMessageUserId,
-            lastMessageUsername: lastMessageUserId ? userMap.get(lastMessageUserId) || 'Unknown' : null,
+            lastMessageUsername: lastMessageUserId ? userMap.get(lastMessageUserId.toString())?.username || 'Unknown' : null,
             unreadCount: unreadCountByRoomId.get(room._id.toString()) ?? 0,
         };
     });
@@ -505,7 +509,7 @@ router.post('/direct/:otherUserId', authenticateUser, asyncHandler(async (req: A
     }
 
     const [otherUser, currentUser] = await Promise.all([
-        User.findById(otherUserId).select('_id username').lean<LeanUser | null>(),
+        User.findById(otherUserId).select('_id username profileImageUrl').lean<LeanUser | null>(),
         User.findById(currentUserId).select('_id username').lean<LeanUser | null>(),
     ]);
 
@@ -553,6 +557,7 @@ router.post('/direct/:otherUserId', authenticateUser, asyncHandler(async (req: A
             name: otherUser.username || 'Unknown User',
             type: room.type,
             participants: (room.participants || []).map((participant) => participant.toString()),
+            imageUrl: otherUser?.profileImageUrl || null,
             otherUserId,
         },
     });
@@ -569,13 +574,15 @@ router.get('/:roomId', authenticateUser, asyncHandler(async (req: AuthRequest, r
 
     let roomName = room.name;
     let otherUserId: string | null = null;
+    let imageUrl: string | null = null;
 
     if (room.type === 'private' && room.participants) {
         const otherParticipant = room.participants.find((id) => id.toString() !== userId);
         if (otherParticipant) {
             const participantIdStr = otherParticipant.toString();
-            const otherUser = await User.findById(participantIdStr).select('username').lean<LeanUser | null>();
+            const otherUser = await User.findById(participantIdStr).select('username profileImageUrl').lean<LeanUser | null>();
             roomName = otherUser?.username || 'Unknown User';
+            imageUrl = otherUser?.profileImageUrl || null;
             otherUserId = participantIdStr;
         }
     }
@@ -584,6 +591,7 @@ router.get('/:roomId', authenticateUser, asyncHandler(async (req: AuthRequest, r
         id: room._id.toString(),
         name: roomName,
         type: room.type || 'public',
+        imageUrl,
         participants: (room.participants || []).map((participant) => participant.toString()),
         otherUserId,
     });
