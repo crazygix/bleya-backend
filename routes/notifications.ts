@@ -34,21 +34,37 @@ router.get('/', authenticateUser, asyncHandler(async (req: AuthRequest, res: exp
     const result = await NotificationService.getNotifications(userId, parsedLimit, parsedBefore);
 
     // Format for response
-    const formattedNotifications = result.notifications.map((n: any) => ({
-        id: n._id.toString(),
-        sender: {
-            id: n.sender._id.toString(),
-            username: n.sender.username,
-            profileImageUrl: n.sender.profileImageUrl,
-        },
-        type: n.type,
-        roomId: n.room._id.toString(),
-        messageId: n.message._id.toString(),
-        threadId: n.thread.toString(),
-        previewText: n.message ? n.message.text.substring(0, 100) : '',
-        read: n.read,
-        createdAt: n.createdAt.getTime(),
-    }));
+    const formattedNotifications = result.notifications.map((n: any) => {
+        let roomName = n.room.name;
+        if (n.room.type === 'private' && n.room.participants) {
+            const otherParticipant = n.room.participants.find((p: any) =>
+                (p._id || p).toString() !== userId.toString()
+            );
+            if (otherParticipant && typeof otherParticipant === 'object') {
+                roomName = otherParticipant.username || roomName;
+            }
+        }
+
+        return {
+            id: n._id.toString(),
+            sender: {
+                id: n.sender._id.toString(),
+                username: n.sender.username,
+                profileImageUrl: n.sender.profileImageUrl,
+            },
+            type: n.type,
+            roomId: n.room._id.toString(),
+            roomName: roomName,
+            roomType: n.room.type || 'public',
+            messageId: n.message._id.toString(),
+            threadId: n.thread._id.toString(),
+            parentMessageText: n.thread ? n.thread.text : null,
+            replyText: n.message ? n.message.text : '',
+            previewText: n.message ? n.message.text.substring(0, 100) : '',
+            read: n.read,
+            createdAt: n.createdAt.getTime(),
+        };
+    });
 
     res.json({
         notifications: formattedNotifications,

@@ -416,13 +416,34 @@ export function setupSocketIO(server: HTTPServer) {
                         });
 
                         for (const target of targets) {
-                            // Populate sender info before emitting
-                            const populatedNotification = await target.notification.populate({
-                                path: 'sender',
-                                select: 'username profileImageUrl',
-                            });
+                            // Populate context info before emitting
+                            const populatedNotification = await target.notification.populate([
+                                { path: 'sender', select: 'username profileImageUrl' },
+                                {
+                                    path: 'room',
+                                    select: 'name type participants',
+                                    populate: {
+                                        path: 'participants',
+                                        select: 'username'
+                                    }
+                                },
+                                { path: 'message', select: 'text' },
+                                { path: 'thread', select: 'text' }
+                            ]);
 
-                            // Convert to plain object with sender populated
+                            const room = populatedNotification.room as any;
+                            let roomName = room?.name || 'Unknown Room';
+
+                            if (room?.type === 'private' && room?.participants) {
+                                const otherParticipant = room.participants.find((p: any) =>
+                                    (p._id || p).toString() !== target.userId.toString()
+                                );
+                                if (otherParticipant && typeof otherParticipant === 'object') {
+                                    roomName = otherParticipant.username || roomName;
+                                }
+                            }
+
+                            // Convert to plain object with enriched data
                             const notificationData = {
                                 _id: populatedNotification._id.toString(),
                                 recipient: populatedNotification.recipient.toString(),
@@ -432,9 +453,14 @@ export function setupSocketIO(server: HTTPServer) {
                                     profileImageUrl: (populatedNotification.sender as any).profileImageUrl || null,
                                 },
                                 type: populatedNotification.type,
-                                room: populatedNotification.room.toString(),
-                                message: populatedNotification.message.toString(),
-                                thread: populatedNotification.thread.toString(),
+                                roomId: populatedNotification.room._id.toString(),
+                                roomName: roomName,
+                                roomType: room?.type || 'public',
+                                messageId: populatedNotification.message._id.toString(),
+                                threadId: populatedNotification.thread._id.toString(),
+                                parentMessageText: (populatedNotification.thread as any).text || null,
+                                replyText: (populatedNotification.message as any).text || '',
+                                previewText: (populatedNotification.message as any).text ? (populatedNotification.message as any).text.substring(0, 100) : '',
                                 read: populatedNotification.read,
                                 createdAt: populatedNotification.createdAt.toISOString(),
                                 updatedAt: populatedNotification.updatedAt.toISOString(),

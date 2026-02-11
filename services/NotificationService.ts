@@ -80,8 +80,16 @@ export class NotificationService {
             .sort({ createdAt: -1 })
             .limit(limit)
             .populate('sender', 'username profileImageUrl')
-            .populate('room', 'name type')
+            .populate({
+                path: 'room',
+                select: 'name type participants',
+                populate: {
+                    path: 'participants',
+                    select: 'username',
+                },
+            })
             .populate('message', 'text') // The reply content
+            .populate('thread', 'text') // The parent message content
             .lean();
 
         // Check for more
