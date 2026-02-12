@@ -4,18 +4,21 @@ import { authenticateUser, AuthRequest } from '../middleware/auth.js';
 import { Room } from '../models/Room.js';
 import { User } from '../models/User.js';
 import { Message } from '../models/Message.js';
-import { discoverNearbyCities } from '../services/cityDiscoveryService.js';
+import {
+    FIXED_DISCOVERY_RADIUS_KM,
+    getNearbyRoomsForUser,
+    joinRoomForUser,
+    listPublicRooms,
+} from '../services/roomService.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { NotFoundError, ValidationError, ErrorCode } from '../utils/errors.js';
-import logger from '../utils/logger.js';
+import { sanitizePlainText } from '../utils/sanitize.js';
 
 const router = express.Router();
 
 const OBJECT_ID_REGEX = /^[0-9a-fA-F]{24}$/;
-const MAX_PUBLIC_ROOMS = 5;
 const DEFAULT_PAGE_SIZE = 50;
 const MAX_PAGE_SIZE = 100;
-const FIXED_DISCOVERY_RADIUS_KM = 30;
 const DEFAULT_DISCOVERY_LIMIT = 20;
 const MAX_DISCOVERY_LIMIT = 50;
 
@@ -68,16 +71,6 @@ interface LastMessageAgg {
     lastMessageUserId?: mongoose.Types.ObjectId;
 }
 
-interface NearbyRoomAgg {
-    _id: mongoose.Types.ObjectId;
-    name: string;
-    type?: 'public' | 'private';
-    cityKey?: string;
-    imageUrl?: string;
-    geo?: GeoPoint;
-    distanceMeters: number;
-}
-
 function validateObjectId(id: string, fieldName: string): mongoose.Types.ObjectId {
     if (!OBJECT_ID_REGEX.test(id)) {
         throw new ValidationError(`Invalid ${fieldName} format`);
@@ -115,6 +108,24 @@ function parseLimit(value: unknown, defaultValue: number, min: number, max: numb
     return parsed;
 }
 
+function parseSearchQuery(value: unknown): string | undefined {
+    if (value === undefined || value === null) {
+        return undefined;
+    }
+
+    if (typeof value !== 'string') {
+        throw new ValidationError('search must be a string.');
+    }
+
+    const sanitized = sanitizePlainText(value, {
+        maxLength: 80,
+        collapseWhitespace: true,
+        escapeHtml: false,
+    });
+
+    return sanitized.length > 0 ? sanitized : undefined;
+}
+
 function toRoomLocation(room: { geo?: GeoPoint }): { latitude: number; longitude: number } | null {
     const coordinates = room.geo?.coordinates;
     if (!coordinates || coordinates.length < 2) {
@@ -129,34 +140,11 @@ function toRoomLocation(room: { geo?: GeoPoint }): { latitude: number; longitude
     return { latitude, longitude };
 }
 
-function toRadians(value: number): number {
-    return value * (Math.PI / 180);
-}
-
-function distanceInKm(
-    fromLatitude: number,
-    fromLongitude: number,
-    toLatitude: number,
-    toLongitude: number
-): number {
-    const earthRadiusKm = 6371;
-    const deltaLat = toRadians(toLatitude - fromLatitude);
-    const deltaLon = toRadians(toLongitude - fromLongitude);
-
-    const a = Math.sin(deltaLat / 2) * Math.sin(deltaLat / 2)
-        + Math.cos(toRadians(fromLatitude))
-        * Math.cos(toRadians(toLatitude))
-        * Math.sin(deltaLon / 2)
-        * Math.sin(deltaLon / 2);
-
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    return earthRadiusKm * c;
-}
-
 router.get('/nearby', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
     const userId = req.user!.userId;
     const latitude = parseCoordinate(req.query.latitude ?? req.query.lat, 'latitude');
     const longitude = parseCoordinate(req.query.longitude ?? req.query.lng, 'longitude');
+    const searchQuery = parseSearchQuery(req.query.search ?? req.query.q);
 
     if (latitude < -90 || latitude > 90) {
         throw new ValidationError('latitude must be between -90 and 90.');
@@ -167,178 +155,24 @@ router.get('/nearby', authenticateUser, asyncHandler(async (req: AuthRequest, re
     }
 
     const radiusKm = FIXED_DISCOVERY_RADIUS_KM;
-
     const limit = parseLimit(req.query.limit, DEFAULT_DISCOVERY_LIMIT, 1, MAX_DISCOVERY_LIMIT);
-    const radiusMeters = Math.round(radiusKm * 1000);
 
-    const user = await User.findById(userId).select('joinedRooms').lean<{ joinedRooms: mongoose.Types.ObjectId[] } | null>();
-    if (!user) {
-        throw new NotFoundError('User not found', ErrorCode.USER_NOT_FOUND);
-    }
-
-    try {
-        const discoveredCities = await discoverNearbyCities({
-            latitude,
-            longitude,
-            radiusKm,
-            limit,
-        });
-
-        if (discoveredCities.length > 0) {
-            await Room.bulkWrite(discoveredCities.map((city) => {
-                const updateSet: Record<string, unknown> = {
-                    cityKey: city.cityKey,
-                    name: city.name,
-                    geo: {
-                        type: 'Point',
-                        coordinates: [city.longitude, city.latitude],
-                    },
-                };
-
-                if (city.imageUrl) {
-                    updateSet.imageUrl = city.imageUrl;
-                }
-
-                return {
-                    updateOne: {
-                        filter: {
-                            type: 'public',
-                            cityKey: city.cityKey,
-                        },
-                        update: {
-                            $set: updateSet,
-                            $setOnInsert: {
-                                type: 'public',
-                            },
-                        },
-                        upsert: true,
-                    },
-                };
-            }), { ordered: false });
-        }
-    } catch (error) {
-        logger.warn('rooms.nearby.discovery_failed', {
-            userId,
-            latitude,
-            longitude,
-            radiusKm,
-            error: error instanceof Error ? error.message : String(error),
-        });
-    }
-
-    let nearbyRooms: NearbyRoomAgg[] = [];
-
-    try {
-        nearbyRooms = await Room.aggregate<NearbyRoomAgg>([
-            {
-                $geoNear: {
-                    near: {
-                        type: 'Point',
-                        coordinates: [longitude, latitude],
-                    },
-                    key: 'geo',
-                    distanceField: 'distanceMeters',
-                    maxDistance: radiusMeters,
-                    spherical: true,
-                    query: { type: 'public' },
-                },
-            },
-            { $limit: limit },
-            {
-                $project: {
-                    _id: 1,
-                    name: 1,
-                    type: 1,
-                    cityKey: 1,
-                    imageUrl: 1,
-                    geo: 1,
-                    distanceMeters: 1,
-                },
-            },
-        ]);
-    } catch (error) {
-        logger.warn('rooms.nearby.geo_query_failed', {
-            userId,
-            latitude,
-            longitude,
-            radiusKm,
-            error: error instanceof Error ? error.message : String(error),
-        });
-
-        const fallbackRooms = await Room.find({
-            type: 'public',
-            'geo.type': 'Point',
-        })
-            .select('_id name type cityKey imageUrl geo')
-            .lean<LeanRoom[]>();
-
-        const fallbackCandidates: Array<NearbyRoomAgg | null> = fallbackRooms
-            .map((room): NearbyRoomAgg | null => {
-                const roomLocation = toRoomLocation(room);
-                if (!roomLocation) {
-                    return null;
-                }
-
-                const roomDistanceKm = distanceInKm(
-                    latitude,
-                    longitude,
-                    roomLocation.latitude,
-                    roomLocation.longitude
-                );
-
-                if (roomDistanceKm > radiusKm) {
-                    return null;
-                }
-
-                return {
-                    _id: room._id,
-                    name: room.name,
-                    type: room.type,
-                    cityKey: room.cityKey,
-                    imageUrl: room.imageUrl,
-                    geo: room.geo,
-                    distanceMeters: roomDistanceKm * 1000,
-                };
-            });
-
-        nearbyRooms = fallbackCandidates
-            .filter((room): room is NearbyRoomAgg => room !== null)
-            .sort((a, b) => a.distanceMeters - b.distanceMeters)
-            .slice(0, limit);
-    }
-
-    const joinedRoomIds = new Set(user.joinedRooms.map((roomId) => roomId.toString()));
-
-    res.json({
-        rooms: nearbyRooms.map((room) => {
-            const roomLocation = toRoomLocation(room);
-            return {
-                id: room._id.toString(),
-                name: room.name,
-                type: room.type || 'public',
-                cityKey: room.cityKey || null,
-                imageUrl: room.imageUrl || null,
-                location: roomLocation,
-                distanceKm: Number((room.distanceMeters / 1000).toFixed(2)),
-                isJoined: joinedRoomIds.has(room._id.toString()),
-            };
-        }),
+    const response = await getNearbyRoomsForUser({
+        userId,
+        latitude,
+        longitude,
+        radiusKm,
+        limit,
+        searchQuery,
     });
+
+    res.json(response);
 }));
 
-router.get('/', authenticateUser, asyncHandler(async (_req: AuthRequest, res: express.Response) => {
-    const rooms = await Room.find({ type: 'public' })
-        .sort({ name: 1 })
-        .lean<LeanRoom[]>();
-
-    res.json(rooms.map((room) => ({
-        id: room._id.toString(),
-        name: room.name,
-        type: room.type || 'public',
-        cityKey: room.cityKey || null,
-        imageUrl: room.imageUrl || null,
-        location: toRoomLocation(room),
-    })));
+router.get('/', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
+    const searchQuery = parseSearchQuery(req.query.search ?? req.query.q);
+    const rooms = await listPublicRooms({ searchQuery });
+    res.json(rooms);
 }));
 
 router.get('/joined', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
@@ -489,83 +323,12 @@ router.get('/joined', authenticateUser, asyncHandler(async (req: AuthRequest, re
 router.post('/:roomId/join', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
     const userId = req.user!.userId;
     const roomObjectId = validateObjectId(req.params.roomId, 'room ID');
-
-    const room = await Room.findById(roomObjectId).select('_id name type imageUrl cityKey geo').lean<LeanRoom | null>();
-    if (!room) {
-        throw new NotFoundError('Room not found', ErrorCode.ROOM_NOT_FOUND);
-    }
-
-    const roomSummary = {
-        id: room._id.toString(),
-        name: room.name,
-        type: room.type || 'public',
-        cityKey: room.cityKey || null,
-        imageUrl: room.imageUrl || null,
-        location: toRoomLocation(room),
-    };
-
-    const user = await User.findById(userId).select('joinedRooms').lean<{ joinedRooms: mongoose.Types.ObjectId[] } | null>();
-    if (!user) {
-        throw new NotFoundError('User not found', ErrorCode.USER_NOT_FOUND);
-    }
-
-    const alreadyJoined = user.joinedRooms.some((id) => id.equals(roomObjectId));
-    if (alreadyJoined) {
-        res.json({
-            message: 'Already joined this room',
-            room: roomSummary,
-        });
-        return;
-    }
-
-    if ((room.type || 'public') === 'public') {
-        const publicRoomCount = await Room.countDocuments({
-            _id: { $in: user.joinedRooms },
-            type: 'public',
-        });
-
-        if (publicRoomCount >= MAX_PUBLIC_ROOMS) {
-            throw new ValidationError('You can only join up to 5 group chats at a time.');
-        }
-    }
-
-    const addResult = await User.updateOne(
-        { _id: userId, joinedRooms: { $ne: roomObjectId } },
-        { $addToSet: { joinedRooms: roomObjectId } }
-    );
-
-    if (addResult.modifiedCount === 0) {
-        res.json({
-            message: 'Already joined this room',
-            room: roomSummary,
-        });
-        return;
-    }
-
-    if ((room.type || 'public') === 'public') {
-        const updatedUser = await User.findById(userId).select('joinedRooms').lean<{ joinedRooms: mongoose.Types.ObjectId[] } | null>();
-        if (!updatedUser) {
-            throw new NotFoundError('User not found', ErrorCode.USER_NOT_FOUND);
-        }
-
-        const updatedPublicCount = await Room.countDocuments({
-            _id: { $in: updatedUser.joinedRooms },
-            type: 'public',
-        });
-
-        if (updatedPublicCount > MAX_PUBLIC_ROOMS) {
-            await User.updateOne(
-                { _id: userId },
-                { $pull: { joinedRooms: roomObjectId } }
-            );
-            throw new ValidationError('You can only join up to 5 group chats at a time.');
-        }
-    }
-
-    res.json({
-        message: 'Successfully joined room',
-        room: roomSummary,
+    const response = await joinRoomForUser({
+        userId,
+        roomId: roomObjectId,
     });
+
+    res.json(response);
 }));
 
 router.get('/:roomId/messages', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
