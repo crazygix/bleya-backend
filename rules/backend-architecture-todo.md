@@ -1,7 +1,11 @@
-# Backend Architecture Improvements TODO
+## Backend Architecture Improvements TODO
 
-This file tracks the remaining architecture improvements to be implemented according to `core/architecture_rules.ts`.
+This file tracks remaining architecture improvements to be implemented
+according to the backend architecture rules.
 
+The original TODO content from the project root is preserved below.
+
+```md
 ## ✅ Completed
 
 - [x] CORS allowlist configuration (utils/cors.ts)
@@ -124,7 +128,9 @@ Add rate limiting for Socket.IO events:
 
 ## Notes
 
-- All TODO comments in code reference specific sections in `core/architecture_rules.ts`
+- All TODO comments in code reference specific sections in the architecture rules
 - Prioritize High Priority items for better architecture and security
 - Medium Priority items improve maintainability and consistency
 - Low Priority items are nice-to-haves for future scalability
+```
+

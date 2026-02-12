@@ -1,3 +1,9 @@
+## Bleya Backend - Architecture & System Design Rules
+
+The original backend architecture rule document was authored as a TypeScript file with rich comments and examples.
+Its full content is preserved below as code for easy reference.
+
+```ts
 /// Bleya Backend - Architecture & System Design Rules
 ///
 /// This document defines the architectural principles, patterns, and conventions
@@ -559,3 +565,5 @@
 /// ========================================
 /// END OF ARCHITECTURE RULES
 /// ========================================
+```
+

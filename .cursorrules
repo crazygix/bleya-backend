@@ -2,4 +2,8 @@
 
 Follow these architectural and system design rules when working on the backend:
 
-@core/architecture_rules.ts
+@rules/architecture-rules.md
+@rules/api-format-rules.md
+@rules/code-style-rules.md
+@rules/date-time-rules.md
+@rules/error-handling-rules.md
