@@ -1,6 +1,6 @@
 # Bleya Backend - Cursor Rules
 
-Follow these architectural and system design rules when working on the backend:
+**CRITICAL RULES:** You MUST strictly follow the architectural and system design rules defined in the files below. Failure to follow these rules will result in rejected code.
 
 @rules/architecture-rules.md
 @rules/api-format-rules.md
