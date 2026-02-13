@@ -20,7 +20,7 @@ const OBJECT_ID_REGEX = /^[0-9a-fA-F]{24}$/;
 const DEFAULT_PAGE_SIZE = 50;
 const MAX_PAGE_SIZE = 100;
 const DEFAULT_DISCOVERY_LIMIT = 20;
-const MAX_DISCOVERY_LIMIT = 50;
+const MAX_DISCOVERY_LIMIT = 100;
 
 interface GeoPoint {
     type?: 'Point';
