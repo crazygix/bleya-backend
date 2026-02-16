@@ -36,7 +36,7 @@ router.get(
                 latitude: city.location.coordinates[1],
                 longitude: city.location.coordinates[0],
                 imageUrl: city.imageUrl || null,
-                lastUpdated: city.lastUpdated.getTime(), // Timestamp in ms
+                lastUpdated: city.lastUpdated?.getTime() || null, // Timestamp in ms
             }))
         );
     })

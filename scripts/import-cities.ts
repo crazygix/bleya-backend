@@ -11,8 +11,8 @@ interface CityJsonEntry {
     lat: number;
     lng: number;
     country: string;
-    country_name: string;
-    population?: number;
+    country_code: string;
+    population: number;
 }
 
 function createCitySlug(name: string, country: string, lat: number, lng: number): string {
@@ -40,10 +40,10 @@ async function importCities(jsonPath: string) {
     for (let i = 0; i < cities.length; i += batchSize) {
         const batch = cities.slice(i, i + batchSize);
         const cityDocs = batch.map((city) => ({
-            _id: createCitySlug(city.name, city.country, city.lat, city.lng),
+            _id: createCitySlug(city.name, city.country_code, city.lat, city.lng),
             name: city.name,
-            country: city.country,
-            countryName: city.country_name,
+            country: city.country_code,
+            countryName: city.country, // Full country name
             location: {
                 type: 'Point' as const,
                 coordinates: [city.lng, city.lat] as [number, number],
@@ -59,7 +59,7 @@ async function importCities(jsonPath: string) {
     await mongoose.disconnect();
 }
 
-const jsonPath = process.argv[2] || path.resolve(process.cwd(), 'cities.json');
+const jsonPath = process.argv[2] || path.resolve(process.cwd(), 'data/cities.json');
 importCities(jsonPath).catch((err) => {
     logger.error('Import failed', err);
     process.exit(1);

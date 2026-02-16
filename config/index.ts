@@ -63,7 +63,7 @@ export const config = {
   },
 
   citySearch: {
-    defaultRadiusKm: parseNumberEnv('CITY_SEARCH_RADIUS_KM', 30),
+    defaultRadiusKm: parseNumberEnv('CITY_SEARCH_RADIUS_KM', 100),
     defaultLimit: parseNumberEnv('CITY_SEARCH_LIMIT', 20),
     maxRadiusKm: parseNumberEnv('CITY_SEARCH_MAX_RADIUS_KM', 100),
     maxLimit: parseNumberEnv('CITY_SEARCH_MAX_LIMIT', 50),
@@ -71,7 +71,7 @@ export const config = {
 
   wikidata: {
     sparqlEndpoint: 'https://query.wikidata.org/sparql',
-    coordinateToleranceKm: 5,
+    coordinateToleranceKm: 15, // Increased from 5km to handle coordinate variations
   },
 };
 

@@ -22,6 +22,11 @@ export class WikidataImageService implements IImageService {
     async searchCityImage(query: CityImageQuery): Promise<ImageSearchResult | null> {
         const sparqlQuery = this.buildSparqlQuery(query);
 
+        logger.info(`Searching Wikidata for: ${query.name} (${query.countryName})`, {
+            coordinates: `${query.latitude}, ${query.longitude}`,
+            tolerance: `${this.toleranceKm}km`,
+        });
+
         try {
             const response = await fetch(
                 `${this.sparqlEndpoint}?query=${encodeURIComponent(sparqlQuery)}&format=json`,
@@ -41,12 +46,22 @@ export class WikidataImageService implements IImageService {
             const data: WikidataResponse = await response.json();
             const bindings = data.results?.bindings || [];
 
+            logger.info(`Wikidata returned ${bindings.length} results for ${query.name}`);
+
+            if (bindings.length > 0) {
+                const firstResults = bindings.slice(0, 3).map(b => b.cityLabel?.value).join(', ');
+                logger.debug(`First 3 results: ${firstResults}`);
+            }
+
             // Filter results by name similarity and coordinates
             const match = this.findBestMatch(bindings, query);
 
             if (!match?.image?.value) {
+                logger.warn(`No image match found for ${query.name} among ${bindings.length} results`);
                 return null;
             }
+
+            logger.info(`Found image for ${query.name}: ${match.cityLabel?.value}`);
 
             // Convert Wikimedia Commons URL to direct image URL
             const imageUrl = this.getWikimediaImageUrl(match.image.value);
