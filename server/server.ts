@@ -12,6 +12,7 @@ import roomRoutes from '../routes/rooms.js';
 import userRoutes from '../routes/users.js';
 import messageRoutes from '../routes/messages.js';
 import notificationRoutes from '../routes/notifications.js';
+import citiesRoutes from '../routes/cities.js';
 import { setupSocketIO } from './socket.js';
 import { errorHandler } from '../middleware/errorHandler.js';
 import { buildCorsOptions } from '../utils/cors.js';
@@ -111,6 +112,7 @@ app.use('/api/rooms', roomRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/messages', messageRoutes);
 app.use('/api/notifications', notificationRoutes);
+app.use('/api/cities', citiesRoutes);
 
 app.get('/', (_req: Request, res: Response) => {
     res.json({ message: 'Gde si bre zverino?' });

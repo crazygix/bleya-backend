@@ -14,6 +14,7 @@
     "migrate:seed-rooms": "npm run build && node dist/migrations/001_seed_public_rooms.js",
     "migrate:drop-legacy-room-index": "npm run build && node dist/migrations/002_drop_legacy_room_name_index.js",
     "migrate:normalize-user-refs": "npm run build && node dist/migrations/003_normalize_user_references.js",
+    "import:cities": "npm run build && node dist/scripts/import-cities.js ./data/cities.json",
     "postinstall": "npm run build"
   },
   "devDependencies": {
@@ -43,6 +44,7 @@
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.2.0",
     "multer": "^2.0.2",
+    "sharp": "^0.34.5",
     "socket.io": "^4.8.1"
   }
 }

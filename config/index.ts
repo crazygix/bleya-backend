@@ -61,6 +61,18 @@ export const config = {
     publicUrl: process.env.R2_PUBLIC_URL || '',
     publicUrlDev: process.env.R2_PUBLIC_URL_DEV || '',
   },
+
+  citySearch: {
+    defaultRadiusKm: parseNumberEnv('CITY_SEARCH_RADIUS_KM', 30),
+    defaultLimit: parseNumberEnv('CITY_SEARCH_LIMIT', 20),
+    maxRadiusKm: parseNumberEnv('CITY_SEARCH_MAX_RADIUS_KM', 100),
+    maxLimit: parseNumberEnv('CITY_SEARCH_MAX_LIMIT', 50),
+  },
+
+  wikidata: {
+    sparqlEndpoint: 'https://query.wikidata.org/sparql',
+    coordinateToleranceKm: 5,
+  },
 };
 
 export function validateR2Config(): { complete: boolean; missing: string[] } {

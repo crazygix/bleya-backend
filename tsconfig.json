@@ -17,7 +17,9 @@
     "models/**/*",
     "services/**/*",
     "utils/**/*",
+    "repositories/**/*",
     "migrations/**/*",
+    "scripts/**/*",
     "tests/**/*"
   ]
 }
