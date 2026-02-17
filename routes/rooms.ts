@@ -5,8 +5,6 @@ import { Room } from '../models/Room.js';
 import { User } from '../models/User.js';
 import { Message } from '../models/Message.js';
 import {
-    FIXED_DISCOVERY_RADIUS_KM,
-    getNearbyRoomsForUser,
     joinRoomForUser,
     listPublicRooms,
 } from '../services/roomService.js';
@@ -19,8 +17,7 @@ const router = express.Router();
 const OBJECT_ID_REGEX = /^[0-9a-fA-F]{24}$/;
 const DEFAULT_PAGE_SIZE = 50;
 const MAX_PAGE_SIZE = 100;
-const DEFAULT_DISCOVERY_LIMIT = 20;
-const MAX_DISCOVERY_LIMIT = 100;
+
 
 interface GeoPoint {
     type?: 'Point';
@@ -140,34 +137,7 @@ function toRoomLocation(room: { geo?: GeoPoint }): { latitude: number; longitude
     return { latitude, longitude };
 }
 
-router.get('/nearby', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
-    const userId = req.user!.userId;
-    const latitude = parseCoordinate(req.query.latitude ?? req.query.lat, 'latitude');
-    const longitude = parseCoordinate(req.query.longitude ?? req.query.lng, 'longitude');
-    const searchQuery = parseSearchQuery(req.query.search ?? req.query.q);
 
-    if (latitude < -90 || latitude > 90) {
-        throw new ValidationError('latitude must be between -90 and 90.');
-    }
-
-    if (longitude < -180 || longitude > 180) {
-        throw new ValidationError('longitude must be between -180 and 180.');
-    }
-
-    const radiusKm = FIXED_DISCOVERY_RADIUS_KM;
-    const limit = parseLimit(req.query.limit, DEFAULT_DISCOVERY_LIMIT, 1, MAX_DISCOVERY_LIMIT);
-
-    const response = await getNearbyRoomsForUser({
-        userId,
-        latitude,
-        longitude,
-        radiusKm,
-        limit,
-        searchQuery,
-    });
-
-    res.json(response);
-}));
 
 router.get('/', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
     const searchQuery = parseSearchQuery(req.query.search ?? req.query.q);

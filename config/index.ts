@@ -63,7 +63,7 @@ export const config = {
   },
 
   citySearch: {
-    defaultRadiusKm: parseNumberEnv('CITY_SEARCH_RADIUS_KM', 100),
+    defaultRadiusKm: parseNumberEnv('CITY_SEARCH_RADIUS_KM', 30),
     defaultLimit: parseNumberEnv('CITY_SEARCH_LIMIT', 20),
     maxRadiusKm: parseNumberEnv('CITY_SEARCH_MAX_RADIUS_KM', 100),
     maxLimit: parseNumberEnv('CITY_SEARCH_MAX_LIMIT', 50),
