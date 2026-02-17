@@ -6,13 +6,16 @@ import { ValidationError, NotFoundError, ErrorCode } from '../utils/errors.js';
 import { cityRepository } from '../repositories/cityRepository.js';
 import { Room } from '../models/Room.js';
 import { joinRoomForUser } from '../services/roomService.js';
+import { User } from '../models/User.js';
 import { authenticateUser, AuthRequest } from '../middleware/auth.js';
 
 const router = express.Router();
 
 router.get(
     '/nearby',
-    asyncHandler(async (req: express.Request, res: express.Response) => {
+    authenticateUser,
+    asyncHandler(async (req: AuthRequest, res: express.Response) => {
+        const userId = req.user!.userId;
         const lat = parseFloat(req.query.lat as string);
         const lng = parseFloat(req.query.lng as string);
 
@@ -24,11 +27,29 @@ router.get(
         const radiusKm = config.citySearch.defaultRadiusKm;
         const limit = config.citySearch.defaultLimit;
 
-        const cities = await findNearbyCitiesWithImages(lat, lng, radiusKm, limit);
+        const [cities, user] = await Promise.all([
+            findNearbyCitiesWithImages(lat, lng, radiusKm, limit),
+            User.findById(userId).select('joinedRooms').lean(),
+        ]);
+
+        if (!user) {
+            throw new NotFoundError('User not found', ErrorCode.USER_NOT_FOUND);
+        }
+
+        // Filter out cities the user has already joined
+        let availableCities = cities;
+        if (user.joinedRooms && user.joinedRooms.length > 0) {
+            const joinedRooms = await Room.find({ _id: { $in: user.joinedRooms } })
+                .select('cityKey')
+                .lean();
+
+            const joinedCityKeys = new Set(joinedRooms.map((r) => r.cityKey).filter(Boolean));
+            availableCities = cities.filter((city) => !joinedCityKeys.has(city._id));
+        }
 
         // Format response (follow API format rules)
         res.json(
-            cities.map((city) => ({
+            availableCities.map((city) => ({
                 id: city._id,
                 name: city.name,
                 country: city.country,
