@@ -6,7 +6,7 @@ import { NotFoundError, ValidationError, ErrorCode } from '../utils/errors.js';
 import logger from '../utils/logger.js';
 
 const MAX_PUBLIC_ROOMS = 5;
-export const FIXED_DISCOVERY_RADIUS_KM = 100;
+export const FIXED_DISCOVERY_RADIUS_KM = 30;
 
 interface GeoPoint {
     type?: 'Point';

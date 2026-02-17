@@ -60,7 +60,9 @@ async function fetchAndStoreImage(city: ICity): Promise<void> {
             .toBuffer();
 
         // 4. Upload to R2
-        const key = `cities/${city._id}.webp`;
+        // Append timestamp to key to bypass R2/CDN caching of old images
+        const timestamp = Date.now();
+        const key = `cities/${city._id}-${timestamp}.webp`;
         const uploadResult = await uploadToR2(resizedBuffer, key, 'image/webp');
 
         // 5. Save URL to database

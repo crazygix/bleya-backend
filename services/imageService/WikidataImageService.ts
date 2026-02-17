@@ -17,7 +17,11 @@ interface WikidataResponse {
 
 export class WikidataImageService implements IImageService {
     private readonly sparqlEndpoint = config.wikidata.sparqlEndpoint;
-    private readonly toleranceKm = config.wikidata.coordinateToleranceKm;
+    private readonly toleranceKm: number;
+
+    constructor(coordinateToleranceKm?: number) {
+        this.toleranceKm = coordinateToleranceKm ?? config.wikidata.coordinateToleranceKm;
+    }
 
     async searchCityImage(query: CityImageQuery): Promise<ImageSearchResult | null> {
         const sparqlQuery = this.buildSparqlQuery(query);

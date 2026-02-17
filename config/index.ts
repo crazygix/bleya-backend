@@ -73,6 +73,14 @@ export const config = {
     sparqlEndpoint: 'https://query.wikidata.org/sparql',
     coordinateToleranceKm: 15, // Increased from 5km to handle coordinate variations
   },
+
+  pexels: {
+    apiKey: process.env.PEXELS_API_KEY || '',
+  },
+
+  imageService: {
+    provider: (process.env.IMAGE_SERVICE_PROVIDER || 'wikidata') as 'wikidata' | 'pexels',
+  },
 };
 
 export function validateR2Config(): { complete: boolean; missing: string[] } {
