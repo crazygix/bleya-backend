@@ -48,6 +48,7 @@ interface LeanUser {
     _id: mongoose.Types.ObjectId;
     username?: string;
     phoneNumber?: string;
+    bio?: string;
     profileImageUrl?: string;
 }
 
@@ -402,13 +403,14 @@ router.get('/:roomId/members', authenticateUser, asyncHandler(async (req: AuthRe
     }
 
     const users = await User.find({ joinedRooms: roomObjectId })
-        .select('_id username phoneNumber profileImageUrl')
+        .select('_id username phoneNumber bio profileImageUrl')
         .lean<LeanUser[]>();
 
     res.json(users.map((user) => ({
         id: user._id.toString(),
         username: user.username || '',
         phoneNumber: user.phoneNumber,
+        bio: user.bio || '',
         profileImageUrl: user.profileImageUrl || '',
     })));
 }));
