@@ -52,4 +52,7 @@ notificationSchema.index({ recipient: 1, read: 1 });
 // Index for fetching active (not dismissed) notifications
 notificationSchema.index({ recipient: 1, isDismissed: 1, createdAt: -1 });
 
+// Index for counting unread active notifications
+notificationSchema.index({ recipient: 1, isDismissed: 1, read: 1 });
+
 export const Notification = mongoose.model('Notification', notificationSchema);

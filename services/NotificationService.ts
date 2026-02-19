@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import { Notification } from '../models/Notification.js';
 import { Message } from '../models/Message.js';
 import { User } from '../models/User.js';
+import logger from '../utils/logger.js';
 
 interface CreateReplyNotificationParams {
     replyMessageId: string;
@@ -76,7 +77,8 @@ export class NotificationService {
             query.createdAt = { $lt: before };
         }
 
-        const notifications = await Notification.find(query)
+        const notificationsQuery = Notification.find(query)
+            .select('sender type room message thread read isDismissed createdAt')
             .sort({ createdAt: -1 })
             .limit(limit)
             .populate('sender', 'username profileImageUrl')
@@ -88,18 +90,49 @@ export class NotificationService {
                     select: 'username',
                 },
             })
-            .populate('message', 'text') // The reply content
-            .populate('thread', 'text') // The parent message content
+            .populate('message', 'text')
+            .populate('thread', 'text')
+            .maxTimeMS(7000)
             .lean();
+
+        const unreadCountQuery = Notification.countDocuments({
+            recipient: userId,
+            isDismissed: false,
+            read: false,
+        }).maxTimeMS(3000);
+
+        const [notificationsResult, unreadCountResult] = await Promise.allSettled([
+            notificationsQuery,
+            unreadCountQuery,
+        ]);
+
+        if (notificationsResult.status === 'rejected') {
+            throw notificationsResult.reason;
+        }
+
+        const notifications = notificationsResult.value;
+        const unreadCount = unreadCountResult.status === 'fulfilled'
+            ? unreadCountResult.value
+            : notifications.reduce((count, notification: any) => (
+                notification.read ? count : count + 1
+            ), 0);
+
+        if (unreadCountResult.status === 'rejected') {
+            const reason = unreadCountResult.reason instanceof Error
+                ? unreadCountResult.reason.message
+                : String(unreadCountResult.reason);
+
+            logger.warn('notifications.unread_count_fallback', {
+                userId,
+                reason,
+            });
+        }
 
         // Check for more
         const lastNotification = notifications[notifications.length - 1];
         const nextCursor = (notifications.length === limit && lastNotification)
             ? lastNotification.createdAt
             : null;
-
-        // Count unread
-        const unreadCount = await Notification.countDocuments({ recipient: userId, read: false });
 
         return {
             notifications,
