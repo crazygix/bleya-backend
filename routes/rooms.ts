@@ -482,13 +482,29 @@ router.get('/:roomId/members', authenticateUser, asyncHandler(async (req: AuthRe
         .select('_id username phoneNumber bio profileImageUrl')
         .lean<LeanUser[]>();
 
-    res.json(users.map((user) => ({
+    const members = users.map((user) => ({
         id: user._id.toString(),
         username: user.username || '',
         phoneNumber: user.phoneNumber,
         bio: user.bio || '',
         profileImageUrl: user.profileImageUrl || '',
-    })));
+    }));
+
+    members.sort((a, b) => {
+        const usernameComparison = a.username.localeCompare(
+            b.username,
+            undefined,
+            { sensitivity: 'base' }
+        );
+
+        if (usernameComparison !== 0) {
+            return usernameComparison;
+        }
+
+        return a.id.localeCompare(b.id);
+    });
+
+    res.json(members);
 }));
 
 router.post('/:roomId/leave', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
