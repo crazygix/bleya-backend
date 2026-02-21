@@ -14,6 +14,7 @@ export enum ErrorCode {
 
   // Authorization errors (403)
   FORBIDDEN = 'FORBIDDEN',
+  USER_BLOCKED = 'USER_BLOCKED',
 
   // Not found errors (404)
   NOT_FOUND = 'NOT_FOUND',

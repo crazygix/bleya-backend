@@ -4,13 +4,15 @@ import { authenticateUser, AuthRequest } from '../middleware/auth.js';
 import { Room } from '../models/Room.js';
 import { User } from '../models/User.js';
 import { Message } from '../models/Message.js';
+import { UserBlock } from '../models/UserBlock.js';
 import {
     joinRoomForUser,
     listPublicRooms,
 } from '../services/roomService.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
-import { NotFoundError, ValidationError, ErrorCode } from '../utils/errors.js';
+import { AppError, NotFoundError, ValidationError, ErrorCode } from '../utils/errors.js';
 import { sanitizePlainText } from '../utils/sanitize.js';
+import logger from '../utils/logger.js';
 
 const router = express.Router();
 
@@ -29,6 +31,7 @@ interface LeanRoom {
     name: string;
     type?: 'public' | 'private';
     participants?: mongoose.Types.ObjectId[];
+    participantsHash?: string;
     cityKey?: string;
     imageUrl?: string;
     geo?: GeoPoint;
@@ -59,6 +62,7 @@ interface RoomReadPointer {
 
 interface LeanJoinedRoomsUser {
     joinedRooms: mongoose.Types.ObjectId[];
+    hiddenDirectRooms?: mongoose.Types.ObjectId[];
     roomReadPointers?: RoomReadPointer[];
 }
 
@@ -69,11 +73,70 @@ interface LastMessageAgg {
     lastMessageUserId?: mongoose.Types.ObjectId;
 }
 
+interface LeanUserBlock {
+    _id: mongoose.Types.ObjectId;
+    blockerUserId: mongoose.Types.ObjectId;
+    blockedUserId: mongoose.Types.ObjectId;
+    roomId: mongoose.Types.ObjectId;
+    isActive: boolean;
+    blockedAt: Date;
+}
+
 function validateObjectId(id: string, fieldName: string): mongoose.Types.ObjectId {
     if (!OBJECT_ID_REGEX.test(id)) {
         throw new ValidationError(`Invalid ${fieldName} format`);
     }
     return new mongoose.Types.ObjectId(id);
+}
+
+function buildDirectParticipantsHash(currentUserId: string, otherUserId: string): string {
+    return [currentUserId, otherUserId].sort().join('_');
+}
+
+async function findExistingDirectRoom(currentUserId: string, otherUserId: string): Promise<LeanRoom | null> {
+    const participantsHash = buildDirectParticipantsHash(currentUserId, otherUserId);
+    return Room.findOne({
+        type: 'private',
+        participantsHash,
+    }).lean<LeanRoom | null>();
+}
+
+async function getDirectBlockState(currentUserId: string, otherUserId: string): Promise<{
+    isBlockedByMe: boolean;
+    isBlockedByOtherUser: boolean;
+}> {
+    const currentUserObjectId = new mongoose.Types.ObjectId(currentUserId);
+    const otherUserObjectId = new mongoose.Types.ObjectId(otherUserId);
+
+    const blocks = await UserBlock.find({
+        isActive: true,
+        $or: [
+            {
+                blockerUserId: currentUserObjectId,
+                blockedUserId: otherUserObjectId,
+            },
+            {
+                blockerUserId: otherUserObjectId,
+                blockedUserId: currentUserObjectId,
+            },
+        ],
+    }).select('_id blockerUserId blockedUserId roomId isActive blockedAt').lean<LeanUserBlock[]>();
+
+    let isBlockedByMe = false;
+    let isBlockedByOtherUser = false;
+
+    for (const block of blocks) {
+        if (block.blockerUserId.toString() === currentUserId) {
+            isBlockedByMe = true;
+        } else if (block.blockerUserId.toString() === otherUserId) {
+            isBlockedByOtherUser = true;
+        }
+    }
+
+    return {
+        isBlockedByMe,
+        isBlockedByOtherUser,
+    };
 }
 
 function parseCoordinate(value: unknown, fieldName: string): number {
@@ -149,20 +212,33 @@ router.get('/', authenticateUser, asyncHandler(async (req: AuthRequest, res: exp
 router.get('/joined', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
     const userId = req.user!.userId;
     const user = await User.findById(userId)
-        .select('joinedRooms roomReadPointers')
+        .select('joinedRooms hiddenDirectRooms roomReadPointers')
         .lean<LeanJoinedRoomsUser | null>();
 
     if (!user) {
         throw new NotFoundError('User not found', ErrorCode.USER_NOT_FOUND);
     }
 
-    const joinedRoomIds = user.joinedRooms || [];
-    if (joinedRoomIds.length === 0) {
+    const allJoinedRoomIds = user.joinedRooms || [];
+    if (allJoinedRoomIds.length === 0) {
         res.json([]);
         return;
     }
 
-    const rooms = await Room.find({ _id: { $in: joinedRoomIds } }).lean<LeanRoom[]>();
+    const roomsRaw = await Room.find({ _id: { $in: allJoinedRoomIds } }).lean<LeanRoom[]>();
+    const hiddenDirectRoomIdSet = new Set((user.hiddenDirectRooms || []).map((roomId) => roomId.toString()));
+
+    const rooms = roomsRaw.filter((room) => !(
+        room.type === 'private'
+        && hiddenDirectRoomIdSet.has(room._id.toString())
+    ));
+
+    if (rooms.length === 0) {
+        res.json([]);
+        return;
+    }
+
+    const joinedRoomIds = rooms.map((room) => room._id);
 
     const lastMessagesRaw = await Message.aggregate([
         { $match: { roomId: { $in: joinedRoomIds }, parentMessageId: null } },
@@ -503,6 +579,161 @@ router.post('/:roomId/read', authenticateUser, asyncHandler(async (req: AuthRequ
     });
 }));
 
+router.get('/direct/:otherUserId/status', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
+    const currentUserId = req.user!.userId;
+    const { otherUserId } = req.params;
+
+    validateObjectId(otherUserId, 'user ID');
+
+    if (otherUserId === currentUserId) {
+        throw new ValidationError("You can't open chat status for yourself.");
+    }
+
+    const [otherUserExists, currentUser, room, blockState] = await Promise.all([
+        User.exists({ _id: otherUserId }),
+        User.findById(currentUserId).select('hiddenDirectRooms').lean<{ hiddenDirectRooms?: mongoose.Types.ObjectId[] } | null>(),
+        findExistingDirectRoom(currentUserId, otherUserId),
+        getDirectBlockState(currentUserId, otherUserId),
+    ]);
+
+    if (!otherUserExists) {
+        throw new NotFoundError('User not found', ErrorCode.USER_NOT_FOUND);
+    }
+
+    if (!currentUser) {
+        throw new NotFoundError('User not found', ErrorCode.USER_NOT_FOUND);
+    }
+
+    const roomId = room?._id.toString() || null;
+    const isDeletedByMe = roomId
+        ? (currentUser.hiddenDirectRooms || []).some((id) => id.toString() === roomId)
+        : false;
+
+    res.json({
+        hasChat: !!room,
+        roomId,
+        isBlockedByMe: blockState.isBlockedByMe,
+        isBlockedByOtherUser: blockState.isBlockedByOtherUser,
+        canSendMessage: !blockState.isBlockedByMe && !blockState.isBlockedByOtherUser,
+        isDeletedByMe,
+    });
+}));
+
+router.post('/direct/:otherUserId/delete', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
+    const currentUserId = req.user!.userId;
+    const { otherUserId } = req.params;
+
+    validateObjectId(otherUserId, 'user ID');
+
+    if (otherUserId === currentUserId) {
+        throw new ValidationError("You can't delete a chat with yourself.");
+    }
+
+    const [otherUserExists, room] = await Promise.all([
+        User.exists({ _id: otherUserId }),
+        findExistingDirectRoom(currentUserId, otherUserId),
+    ]);
+
+    if (!otherUserExists) {
+        throw new NotFoundError('User not found', ErrorCode.USER_NOT_FOUND);
+    }
+
+    if (!room) {
+        res.json({
+            message: 'No direct chat found.',
+            hasChat: false,
+            roomId: null,
+            deleted: false,
+        });
+        return;
+    }
+
+    await User.updateOne(
+        { _id: currentUserId },
+        { $addToSet: { hiddenDirectRooms: room._id } }
+    );
+
+    logger.info('dm.chat_deleted_for_user', {
+        userId: currentUserId,
+        otherUserId,
+        roomId: room._id.toString(),
+    });
+
+    res.json({
+        message: 'Chat removed from your list.',
+        hasChat: true,
+        roomId: room._id.toString(),
+        deleted: true,
+    });
+}));
+
+router.post('/direct/:otherUserId/block', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
+    const currentUserId = req.user!.userId;
+    const { otherUserId } = req.params;
+
+    validateObjectId(otherUserId, 'user ID');
+
+    if (otherUserId === currentUserId) {
+        throw new ValidationError("You can't block yourself.");
+    }
+
+    const [otherUserExists, room] = await Promise.all([
+        User.exists({ _id: otherUserId }),
+        findExistingDirectRoom(currentUserId, otherUserId),
+    ]);
+
+    if (!otherUserExists) {
+        throw new NotFoundError('User not found', ErrorCode.USER_NOT_FOUND);
+    }
+
+    if (!room) {
+        throw new ValidationError('You can only block users you already have a chat with.');
+    }
+
+    const blockerUserObjectId = new mongoose.Types.ObjectId(currentUserId);
+    const blockedUserObjectId = new mongoose.Types.ObjectId(otherUserId);
+    const now = new Date();
+
+    const upsertResult = await UserBlock.updateOne(
+        {
+            blockerUserId: blockerUserObjectId,
+            blockedUserId: blockedUserObjectId,
+            isActive: true,
+        },
+        {
+            $setOnInsert: {
+                roomId: room._id,
+                blockedAt: now,
+                source: 'user_action',
+                isActive: true,
+                unblockedAt: null,
+            },
+        },
+        { upsert: true }
+    );
+
+    await User.updateOne(
+        { _id: currentUserId },
+        { $addToSet: { hiddenDirectRooms: room._id } }
+    );
+
+    const alreadyBlocked = upsertResult.upsertedCount === 0;
+
+    logger.info('dm.user_blocked', {
+        blockerUserId: currentUserId,
+        blockedUserId: otherUserId,
+        roomId: room._id.toString(),
+        alreadyBlocked,
+    });
+
+    res.json({
+        message: alreadyBlocked ? 'User already blocked.' : 'User blocked.',
+        roomId: room._id.toString(),
+        blocked: true,
+        alreadyBlocked,
+    });
+}));
+
 router.post('/direct/:otherUserId', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
     const currentUserId = req.user!.userId;
     const { otherUserId } = req.params;
@@ -513,13 +744,30 @@ router.post('/direct/:otherUserId', authenticateUser, asyncHandler(async (req: A
         throw new ValidationError("You can't message yourself.");
     }
 
-    const [otherUser, currentUser] = await Promise.all([
+    const [otherUser, currentUser, blockState] = await Promise.all([
         User.findById(otherUserId).select('_id username profileImageUrl').lean<LeanUser | null>(),
         User.findById(currentUserId).select('_id username').lean<LeanUser | null>(),
+        getDirectBlockState(currentUserId, otherUserId),
     ]);
 
     if (!otherUser || !currentUser) {
         throw new NotFoundError('User not found', ErrorCode.USER_NOT_FOUND);
+    }
+
+    if (blockState.isBlockedByMe) {
+        throw new AppError(
+            ErrorCode.USER_BLOCKED,
+            'You blocked this user. Unblock them to message again.',
+            403
+        );
+    }
+
+    if (blockState.isBlockedByOtherUser) {
+        throw new AppError(
+            ErrorCode.USER_BLOCKED,
+            'This user is unavailable for direct messages.',
+            403
+        );
     }
 
     const participants = [currentUserId, otherUserId].sort();
@@ -551,7 +799,13 @@ router.post('/direct/:otherUserId', authenticateUser, asyncHandler(async (req: A
     const roomObjectId = room._id as mongoose.Types.ObjectId;
 
     await Promise.all([
-        User.updateOne({ _id: currentUserId }, { $addToSet: { joinedRooms: roomObjectId } }),
+        User.updateOne(
+            { _id: currentUserId },
+            {
+                $addToSet: { joinedRooms: roomObjectId },
+                $pull: { hiddenDirectRooms: roomObjectId },
+            }
+        ),
         User.updateOne({ _id: otherUserId }, { $addToSet: { joinedRooms: roomObjectId } }),
     ]);
 

@@ -5,6 +5,7 @@ import mongoose from 'mongoose';
 import { Room } from '../models/Room.js';
 import { Message } from '../models/Message.js';
 import { User } from '../models/User.js';
+import { UserBlock } from '../models/UserBlock.js';
 import { NotificationService } from '../services/NotificationService.js';
 import { buildSocketCors } from '../utils/cors.js';
 import { sanitizePlainText } from '../utils/sanitize.js';
@@ -59,6 +60,11 @@ interface LeanUser {
     _id: mongoose.Types.ObjectId;
     username?: string;
     profileImageUrl?: string;
+}
+
+interface LeanUserBlock {
+    blockerUserId: mongoose.Types.ObjectId;
+    blockedUserId: mongoose.Types.ObjectId;
 }
 
 interface RoomReadPointer {
@@ -367,6 +373,59 @@ export function setupSocketIO(server: HTTPServer) {
 
                 const roomObjectId = requireObjectId(user.roomId, 'room ID');
                 const senderObjectId = requireObjectId(user.userId, 'user ID');
+                const room = await Room.findById(roomObjectId)
+                    .select('_id type participants')
+                    .lean<LeanRoom | null>();
+
+                if (!room) {
+                    emitSocketError(socket, ErrorCode.ROOM_NOT_FOUND, 'Room not found');
+                    return;
+                }
+
+                let privateRoomOtherParticipantId: mongoose.Types.ObjectId | null = null;
+                if ((room.type || 'public') === 'private') {
+                    const participants = room.participants || [];
+                    const senderIsParticipant = participants.some((participantId) => participantId.equals(senderObjectId));
+
+                    if (!senderIsParticipant) {
+                        emitSocketError(socket, ErrorCode.FORBIDDEN, 'You are not allowed to message in this chat');
+                        return;
+                    }
+
+                    const otherParticipant = participants.find((participantId) => !participantId.equals(senderObjectId));
+                    if (!otherParticipant) {
+                        emitSocketError(socket, ErrorCode.VALIDATION_ERROR, 'Private chat participants are invalid');
+                        return;
+                    }
+
+                    privateRoomOtherParticipantId = otherParticipant;
+
+                    const activeBlock = await UserBlock.findOne({
+                        isActive: true,
+                        $or: [
+                            {
+                                blockerUserId: senderObjectId,
+                                blockedUserId: otherParticipant,
+                            },
+                            {
+                                blockerUserId: otherParticipant,
+                                blockedUserId: senderObjectId,
+                            },
+                        ],
+                    }).select('blockerUserId blockedUserId').lean<LeanUserBlock | null>();
+
+                    if (activeBlock) {
+                        const blockedBySender = activeBlock.blockerUserId.toString() === senderObjectId.toString();
+                        emitSocketError(
+                            socket,
+                            ErrorCode.USER_BLOCKED,
+                            blockedBySender
+                                ? 'You blocked this user. Unblock them to send messages.'
+                                : 'This user is unavailable for direct messages.'
+                        );
+                        return;
+                    }
+                }
 
                 const sanitizedText = sanitizePlainText(data.text || '', {
                     maxLength: 2000,
@@ -413,6 +472,18 @@ export function setupSocketIO(server: HTTPServer) {
                     await Message.updateOne(
                         { _id: parentObjectId },
                         { $inc: { replyCount: 1 } }
+                    );
+                }
+
+                // "Delete chat" is a per-user hide, so any new DM message should surface the chat again.
+                if (!parentObjectId && privateRoomOtherParticipantId) {
+                    await User.updateMany(
+                        {
+                            _id: { $in: [senderObjectId, privateRoomOtherParticipantId] },
+                        },
+                        {
+                            $pull: { hiddenDirectRooms: roomObjectId },
+                        }
                     );
                 }
 
