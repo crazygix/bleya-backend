@@ -734,6 +734,79 @@ router.post('/direct/:otherUserId/block', authenticateUser, asyncHandler(async (
     });
 }));
 
+router.post('/direct/:otherUserId/unblock', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
+    const currentUserId = req.user!.userId;
+    const { otherUserId } = req.params;
+
+    validateObjectId(otherUserId, 'user ID');
+
+    if (otherUserId === currentUserId) {
+        throw new ValidationError("You can't unblock yourself.");
+    }
+
+    const otherUserExists = await User.exists({ _id: otherUserId });
+    if (!otherUserExists) {
+        throw new NotFoundError('User not found', ErrorCode.USER_NOT_FOUND);
+    }
+
+    const blockerUserObjectId = new mongoose.Types.ObjectId(currentUserId);
+    const blockedUserObjectId = new mongoose.Types.ObjectId(otherUserId);
+
+    const activeBlocks = await UserBlock.find({
+        blockerUserId: blockerUserObjectId,
+        blockedUserId: blockedUserObjectId,
+        isActive: true,
+    }).select('_id roomId').lean<Array<{ _id: mongoose.Types.ObjectId; roomId: mongoose.Types.ObjectId }>>();
+
+    if (activeBlocks.length === 0) {
+        res.json({
+            message: 'User is not blocked.',
+            roomId: null,
+            blocked: false,
+            alreadyBlocked: false,
+        });
+        return;
+    }
+
+    const now = new Date();
+    const activeBlockIds = activeBlocks.map((block) => block._id);
+    const roomIds = [...new Set(activeBlocks.map((block) => block.roomId.toString()))]
+        .map((roomId) => new mongoose.Types.ObjectId(roomId));
+
+    await UserBlock.updateMany(
+        {
+            _id: { $in: activeBlockIds },
+            isActive: true,
+        },
+        {
+            $set: {
+                isActive: false,
+                unblockedAt: now,
+            },
+        }
+    );
+
+    if (roomIds.length > 0) {
+        await User.updateOne(
+            { _id: currentUserId },
+            { $pull: { hiddenDirectRooms: { $in: roomIds } } }
+        );
+    }
+
+    logger.info('dm.user_unblocked', {
+        blockerUserId: currentUserId,
+        unblockedUserId: otherUserId,
+        roomIds: roomIds.map((roomId) => roomId.toString()),
+    });
+
+    res.json({
+        message: 'User unblocked.',
+        roomId: roomIds[0]?.toString() || null,
+        blocked: false,
+        alreadyBlocked: false,
+    });
+}));
+
 router.post('/direct/:otherUserId', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
     const currentUserId = req.user!.userId;
     const { otherUserId } = req.params;

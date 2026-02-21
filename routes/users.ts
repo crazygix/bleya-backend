@@ -3,13 +3,28 @@ import multer from 'multer';
 import path from 'path';
 import { authenticateUser, AuthRequest } from '../middleware/auth.js';
 import { User } from '../models/User.js';
+import { UserBlock } from '../models/UserBlock.js';
 import { uploadToR2, deleteFromR2, extractKeyFromUrl } from '../services/r2Service.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { NotFoundError, ValidationError, ErrorCode } from '../utils/errors.js';
 import { sanitizePlainText, sanitizeUsername } from '../utils/sanitize.js';
 import logger from '../utils/logger.js';
+import mongoose from 'mongoose';
 
 const router = express.Router();
+
+interface LeanBlockedUser {
+    _id: mongoose.Types.ObjectId;
+    username?: string;
+    bio?: string;
+    profileImageUrl?: string;
+}
+
+interface LeanActiveUserBlock {
+    _id: mongoose.Types.ObjectId;
+    blockedUserId: mongoose.Types.ObjectId;
+    blockedAt?: Date;
+}
 
 const upload = multer({
     storage: multer.memoryStorage(),
@@ -156,12 +171,51 @@ router.post('/profile-image', authenticateUser, upload.single('image'), asyncHan
     });
 }));
 
-router.get('/:userId', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
-    const { userId } = req.params;
+router.get('/blocked', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
+    const currentUserId = req.user!.userId;
+    const currentUserObjectId = new mongoose.Types.ObjectId(currentUserId);
 
-    if (!userId.match(/^[0-9a-fA-F]{24}$/)) {
-        throw new ValidationError('Invalid user ID format');
+    const activeBlocks = await UserBlock.find({
+        blockerUserId: currentUserObjectId,
+        isActive: true,
+    }).select('_id blockedUserId blockedAt').sort({ blockedAt: -1 }).lean<LeanActiveUserBlock[]>();
+
+    if (activeBlocks.length === 0) {
+        res.json([]);
+        return;
     }
+
+    const blockedUserIds = activeBlocks.map((block) => block.blockedUserId);
+    const blockedUsers = await User.find({
+        _id: { $in: blockedUserIds },
+    }).select('_id username bio profileImageUrl').lean<LeanBlockedUser[]>();
+
+    const blockedUserMap = new Map(
+        blockedUsers.map((user) => [user._id.toString(), user])
+    );
+
+    const response = activeBlocks
+        .map((block) => {
+            const blockedUser = blockedUserMap.get(block.blockedUserId.toString());
+            if (!blockedUser) {
+                return null;
+            }
+
+            return {
+                id: blockedUser._id.toString(),
+                username: blockedUser.username || '',
+                bio: blockedUser.bio || '',
+                profileImageUrl: blockedUser.profileImageUrl || '',
+                blockedAt: block.blockedAt ? block.blockedAt.getTime() : null,
+            };
+        })
+        .filter((item): item is NonNullable<typeof item> => item !== null);
+
+    res.json(response);
+}));
+
+router.get('/:userId([0-9a-fA-F]{24})', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
+    const { userId } = req.params;
 
     const user = await User.findById(userId);
     if (!user) {

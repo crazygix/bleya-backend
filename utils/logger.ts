@@ -1,3 +1,5 @@
+import fs from 'fs';
+
 type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
 interface LogContext {
@@ -16,8 +18,8 @@ function writeLog(level: LogLevel, message: string, context?: LogContext): void 
   }
 
   const line = `${JSON.stringify(payload)}\n`;
-  const stream = level === 'error' || level === 'warn' ? process.stderr : process.stdout;
-  stream.write(line);
+  const fd = level === 'error' || level === 'warn' ? process.stderr.fd : process.stdout.fd;
+  fs.writeSync(fd, line);
 }
 
 const logger = {

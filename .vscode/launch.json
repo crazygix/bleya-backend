@@ -6,7 +6,9 @@
             "request": "launch",
             "name": "Launch Server",
             "program": "${workspaceFolder}/dist/server/server.js",
-            "preLaunchTask": "build"
+            "preLaunchTask": "build",
+            "console": "internalConsole",
+            "outputCapture": "std"
         }
     ]
 }
