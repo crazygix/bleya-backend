@@ -5,7 +5,6 @@ import cookieParser from 'cookie-parser';
 import compression from 'compression';
 import cors from 'cors';
 import helmet from 'helmet';
-import crypto from 'crypto';
 import mongoose from 'mongoose';
 import authRoutes from '../routes/auth.js';
 import roomRoutes from '../routes/rooms.js';
@@ -15,13 +14,10 @@ import notificationRoutes from '../routes/notifications.js';
 import citiesRoutes from '../routes/cities.js';
 import { setupSocketIO } from './socket.js';
 import { errorHandler } from '../middleware/errorHandler.js';
+import { httpRequestLogger } from '../middleware/httpRequestLogger.js';
 import { buildCorsOptions } from '../utils/cors.js';
 import logger from '../utils/logger.js';
 import { config, validateR2Config } from '../config/index.js';
-
-interface RequestWithId extends Request {
-    requestId?: string;
-}
 
 const r2Validation = validateR2Config();
 if (!r2Validation.complete) {
@@ -81,31 +77,7 @@ app.use(compression());
 app.use(cookieParser());
 app.use(bodyParser.json({ limit: '10mb' }));
 app.use(bodyParser.urlencoded({ extended: true, limit: '10mb' }));
-
-app.use((req: Request, res: Response, next) => {
-    const requestId = crypto.randomUUID();
-    const request = req as RequestWithId;
-    request.requestId = requestId;
-    const startedAt = Date.now();
-
-    logger.info('http.request.start', {
-        requestId,
-        method: req.method,
-        path: req.path,
-    });
-
-    res.on('finish', () => {
-        logger.info('http.request.finish', {
-            requestId,
-            method: req.method,
-            path: req.path,
-            statusCode: res.statusCode,
-            durationMs: Date.now() - startedAt,
-        });
-    });
-
-    next();
-});
+app.use(httpRequestLogger);
 
 app.use('/api/auth', authRoutes);
 app.use('/api/rooms', roomRoutes);

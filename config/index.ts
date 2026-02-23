@@ -8,6 +8,22 @@ const envPath = path.resolve(__dirname, '../../.env');
 
 dotenv.config({ path: envPath });
 
+export type HttpLogBodyMode = 'off' | 'errors' | 'all';
+
+const HTTP_LOG_BODY_MODES: HttpLogBodyMode[] = ['off', 'errors', 'all'];
+const DEFAULT_REDACT_FIELDS = [
+  'password',
+  'token',
+  'access_token',
+  'refresh_token',
+  'authorization',
+  'cookie',
+  'set-cookie',
+  'secret',
+  'api_key',
+  'apikey',
+];
+
 function requiredEnv(name: string): string {
   const value = process.env[name];
   if (!value || value.trim().length === 0) {
@@ -30,6 +46,24 @@ function parseNumberEnv(name: string, defaultValue: number): number {
   return parsed;
 }
 
+function parseBooleanEnv(name: string, defaultValue: boolean): boolean {
+  const raw = process.env[name];
+  if (!raw || raw.trim().length === 0) {
+    return defaultValue;
+  }
+
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === 'true' || normalized === '1' || normalized === 'yes' || normalized === 'on') {
+    return true;
+  }
+
+  if (normalized === 'false' || normalized === '0' || normalized === 'no' || normalized === 'off') {
+    return false;
+  }
+
+  throw new Error(`${name} must be a boolean (true/false)`);
+}
+
 function parseOrigins(value: string | undefined): string[] {
   if (!value) return [];
   return value
@@ -38,9 +72,41 @@ function parseOrigins(value: string | undefined): string[] {
     .filter((origin) => origin.length > 0);
 }
 
+function parseList(value: string | undefined): string[] {
+  if (!value) {
+    return [];
+  }
+
+  return value
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+}
+
+function parseHttpLogBodyMode(name: string, defaultValue: HttpLogBodyMode): HttpLogBodyMode {
+  const raw = process.env[name];
+  if (!raw || raw.trim().length === 0) {
+    return defaultValue;
+  }
+
+  const normalized = raw.trim().toLowerCase();
+  if (!HTTP_LOG_BODY_MODES.includes(normalized as HttpLogBodyMode)) {
+    throw new Error(`${name} must be one of: ${HTTP_LOG_BODY_MODES.join(', ')}`);
+  }
+
+  return normalized as HttpLogBodyMode;
+}
+
+const nodeEnv = process.env.NODE_ENV || 'development';
+const isProduction = nodeEnv === 'production';
+const isLocal = nodeEnv === 'development';
+
+const bodyRedactFields = parseList(process.env.HTTP_LOG_BODY_REDACT_FIELDS);
+
 export const config = {
-  nodeEnv: process.env.NODE_ENV || 'development',
-  isProduction: process.env.NODE_ENV === 'production',
+  nodeEnv,
+  isProduction,
+  isLocal,
   port: parseNumberEnv('PORT', 8080),
   host: process.env.HOST || 'localhost',
 
@@ -52,6 +118,15 @@ export const config = {
 
   corsOrigins: parseOrigins(process.env.CORS_ORIGINS),
   corsAllowAllInDev: process.env.CORS_ALLOW_ALL_IN_DEV === 'true',
+
+  httpLogging: {
+    bodyMode: parseHttpLogBodyMode('HTTP_LOG_BODY_MODE', isProduction ? 'errors' : 'all'),
+    // Local development keeps payloads untouched for easier debugging.
+    redactBodies: isLocal ? false : parseBooleanEnv('HTTP_LOG_BODY_REDACT', true),
+    truncateBodies: isLocal ? false : parseBooleanEnv('HTTP_LOG_BODY_TRUNCATE', true),
+    maxBodyBytes: parseNumberEnv('HTTP_LOG_BODY_MAX_BYTES', 4096),
+    bodyRedactFields: bodyRedactFields.length > 0 ? bodyRedactFields : DEFAULT_REDACT_FIELDS,
+  },
 
   r2: {
     endpoint: process.env.R2_ENDPOINT || '',

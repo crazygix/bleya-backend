@@ -4,6 +4,7 @@ import { AppError, ErrorResponse, ErrorCode } from '../utils/errors.js';
 import logger from '../utils/logger.js';
 
 interface RequestWithUser extends Request {
+  requestId?: string;
   user?: {
     userId?: string;
   };
@@ -19,9 +20,12 @@ function hasErrorCode(value: unknown): value is { code: string } {
 }
 
 const logError = (error: Error, req: Request, context?: Record<string, unknown>) => {
+  const request = req as RequestWithUser;
+
   logger.error('request.error', {
+    requestId: request.requestId,
     method: req.method,
-    path: req.path,
+    path: req.originalUrl || req.path,
     error: {
       name: error.name,
       message: error.message,
