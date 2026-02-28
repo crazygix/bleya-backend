@@ -6,17 +6,21 @@ import { Room } from '../models/Room.js';
 import { Message } from '../models/Message.js';
 import { Notification } from '../models/Notification.js';
 import { User } from '../models/User.js';
-import { UserBlock } from '../models/UserBlock.js';
 import {
     NotificationService,
     PopulatedNotification,
     PopulatedNotificationParticipant,
 } from '../services/NotificationService.js';
+import { createMessage } from '../services/messageService.js';
 import { buildSocketCors } from '../utils/cors.js';
-import { sanitizePlainText } from '../utils/sanitize.js';
-import { ErrorCode } from '../utils/errors.js';
+import { ErrorCode, AppError } from '../utils/errors.js';
+import { validateObjectId } from '../utils/validation.js';
+import { toRoomLocation, isPrivateRoomParticipant } from '../utils/room.js';
+import { formatMessage, buildUsernameMap } from '../utils/message.js';
 import { config } from '../config/index.js';
 import logger from '../utils/logger.js';
+import type { LeanRoom, LeanMessage, LeanUser, LeanJoinedRoomsUser } from '../types/lean.js';
+import type { FormattedMessage } from '../utils/message.js';
 
 interface AuthenticatedSocket {
     userId: string;
@@ -35,57 +39,8 @@ interface SocketDataState {
 
 type SocketWithState = Socket & { data: SocketDataState };
 
-interface GeoPoint {
-    type?: 'Point';
-    coordinates?: number[];
-}
-
-interface LeanRoom {
-    _id: mongoose.Types.ObjectId;
-    name: string;
-    description?: string;
-    type?: 'public' | 'private';
-    participants?: mongoose.Types.ObjectId[];
-    cityKey?: string;
-    imageUrl?: string;
-    geo?: GeoPoint;
-}
-
-interface LeanMessage {
-    _id: mongoose.Types.ObjectId;
-    roomId: mongoose.Types.ObjectId;
-    userId: mongoose.Types.ObjectId;
-    text: string;
-    createdAt: Date;
-    parentMessageId?: mongoose.Types.ObjectId | null;
-    replyCount?: number;
-}
-
-interface LeanUser {
-    _id: mongoose.Types.ObjectId;
-    username?: string;
-    profileImageUrl?: string;
-}
-
-interface LeanUserBlock {
-    blockerUserId: mongoose.Types.ObjectId;
-    blockedUserId: mongoose.Types.ObjectId;
-}
-
-interface RoomReadPointer {
-    roomId: mongoose.Types.ObjectId;
-    lastReadAt: Date;
-}
-
-interface LeanSocketUser {
-    _id: mongoose.Types.ObjectId;
-    joinedRooms: mongoose.Types.ObjectId[];
-    roomReadPointers?: RoomReadPointer[];
-}
-
 const ROOM_MESSAGES_PAGE_SIZE = 50;
 const MAX_PUBLIC_ROOMS = 5;
-const OBJECT_ID_REGEX = /^[0-9a-fA-F]{24}$/;
 
 const EVENT_RATE_LIMITS: Record<string, { max: number; windowMs: number }> = {
     join_room: { max: 20, windowMs: 60_000 },
@@ -141,14 +96,6 @@ function parseSocketToken(socket: Socket): string | null {
     return null;
 }
 
-function requireObjectId(value: string, fieldName: string): mongoose.Types.ObjectId {
-    if (!OBJECT_ID_REGEX.test(value)) {
-        throw new Error(`Invalid ${fieldName} format`);
-    }
-
-    return new mongoose.Types.ObjectId(value);
-}
-
 function getSocketUser(socket: SocketWithState): AuthenticatedSocket {
     const user = socket.data.user;
     if (!user) {
@@ -156,28 +103,6 @@ function getSocketUser(socket: SocketWithState): AuthenticatedSocket {
     }
 
     return user;
-}
-
-function toRoomLocation(room: { geo?: GeoPoint }): { latitude: number; longitude: number } | null {
-    const coordinates = room.geo?.coordinates;
-    if (!coordinates || coordinates.length < 2) {
-        return null;
-    }
-
-    const [longitude, latitude] = coordinates;
-    if (!Number.isFinite(longitude) || !Number.isFinite(latitude)) {
-        return null;
-    }
-
-    return { latitude, longitude };
-}
-
-function isPrivateRoomParticipant(room: LeanRoom, userId: string): boolean {
-    if ((room.type || 'public') !== 'private') {
-        return true;
-    }
-
-    return (room.participants || []).some((participantId) => participantId.toString() === userId);
 }
 
 function resolveNotificationRoomName(
@@ -201,6 +126,84 @@ function resolveNotificationRoomName(
     }
 
     return (otherParticipant as PopulatedNotificationParticipant).username || fallbackName;
+}
+
+async function emitReplyNotifications(
+    io: SocketIOServer,
+    targets: { notificationId: string }[]
+): Promise<void> {
+    const notificationIds = targets.map((t) => new mongoose.Types.ObjectId(t.notificationId));
+    if (notificationIds.length === 0) return;
+
+    const populatedNotifications = await Notification.find({ _id: { $in: notificationIds } })
+        .select('recipient sender type room message thread read isDismissed createdAt updatedAt')
+        .populate('sender', 'username profileImageUrl')
+        .populate({
+            path: 'room',
+            select: 'name type participants',
+            populate: { path: 'participants', select: 'username' },
+        })
+        .populate('message', 'text')
+        .populate('thread', 'text')
+        .lean<PopulatedNotification[]>();
+
+    for (const notification of populatedNotifications) {
+        const targetUserId = notification.recipient.toString();
+        const roomName = resolveNotificationRoomName(notification, targetUserId);
+
+        io.to(`user:${targetUserId}`).emit('new_notification', {
+            id: notification._id.toString(),
+            recipient: targetUserId,
+            sender: {
+                id: notification.sender._id.toString(),
+                username: notification.sender.username || 'Unknown',
+                profileImageUrl: notification.sender.profileImageUrl || null,
+            },
+            type: notification.type,
+            roomId: notification.room._id.toString(),
+            roomName,
+            roomType: notification.room.type || 'public',
+            messageId: notification.message._id.toString(),
+            threadId: notification.thread._id.toString(),
+            parentMessageText: notification.thread.text || null,
+            replyText: notification.message.text || '',
+            previewText: notification.message.text ? notification.message.text.substring(0, 100) : '',
+            read: notification.read,
+            isDismissed: notification.isDismissed || false,
+            createdAt: notification.createdAt.getTime(),
+            updatedAt: notification.updatedAt.getTime(),
+        });
+    }
+}
+
+async function emitRoomSummaryUpdate(
+    io: SocketIOServer,
+    roomId: string,
+    messageData: FormattedMessage,
+    roomType: 'public' | 'private',
+    roomParticipants: string[]
+): Promise<void> {
+    const summaryPayload = {
+        roomId: messageData.roomId,
+        lastMessageText: messageData.text,
+        lastMessageTime: messageData.createdAt,
+        lastMessageUserId: messageData.userId,
+        lastMessageUsername: messageData.username,
+    };
+
+    if (roomType === 'private') {
+        for (const participantId of roomParticipants) {
+            io.to(`user:${participantId}`).emit('room_summary_updated', summaryPayload);
+        }
+    } else {
+        const memberUsers = await User.find({ joinedRooms: new mongoose.Types.ObjectId(roomId) })
+            .select('_id')
+            .lean<Array<{ _id: mongoose.Types.ObjectId }>>();
+
+        for (const member of memberUsers) {
+            io.to(`user:${member._id.toString()}`).emit('room_summary_updated', summaryPayload);
+        }
+    }
 }
 
 export function setupSocketIO(server: HTTPServer) {
@@ -251,7 +254,7 @@ export function setupSocketIO(server: HTTPServer) {
             }
 
             try {
-                const roomObjectId = requireObjectId(data.roomId, 'room ID');
+                const roomObjectId = validateObjectId(data.roomId, 'room ID');
                 const roomId = roomObjectId.toString();
 
                 const room = await Room.findById(roomObjectId).lean<LeanRoom | null>();
@@ -267,7 +270,7 @@ export function setupSocketIO(server: HTTPServer) {
 
                 const userDoc = await User.findById(user.userId)
                     .select('joinedRooms roomReadPointers')
-                    .lean<LeanSocketUser | null>();
+                    .lean<LeanJoinedRoomsUser | null>();
 
                 if (!userDoc) {
                     emitSocketError(socket, ErrorCode.USER_NOT_FOUND, 'User not found');
@@ -322,18 +325,8 @@ export function setupSocketIO(server: HTTPServer) {
                     ? await User.find({ _id: { $in: userIds } }).select('_id username').lean<LeanUser[]>()
                     : [];
 
-                const usernameMap = new Map(users.map((u) => [u._id.toString(), u.username || '']));
-
-                const formattedMessages = pageMessages.reverse().map((msg) => ({
-                    id: msg._id.toString(),
-                    roomId: msg.roomId.toString(),
-                    userId: msg.userId.toString(),
-                    username: usernameMap.get(msg.userId.toString()) || '',
-                    text: msg.text,
-                    createdAt: msg.createdAt.getTime(),
-                    parentMessageId: msg.parentMessageId?.toString() || null,
-                    replyCount: msg.replyCount || 0,
-                }));
+                const usernameMap = buildUsernameMap(users);
+                const formattedMessages = pageMessages.reverse().map((msg) => formatMessage(msg, usernameMap));
 
                 const nextCursor = pageMessages.length > 0
                     ? `${pageMessages[pageMessages.length - 1].createdAt.getTime()}_${pageMessages[pageMessages.length - 1]._id.toString()}`
@@ -412,236 +405,46 @@ export function setupSocketIO(server: HTTPServer) {
                     return;
                 }
 
-                const roomObjectId = requireObjectId(user.roomId, 'room ID');
-                const senderObjectId = requireObjectId(user.userId, 'user ID');
-                const room = await Room.findById(roomObjectId)
-                    .select('_id type participants')
-                    .lean<LeanRoom | null>();
-
-                if (!room) {
-                    emitSocketError(socket, ErrorCode.ROOM_NOT_FOUND, 'Room not found');
-                    return;
-                }
-
-                const senderInRoom = await User.exists({ _id: senderObjectId, joinedRooms: roomObjectId });
-                if (!senderInRoom) {
-                    emitSocketError(socket, ErrorCode.FORBIDDEN, 'You are not a member of this room');
-                    return;
-                }
-
-                let privateRoomOtherParticipantId: mongoose.Types.ObjectId | null = null;
-                if ((room.type || 'public') === 'private') {
-                    const participants = room.participants || [];
-                    const senderIsParticipant = participants.some((participantId) => participantId.equals(senderObjectId));
-
-                    if (!senderIsParticipant) {
-                        emitSocketError(socket, ErrorCode.FORBIDDEN, 'You are not allowed to message in this chat');
-                        return;
-                    }
-
-                    const otherParticipant = participants.find((participantId) => !participantId.equals(senderObjectId));
-                    if (!otherParticipant) {
-                        emitSocketError(socket, ErrorCode.VALIDATION_ERROR, 'Private chat participants are invalid');
-                        return;
-                    }
-
-                    privateRoomOtherParticipantId = otherParticipant;
-
-                    const activeBlock = await UserBlock.findOne({
-                        isActive: true,
-                        $or: [
-                            {
-                                blockerUserId: senderObjectId,
-                                blockedUserId: otherParticipant,
-                            },
-                            {
-                                blockerUserId: otherParticipant,
-                                blockedUserId: senderObjectId,
-                            },
-                        ],
-                    }).select('blockerUserId blockedUserId').lean<LeanUserBlock | null>();
-
-                    if (activeBlock) {
-                        const blockedBySender = activeBlock.blockerUserId.toString() === senderObjectId.toString();
-                        emitSocketError(
-                            socket,
-                            ErrorCode.USER_BLOCKED,
-                            blockedBySender
-                                ? 'You blocked this user. Unblock them to send messages.'
-                                : 'This user is unavailable for direct messages.'
-                        );
-                        return;
-                    }
-                }
-
-                const sanitizedText = sanitizePlainText(data.text || '', {
-                    maxLength: 2000,
-                    collapseWhitespace: true,
-                    escapeHtml: true,
+                const result = await createMessage({
+                    userId: user.userId,
+                    roomId: user.roomId,
+                    text: data.text,
+                    parentMessageId: data.parentMessageId,
                 });
 
-                if (!sanitizedText || sanitizedText.trim().length === 0) {
-                    emitSocketError(socket, ErrorCode.VALIDATION_ERROR, 'Message cannot be empty');
-                    return;
-                }
+                io.to(user.roomId).emit('new_message', result.messageData);
 
-                let parentObjectId: mongoose.Types.ObjectId | null = null;
-                if (data.parentMessageId) {
-                    if (!OBJECT_ID_REGEX.test(data.parentMessageId)) {
-                        emitSocketError(socket, ErrorCode.VALIDATION_ERROR, 'Invalid parent message ID format');
-                        return;
-                    }
-
-                    parentObjectId = new mongoose.Types.ObjectId(data.parentMessageId);
-                    const parentMessage = await Message.findById(parentObjectId).lean<LeanMessage | null>();
-
-                    if (!parentMessage) {
-                        emitSocketError(socket, ErrorCode.NOT_FOUND, 'Parent message not found');
-                        return;
-                    }
-
-                    if (parentMessage.roomId.toString() !== user.roomId) {
-                        emitSocketError(socket, ErrorCode.VALIDATION_ERROR, 'Parent message not in this room');
-                        return;
-                    }
-                }
-
-                const message = new Message({
-                    roomId: roomObjectId,
-                    userId: senderObjectId,
-                    text: sanitizedText,
-                    parentMessageId: parentObjectId,
-                });
-
-                await message.save();
-
-                if (parentObjectId) {
-                    await Message.updateOne(
-                        { _id: parentObjectId },
-                        { $inc: { replyCount: 1 } }
-                    );
-                }
-
-                // "Delete chat" is a per-user hide, so any new DM message should surface the chat again.
-                if (!parentObjectId && privateRoomOtherParticipantId) {
-                    await User.updateMany(
-                        {
-                            _id: { $in: [senderObjectId, privateRoomOtherParticipantId] },
-                        },
-                        {
-                            $pull: { hiddenDirectRooms: roomObjectId },
-                        }
-                    );
-                }
-
-                const senderUser = await User.findById(senderObjectId).select('username').lean<LeanUser | null>();
-                const username = senderUser?.username || '';
-
-                const messageData = {
-                    id: message._id.toString(),
-                    roomId: message.roomId.toString(),
-                    userId: message.userId.toString(),
-                    username,
-                    text: message.text,
-                    createdAt: message.createdAt.getTime(),
-                    parentMessageId: message.parentMessageId?.toString() || null,
-                    replyCount: message.replyCount,
-                };
-
-
-                io.to(user.roomId).emit('new_message', messageData);
-
-                // Notify if it's a reply
-                if (parentObjectId) {
+                if (result.notificationTargets.length > 0) {
                     try {
-                        const targets = await NotificationService.createReplyNotification({
-                            senderId: message.userId.toString(),
-                            roomId: message.roomId.toString(),
-                            parentMessageId: parentObjectId.toString(),
-                            replyMessageId: message._id.toString(),
-                        });
-
-                        const notificationIds = targets.map((target) => new mongoose.Types.ObjectId(target.notificationId));
-                        if (notificationIds.length > 0) {
-                            const populatedNotifications = await Notification.find({
-                                _id: { $in: notificationIds },
-                            })
-                                .select('recipient sender type room message thread read isDismissed createdAt updatedAt')
-                                .populate('sender', 'username profileImageUrl')
-                                .populate({
-                                    path: 'room',
-                                    select: 'name type participants',
-                                    populate: {
-                                        path: 'participants',
-                                        select: 'username',
-                                    },
-                                })
-                                .populate('message', 'text')
-                                .populate('thread', 'text')
-                                .lean<PopulatedNotification[]>();
-
-                            for (const notification of populatedNotifications) {
-                                const targetUserId = notification.recipient.toString();
-                                const roomName = resolveNotificationRoomName(notification, targetUserId);
-
-                                const notificationData = {
-                                    _id: notification._id.toString(),
-                                    recipient: targetUserId,
-                                    sender: {
-                                        id: notification.sender._id.toString(),
-                                        username: notification.sender.username || 'Unknown',
-                                        profileImageUrl: notification.sender.profileImageUrl || null,
-                                    },
-                                    type: notification.type,
-                                    roomId: notification.room._id.toString(),
-                                    roomName,
-                                    roomType: notification.room.type || 'public',
-                                    messageId: notification.message._id.toString(),
-                                    threadId: notification.thread._id.toString(),
-                                    parentMessageText: notification.thread.text || null,
-                                    replyText: notification.message.text || '',
-                                    previewText: notification.message.text ? notification.message.text.substring(0, 100) : '',
-                                    read: notification.read,
-                                    createdAt: notification.createdAt.getTime(),
-                                    updatedAt: notification.updatedAt.getTime(),
-                                };
-
-                                io.to(`user:${targetUserId}`).emit('new_notification', notificationData);
-                            }
-                        }
+                        await emitReplyNotifications(io, result.notificationTargets);
                     } catch (err) {
                         logger.error('socket.notification.failed', {
                             error: err instanceof Error ? err.message : String(err),
-                            messageId: message._id.toString(),
+                            messageId: result.messageData.id,
                         });
                     }
                 }
 
-                // Room-level summaries intentionally track top-level messages only.
-                if (!parentObjectId) {
-                    const summaryPayload = {
-                        roomId: messageData.roomId,
-                        lastMessageText: messageData.text,
-                        lastMessageTime: messageData.createdAt,
-                        lastMessageUserId: messageData.userId,
-                        lastMessageUsername: messageData.username,
-                    };
-
-                    const memberUsers = await User.find({ joinedRooms: roomObjectId })
-                        .select('_id')
-                        .lean<Array<{ _id: mongoose.Types.ObjectId }>>();
-
-                    for (const member of memberUsers) {
-                        io.to(`user:${member._id.toString()}`).emit('room_summary_updated', summaryPayload);
-                    }
+                if (result.isTopLevel) {
+                    await emitRoomSummaryUpdate(
+                        io,
+                        user.roomId,
+                        result.messageData,
+                        result.roomType,
+                        result.roomParticipants
+                    );
                 }
 
                 logger.info('socket.message_sent', {
                     userId: user.userId,
                     roomId: user.roomId,
-                    parentMessageId: parentObjectId?.toString() || null,
+                    parentMessageId: data.parentMessageId || null,
                 });
             } catch (error) {
+                if (error instanceof AppError) {
+                    emitSocketError(socket, error.code, error.message);
+                    return;
+                }
                 logger.error('socket.send_message.failed', {
                     userId: user.userId,
                     roomId: user.roomId,

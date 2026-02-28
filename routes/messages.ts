@@ -6,33 +6,15 @@ import { Room } from '../models/Room.js';
 import { User } from '../models/User.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { AppError, NotFoundError, ValidationError, ErrorCode } from '../utils/errors.js';
+import { isValidObjectId } from '../utils/validation.js';
+import { formatMessage, buildUsernameMap } from '../utils/message.js';
+import type { LeanRoom, LeanMessage, LeanUser } from '../types/lean.js';
 
 const router = express.Router();
 
-interface LeanMessage {
-    _id: mongoose.Types.ObjectId;
-    roomId: mongoose.Types.ObjectId;
-    userId: mongoose.Types.ObjectId;
-    text: string;
-    createdAt: Date;
-    parentMessageId?: mongoose.Types.ObjectId | null;
-    replyCount?: number;
-}
-
-interface LeanUser {
-    _id: mongoose.Types.ObjectId;
-    username?: string;
-}
-
-interface LeanMessageRoom {
-    _id: mongoose.Types.ObjectId;
-    type?: 'public' | 'private';
-    participants?: mongoose.Types.ObjectId[];
-}
-
 async function assertCanAccessMessageRoom(userId: string, roomId: mongoose.Types.ObjectId): Promise<void> {
     const [room, hasRoomMembership] = await Promise.all([
-        Room.findById(roomId).select('_id type participants').lean<LeanMessageRoom | null>(),
+        Room.findById(roomId).select('_id type participants').lean<LeanRoom | null>(),
         User.exists({ _id: userId, joinedRooms: roomId }),
     ]);
 
@@ -56,7 +38,7 @@ router.get('/:messageId/thread', authenticateUser, asyncHandler(async (req: Auth
     const userId = req.user!.userId;
     const { messageId } = req.params;
 
-    if (!messageId.match(/^[0-9a-fA-F]{24}$/)) {
+    if (!isValidObjectId(messageId)) {
         throw new ValidationError('Invalid message ID format');
     }
 
@@ -78,33 +60,11 @@ router.get('/:messageId/thread', authenticateUser, asyncHandler(async (req: Auth
         .select('_id username')
         .lean<LeanUser[]>();
 
-    const usernameMap = new Map(users.map((u) => [u._id.toString(), u.username || '']));
-
-    const formattedParent = {
-        id: parentMessage._id.toString(),
-        roomId: parentMessage.roomId.toString(),
-        userId: parentMessage.userId.toString(),
-        username: usernameMap.get(parentMessage.userId.toString()) || '',
-        text: parentMessage.text,
-        createdAt: parentMessage.createdAt.getTime(),
-        parentMessageId: parentMessage.parentMessageId?.toString() || null,
-        replyCount: parentMessage.replyCount || 0,
-    };
-
-    const formattedReplies = replies.map((msg) => ({
-        id: msg._id.toString(),
-        roomId: msg.roomId.toString(),
-        userId: msg.userId.toString(),
-        username: usernameMap.get(msg.userId.toString()) || '',
-        text: msg.text,
-        createdAt: msg.createdAt.getTime(),
-        parentMessageId: msg.parentMessageId?.toString() || null,
-        replyCount: msg.replyCount || 0,
-    }));
+    const usernameMap = buildUsernameMap(users);
 
     res.json({
-        parentMessage: formattedParent,
-        replies: formattedReplies,
+        parentMessage: formatMessage(parentMessage, usernameMap),
+        replies: replies.map((msg) => formatMessage(msg, usernameMap)),
     });
 }));
 
@@ -112,7 +72,7 @@ router.get('/:messageId', authenticateUser, asyncHandler(async (req: AuthRequest
     const userId = req.user!.userId;
     const { messageId } = req.params;
 
-    if (!messageId.match(/^[0-9a-fA-F]{24}$/)) {
+    if (!isValidObjectId(messageId)) {
         throw new ValidationError('Invalid message ID format');
     }
 
@@ -123,17 +83,9 @@ router.get('/:messageId', authenticateUser, asyncHandler(async (req: AuthRequest
     await assertCanAccessMessageRoom(userId, message.roomId);
 
     const user = await User.findById(message.userId).select('_id username').lean<LeanUser | null>();
+    const usernameMap = new Map([[message.userId.toString(), user?.username || '']]);
 
-    res.json({
-        id: message._id.toString(),
-        roomId: message.roomId.toString(),
-        userId: message.userId.toString(),
-        username: user?.username || '',
-        text: message.text,
-        createdAt: message.createdAt.getTime(),
-        parentMessageId: message.parentMessageId?.toString() || null,
-        replyCount: message.replyCount || 0,
-    });
+    res.json(formatMessage(message, usernameMap));
 }));
 
 export default router;

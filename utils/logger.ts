@@ -1,39 +1,33 @@
-import fs from 'fs';
+import pino from 'pino';
+import { config } from '../config/index.js';
 
-type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+type LogContext = { [key: string]: unknown };
 
-interface LogContext {
-  [key: string]: unknown;
-}
+const pinoInstance = pino({
+  level: config.isProduction ? 'info' : 'debug',
+  timestamp: () => `,"timestamp":"${new Date().toISOString()}"`,
+  formatters: {
+    level(label) {
+      return { level: label };
+    },
+  },
+  messageKey: 'message',
+});
 
-function writeLog(level: LogLevel, message: string, context?: LogContext): void {
-  const payload: Record<string, unknown> = {
-    timestamp: new Date().toISOString(),
-    level,
-    message,
-  };
-
-  if (context && Object.keys(context).length > 0) {
-    payload.context = context;
-  }
-
-  const line = `${JSON.stringify(payload)}\n`;
-  const fd = level === 'error' || level === 'warn' ? process.stderr.fd : process.stdout.fd;
-  fs.writeSync(fd, line);
-}
-
+// Wrapper preserving the existing (message, context?) call signature
+// while delegating to Pino's async, non-blocking writes.
 const logger = {
   debug(message: string, context?: LogContext): void {
-    writeLog('debug', message, context);
+    context ? pinoInstance.debug({ context }, message) : pinoInstance.debug(message);
   },
   info(message: string, context?: LogContext): void {
-    writeLog('info', message, context);
+    context ? pinoInstance.info({ context }, message) : pinoInstance.info(message);
   },
   warn(message: string, context?: LogContext): void {
-    writeLog('warn', message, context);
+    context ? pinoInstance.warn({ context }, message) : pinoInstance.warn(message);
   },
   error(message: string, context?: LogContext): void {
-    writeLog('error', message, context);
+    context ? pinoInstance.error({ context }, message) : pinoInstance.error(message);
   },
 };
 

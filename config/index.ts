@@ -28,9 +28,12 @@ const DEFAULT_REDACT_FIELDS = [
   'phoneNumber',
 ];
 
-function requiredEnv(name: string): string {
+function requiredEnv(name: string, options?: { defaultInTest?: string }): string {
   const value = process.env[name];
   if (!value || value.trim().length === 0) {
+    if (isTest && options?.defaultInTest) {
+      return options.defaultInTest;
+    }
     throw new Error(`${name} environment variable is not set`);
   }
   return value;
@@ -104,6 +107,7 @@ function parseHttpLogBodyMode(name: string, defaultValue: HttpLogBodyMode): Http
 const nodeEnv = process.env.NODE_ENV || 'development';
 const isProduction = nodeEnv === 'production';
 const isLocal = nodeEnv === 'development';
+const isTest = nodeEnv === 'test';
 
 const bodyRedactFields = parseList(process.env.HTTP_LOG_BODY_REDACT_FIELDS);
 
@@ -111,11 +115,12 @@ export const config = {
   nodeEnv,
   isProduction,
   isLocal,
+  isTest,
   port: parseNumberEnv('PORT', 8080),
   host: process.env.HOST || 'localhost',
 
-  mongoUri: requiredEnv('MONGODB_URI'),
-  jwtSecret: requiredEnv('JWT_SECRET'),
+  mongoUri: requiredEnv('MONGODB_URI', { defaultInTest: 'mongodb://127.0.0.1:27017/bleya_test' }),
+  jwtSecret: requiredEnv('JWT_SECRET', { defaultInTest: 'test-jwt-secret' }),
 
   accessTokenTtl: (process.env.ACCESS_TOKEN_TTL || '1h') as string,
   refreshTokenTtlDays: parseNumberEnv('REFRESH_TOKEN_TTL_DAYS', 365),

@@ -63,12 +63,6 @@ router.get('/', authenticateUser, asyncHandler(async (req: AuthRequest, res: exp
         const ts = parseInt(before, 10);
         if (!isNaN(ts)) {
             parsedBefore = new Date(ts);
-        } else {
-            // Try parsing ISO string
-            const d = new Date(before);
-            if (!isNaN(d.getTime())) {
-                parsedBefore = d;
-            }
         }
     }
 

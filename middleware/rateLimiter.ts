@@ -10,7 +10,7 @@ interface RateLimitStore {
 const rateLimitStore = new Map<string, RateLimitStore>();
 
 // Clean up expired entries every 5 minutes
-setInterval(() => {
+const cleanupTimer = setInterval(() => {
     const now = Date.now();
     for (const [key, value] of rateLimitStore.entries()) {
         if (value.resetTime < now) {
@@ -18,6 +18,15 @@ setInterval(() => {
         }
     }
 }, 5 * 60 * 1000);
+cleanupTimer.unref();
+
+export function resetRateLimiterStoreForTests(): void {
+    rateLimitStore.clear();
+}
+
+export function stopRateLimiterCleanupForTests(): void {
+    clearInterval(cleanupTimer);
+}
 
 /**
  * Rate limiter middleware

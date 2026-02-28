@@ -3,32 +3,10 @@ import { Room } from '../models/Room.js';
 import { User } from '../models/User.js';
 
 import { AppError, NotFoundError, ValidationError, ErrorCode } from '../utils/errors.js';
+import { toRoomLocation, type RoomLocation } from '../utils/room.js';
+import type { LeanRoom, LeanJoinedRoomsUser } from '../types/lean.js';
 
 const MAX_PUBLIC_ROOMS = 5;
-
-interface GeoPoint {
-    type?: 'Point';
-    coordinates?: number[];
-}
-
-interface LeanRoom {
-    _id: mongoose.Types.ObjectId;
-    name: string;
-    type?: 'public' | 'private';
-    participants?: mongoose.Types.ObjectId[];
-    cityKey?: string;
-    imageUrl?: string;
-    geo?: GeoPoint;
-}
-
-interface LeanJoinedRoomsUser {
-    joinedRooms: mongoose.Types.ObjectId[];
-}
-
-export interface RoomLocation {
-    latitude: number;
-    longitude: number;
-}
 
 export interface RoomSummaryDto {
     id: string;
@@ -51,20 +29,6 @@ interface JoinRoomForUserInput {
 
 interface ListPublicRoomsInput {
     searchQuery?: string;
-}
-
-function toRoomLocation(room: { geo?: GeoPoint }): RoomLocation | null {
-    const coordinates = room.geo?.coordinates;
-    if (!coordinates || coordinates.length < 2) {
-        return null;
-    }
-
-    const [longitude, latitude] = coordinates;
-    if (!Number.isFinite(longitude) || !Number.isFinite(latitude)) {
-        return null;
-    }
-
-    return { latitude, longitude };
 }
 
 function toRoomSummary(room: LeanRoom): RoomSummaryDto {

@@ -12,6 +12,10 @@ import {
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { AppError, NotFoundError, ValidationError, ErrorCode } from '../utils/errors.js';
 import { sanitizePlainText } from '../utils/sanitize.js';
+import { validateObjectId } from '../utils/validation.js';
+import { toRoomLocation, isPrivateRoomParticipant } from '../utils/room.js';
+import { formatMessage, buildUsernameMap } from '../utils/message.js';
+import type { LeanRoom, LeanMessage, LeanUser, LeanUserBlock, LeanJoinedRoomsUser, LastMessageAgg } from '../types/lean.js';
 import logger from '../utils/logger.js';
 
 const router = express.Router();
@@ -19,74 +23,6 @@ const router = express.Router();
 const OBJECT_ID_REGEX = /^[0-9a-fA-F]{24}$/;
 const DEFAULT_PAGE_SIZE = 50;
 const MAX_PAGE_SIZE = 100;
-
-
-interface GeoPoint {
-    type?: 'Point';
-    coordinates?: number[];
-}
-
-interface LeanRoom {
-    _id: mongoose.Types.ObjectId;
-    name: string;
-    type?: 'public' | 'private';
-    participants?: mongoose.Types.ObjectId[];
-    participantsHash?: string;
-    cityKey?: string;
-    imageUrl?: string;
-    geo?: GeoPoint;
-}
-
-interface LeanMessage {
-    _id: mongoose.Types.ObjectId;
-    roomId: mongoose.Types.ObjectId;
-    userId: mongoose.Types.ObjectId;
-    text: string;
-    createdAt: Date;
-    parentMessageId?: mongoose.Types.ObjectId | null;
-    replyCount?: number;
-}
-
-interface LeanUser {
-    _id: mongoose.Types.ObjectId;
-    username?: string;
-    bio?: string;
-    profileImageUrl?: string;
-}
-
-interface RoomReadPointer {
-    roomId: mongoose.Types.ObjectId;
-    lastReadAt?: Date | null;
-}
-
-interface LeanJoinedRoomsUser {
-    joinedRooms: mongoose.Types.ObjectId[];
-    hiddenDirectRooms?: mongoose.Types.ObjectId[];
-    roomReadPointers?: RoomReadPointer[];
-}
-
-interface LastMessageAgg {
-    _id: mongoose.Types.ObjectId;
-    lastMessageText?: string;
-    lastMessageTime?: Date;
-    lastMessageUserId?: mongoose.Types.ObjectId;
-}
-
-interface LeanUserBlock {
-    _id: mongoose.Types.ObjectId;
-    blockerUserId: mongoose.Types.ObjectId;
-    blockedUserId: mongoose.Types.ObjectId;
-    roomId: mongoose.Types.ObjectId;
-    isActive: boolean;
-    blockedAt: Date;
-}
-
-function validateObjectId(id: string, fieldName: string): mongoose.Types.ObjectId {
-    if (!OBJECT_ID_REGEX.test(id)) {
-        throw new ValidationError(`Invalid ${fieldName} format`);
-    }
-    return new mongoose.Types.ObjectId(id);
-}
 
 function buildDirectParticipantsHash(currentUserId: string, otherUserId: string): string {
     return [currentUserId, otherUserId].sort().join('_');
@@ -138,36 +74,6 @@ async function getDirectBlockState(currentUserId: string, otherUserId: string): 
     };
 }
 
-function parseCoordinate(value: unknown, fieldName: string): number {
-    if (typeof value !== 'string') {
-        throw new ValidationError(`${fieldName} is required.`);
-    }
-
-    const parsed = Number.parseFloat(value);
-    if (!Number.isFinite(parsed)) {
-        throw new ValidationError(`${fieldName} must be a number.`);
-    }
-
-    return parsed;
-}
-
-function parseLimit(value: unknown, defaultValue: number, min: number, max: number): number {
-    if (typeof value !== 'string' || value.trim().length === 0) {
-        return defaultValue;
-    }
-
-    const parsed = Number.parseInt(value, 10);
-    if (!Number.isInteger(parsed)) {
-        throw new ValidationError('limit must be an integer.');
-    }
-
-    if (parsed < min || parsed > max) {
-        throw new ValidationError(`limit must be between ${min} and ${max}.`);
-    }
-
-    return parsed;
-}
-
 function parseSearchQuery(value: unknown): string | undefined {
     if (value === undefined || value === null) {
         return undefined;
@@ -184,28 +90,6 @@ function parseSearchQuery(value: unknown): string | undefined {
     });
 
     return sanitized.length > 0 ? sanitized : undefined;
-}
-
-function toRoomLocation(room: { geo?: GeoPoint }): { latitude: number; longitude: number } | null {
-    const coordinates = room.geo?.coordinates;
-    if (!coordinates || coordinates.length < 2) {
-        return null;
-    }
-
-    const [longitude, latitude] = coordinates;
-    if (!Number.isFinite(longitude) || !Number.isFinite(latitude)) {
-        return null;
-    }
-
-    return { latitude, longitude };
-}
-
-function isPrivateRoomParticipant(room: LeanRoom, userId: string): boolean {
-    if ((room.type || 'public') !== 'private') {
-        return true;
-    }
-
-    return (room.participants || []).some((participantId) => participantId.toString() === userId);
 }
 
 function assertUserHasRoomAccess(
@@ -293,23 +177,28 @@ router.get('/joined', authenticateUser, asyncHandler(async (req: AuthRequest, re
         }
     }
 
-    const unreadMessageCandidates = await Message.find({
-        roomId: { $in: joinedRoomIds },
-        parentMessageId: null,
-        userId: { $ne: currentUserObjectId },
-    })
-        .select('roomId createdAt')
-        .lean<Array<{ roomId: mongoose.Types.ObjectId; createdAt: Date }>>();
+    const unreadMatchConditions = joinedRoomIds.map((roomId) => {
+        const lastReadAt = lastReadAtByRoomId.get(roomId.toString());
+        const condition: Record<string, unknown> = {
+            roomId,
+            parentMessageId: null,
+            userId: { $ne: currentUserObjectId },
+        };
+        if (lastReadAt) {
+            condition.createdAt = { $gt: lastReadAt };
+        }
+        return condition;
+    });
 
     const unreadCountByRoomId = new Map<string, number>();
-    for (const message of unreadMessageCandidates) {
-        const roomIdStr = message.roomId.toString();
-        const roomLastReadAt = lastReadAtByRoomId.get(roomIdStr);
-        if (roomLastReadAt && message.createdAt <= roomLastReadAt) {
-            continue;
+    if (unreadMatchConditions.length > 0) {
+        const unreadCounts = await Message.aggregate<{ _id: mongoose.Types.ObjectId; count: number }>([
+            { $match: { $or: unreadMatchConditions } },
+            { $group: { _id: '$roomId', count: { $sum: 1 } } },
+        ]);
+        for (const { _id, count } of unreadCounts) {
+            unreadCountByRoomId.set(_id.toString(), count);
         }
-
-        unreadCountByRoomId.set(roomIdStr, (unreadCountByRoomId.get(roomIdStr) || 0) + 1);
     }
 
     const userIdSet = new Set<string>();
@@ -466,22 +355,9 @@ router.get('/:roomId/messages', authenticateUser, asyncHandler(async (req: AuthR
         ? await User.find({ _id: { $in: userIds } }).select('_id username').lean<LeanUser[]>()
         : [];
 
-    const usernameMap = new Map(users.map((u) => [u._id.toString(), u.username || '']));
+    const usernameMap = buildUsernameMap(users);
+    const formattedMessages = pageMessages.reverse().map((msg) => formatMessage(msg, usernameMap));
 
-    const formattedMessages = pageMessages.reverse().map((msg) => ({
-        id: msg._id.toString(),
-        roomId: msg.roomId.toString(),
-        userId: msg.userId.toString(),
-        username: usernameMap.get(msg.userId.toString()) || '',
-        text: msg.text,
-        createdAt: msg.createdAt.getTime(),
-        parentMessageId: msg.parentMessageId?.toString() || null,
-        replyCount: msg.replyCount || 0,
-    }));
-
-    // Generate next cursor from the oldest message (which is at index 0 after reverse, 
-    // or last index of pageMessages before reverse).
-    // Actually, pageMessages is sorted DESC. So the last item in pageMessages is the oldest.
     let nextCursor: string | null = null;
     if (pageMessages.length > 0) {
         const oldestMessage = pageMessages[pageMessages.length - 1];

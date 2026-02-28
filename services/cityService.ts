@@ -1,6 +1,6 @@
 import sharp from 'sharp';
 import { cityRepository } from '../repositories/cityRepository.js';
-import { imageService } from './imageService/index.js';
+import { getImageService } from './imageService/index.js';
 import { uploadToR2 } from './r2Service.js';
 import { ICity } from '../models/City.js';
 import logger from '../utils/logger.js';
@@ -32,6 +32,8 @@ export async function findNearbyCitiesWithImages(
 
 async function fetchAndStoreImage(city: ICity): Promise<void> {
     try {
+        const imageService = getImageService();
+
         // 1. Fetch image from Wikidata using name, country, and coordinates
         const imageResult = await imageService.searchCityImage({
             name: city.name,

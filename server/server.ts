@@ -1,35 +1,13 @@
-import express, { Request, Response } from 'express';
 import http from 'http';
-import bodyParser from 'body-parser';
-import cookieParser from 'cookie-parser';
-import compression from 'compression';
-import cors from 'cors';
-import helmet from 'helmet';
 import mongoose from 'mongoose';
-import authRoutes from '../routes/auth.js';
-import roomRoutes from '../routes/rooms.js';
-import userRoutes from '../routes/users.js';
-import messageRoutes from '../routes/messages.js';
-import notificationRoutes from '../routes/notifications.js';
-import citiesRoutes from '../routes/cities.js';
+import { pathToFileURL } from 'url';
+import type { Express } from 'express';
 import { setupSocketIO } from './socket.js';
-import { errorHandler } from '../middleware/errorHandler.js';
-import { httpRequestLogger } from '../middleware/httpRequestLogger.js';
-import { buildCorsOptions } from '../utils/cors.js';
+import { createApp } from './app.js';
 import logger from '../utils/logger.js';
-import { config, validateR2Config } from '../config/index.js';
+import { config } from '../config/index.js';
 
-const r2Validation = validateR2Config();
-if (!r2Validation.complete) {
-    if (config.isProduction) {
-        throw new Error(`R2 configuration incomplete in production. Missing: ${r2Validation.missing.join(', ')}`);
-    }
-
-    logger.warn('r2.config.incomplete', {
-        missing: r2Validation.missing,
-        note: 'File uploads will fail until R2 env vars are configured',
-    });
-}
+export { createApp } from './app.js';
 
 const mongooseOptions: mongoose.ConnectOptions = {
     serverSelectionTimeoutMS: 5000,
@@ -41,104 +19,11 @@ const mongooseOptions: mongoose.ConnectOptions = {
     retryReads: true,
 };
 
-mongoose.connection.on('connected', () => {
-    logger.info('mongodb.connected');
-});
+let processHandlersRegistered = false;
+let mongooseHandlersRegistered = false;
 
-mongoose.connection.on('error', (err) => {
-    logger.error('mongodb.error', {
-        message: err.message,
-        name: err.name,
-    });
-});
-
-mongoose.connection.on('disconnected', () => {
-    logger.warn('mongodb.disconnected');
-});
-
-const app = express();
-
-app.use(helmet({
-    contentSecurityPolicy: {
-        directives: {
-            defaultSrc: ["'self'"],
-            styleSrc: ["'self'", "'unsafe-inline'"],
-            scriptSrc: ["'self'"],
-            imgSrc: ["'self'", 'data:', 'https:'],
-            connectSrc: ["'self'"],
-        },
-    },
-    crossOriginEmbedderPolicy: false,
-    crossOriginResourcePolicy: { policy: 'cross-origin' },
-}));
-
-app.use(cors(buildCorsOptions()));
-app.use(compression());
-app.use(cookieParser());
-app.use(bodyParser.json({ limit: '10mb' }));
-app.use(bodyParser.urlencoded({ extended: true, limit: '10mb' }));
-app.use(httpRequestLogger);
-
-const apiV1Router = express.Router();
-apiV1Router.use('/auth', authRoutes);
-apiV1Router.use('/rooms', roomRoutes);
-apiV1Router.use('/users', userRoutes);
-apiV1Router.use('/messages', messageRoutes);
-apiV1Router.use('/notifications', notificationRoutes);
-apiV1Router.use('/cities', citiesRoutes);
-
-app.use('/api/v1', apiV1Router);
-// Keep /api routes for backward compatibility while clients migrate to /api/v1.
-app.use('/api', apiV1Router);
-
-app.get('/', (_req: Request, res: Response) => {
-    res.json({ message: 'Gde si bre zverino?' });
-});
-
-app.get('/health', async (_req: Request, res: Response) => {
-    const health = {
-        status: 'ok',
-        timestamp: Date.now(),
-        environment: config.nodeEnv,
-        port: config.port,
-        mongodb: {
-            status: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
-            readyState: mongoose.connection.readyState,
-        },
-        memory: {
-            used: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
-            total: Math.round(process.memoryUsage().heapTotal / 1024 / 1024),
-            rss: Math.round(process.memoryUsage().rss / 1024 / 1024),
-        },
-        uptime: Math.round(process.uptime()),
-    };
-
-    const statusCode = mongoose.connection.readyState === 1 ? 200 : 503;
-    res.status(statusCode).json(health);
-});
-
-app.use(errorHandler);
-
-const server = http.createServer(app);
-setupSocketIO(server);
-
-process.on('unhandledRejection', (reason: unknown, promise: Promise<unknown>) => {
-    const error = reason instanceof Error ? reason : new Error(String(reason));
-
-    logger.error('process.unhandled_rejection', {
-        error: {
-            name: error.name,
-            message: error.message,
-            stack: error.stack,
-        },
-        promiseType: Object.prototype.toString.call(promise),
-    });
-
-    process.exit(1);
-});
-
-process.on('uncaughtException', (error: Error) => {
-    logger.error('process.uncaught_exception', {
+function handleFatalError(error: Error, eventName: string, exitOnFatalError: boolean): void {
+    logger.error(eventName, {
         error: {
             name: error.name,
             message: error.message,
@@ -146,10 +31,64 @@ process.on('uncaughtException', (error: Error) => {
         },
     });
 
-    process.exit(1);
-});
+    if (exitOnFatalError) {
+        process.exit(1);
+    }
+}
 
-const waitForMongoConnection = async (): Promise<void> => {
+export function registerProcessHandlers(exitOnFatalError = true): void {
+    if (processHandlersRegistered) {
+        return;
+    }
+
+    process.on('unhandledRejection', (reason: unknown, promise: Promise<unknown>) => {
+        const error = reason instanceof Error ? reason : new Error(String(reason));
+
+        logger.error('process.unhandled_rejection', {
+            error: {
+                name: error.name,
+                message: error.message,
+                stack: error.stack,
+            },
+            promiseType: Object.prototype.toString.call(promise),
+        });
+
+        if (exitOnFatalError) {
+            process.exit(1);
+        }
+    });
+
+    process.on('uncaughtException', (error: Error) => {
+        handleFatalError(error, 'process.uncaught_exception', exitOnFatalError);
+    });
+
+    processHandlersRegistered = true;
+}
+
+export function registerMongooseConnectionHandlers(): void {
+    if (mongooseHandlersRegistered) {
+        return;
+    }
+
+    mongoose.connection.on('connected', () => {
+        logger.info('mongodb.connected');
+    });
+
+    mongoose.connection.on('error', (err) => {
+        logger.error('mongodb.error', {
+            message: err.message,
+            name: err.name,
+        });
+    });
+
+    mongoose.connection.on('disconnected', () => {
+        logger.warn('mongodb.disconnected');
+    });
+
+    mongooseHandlersRegistered = true;
+}
+
+export async function waitForMongoConnection(): Promise<void> {
     if (mongoose.connection.readyState === 0) {
         await mongoose.connect(config.mongoUri, mongooseOptions);
     }
@@ -182,41 +121,157 @@ const waitForMongoConnection = async (): Promise<void> => {
         mongoose.connection.once('connected', onConnected);
         mongoose.connection.once('error', onError);
     });
-};
+}
 
-const startServer = async () => {
+export interface CreateHttpServerOptions {
+    app?: Express;
+    withSocketIO?: boolean;
+}
+
+export function createHttpServer(options: CreateHttpServerOptions = {}): {
+    app: Express;
+    server: http.Server;
+} {
+    const app = options.app || createApp();
+    const server = http.createServer(app);
+
+    if (options.withSocketIO ?? true) {
+        setupSocketIO(server);
+    }
+
+    return { app, server };
+}
+
+export interface StartServerOptions {
+    app?: Express;
+    port?: number;
+    withSocketIO?: boolean;
+    connectMongo?: boolean;
+    registerFatalProcessHandlers?: boolean;
+    exitOnFatalError?: boolean;
+}
+
+export interface StopServerOptions {
+    disconnectMongo?: boolean;
+}
+
+async function listen(server: http.Server, port: number): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+        const onListening = () => {
+            server.removeListener('error', onListenError);
+            resolve();
+        };
+
+        const onListenError = (error: NodeJS.ErrnoException) => {
+            server.removeListener('listening', onListening);
+            reject(error);
+        };
+
+        server.once('listening', onListening);
+        server.once('error', onListenError);
+        server.listen(port);
+    });
+}
+
+export async function startServer(options: StartServerOptions = {}): Promise<{
+    app: Express;
+    server: http.Server;
+}> {
+    const resolvedOptions = {
+        port: options.port ?? config.port,
+        withSocketIO: options.withSocketIO ?? true,
+        connectMongo: options.connectMongo ?? true,
+        registerFatalProcessHandlers: options.registerFatalProcessHandlers ?? true,
+        exitOnFatalError: options.exitOnFatalError ?? true,
+    };
+
     try {
-        await waitForMongoConnection();
-
-        if (mongoose.connection.readyState !== 1) {
-            throw new Error('MongoDB connection not established');
+        if (resolvedOptions.registerFatalProcessHandlers) {
+            registerProcessHandlers(resolvedOptions.exitOnFatalError);
         }
 
-        server.listen(config.port, () => {
-            const protocol = config.isProduction ? 'https' : 'http';
-            const url = `${protocol}://${config.host}:${config.port}`;
-            logger.info('server.started', { url });
+        registerMongooseConnectionHandlers();
+
+        if (resolvedOptions.connectMongo) {
+            await waitForMongoConnection();
+
+            if (mongoose.connection.readyState !== 1) {
+                throw new Error('MongoDB connection not established');
+            }
+        }
+
+        const { app, server } = createHttpServer({
+            app: options.app,
+            withSocketIO: resolvedOptions.withSocketIO,
         });
+
+        await listen(server, resolvedOptions.port);
 
         server.on('error', (error: NodeJS.ErrnoException) => {
             if (error.code === 'EADDRINUSE') {
-                logger.error('server.port_in_use', { port: config.port });
+                logger.error('server.port_in_use', { port: resolvedOptions.port });
             } else {
                 logger.error('server.error', {
                     code: error.code,
                     message: error.message,
                 });
             }
-            process.exit(1);
+
+            if (resolvedOptions.exitOnFatalError) {
+                process.exit(1);
+            }
         });
+
+        const protocol = config.isProduction ? 'https' : 'http';
+        const url = `${protocol}://${config.host}:${resolvedOptions.port}`;
+        logger.info('server.started', { url });
+
+        return { app, server };
     } catch (error) {
         const normalizedError = error instanceof Error ? error : new Error(String(error));
         logger.error('server.start_failed', {
             message: normalizedError.message,
             stack: normalizedError.stack,
         });
-        process.exit(1);
-    }
-};
 
-startServer();
+        if (resolvedOptions.exitOnFatalError) {
+            process.exit(1);
+        }
+
+        throw normalizedError;
+    }
+}
+
+export async function stopServer(
+    server: http.Server,
+    options: StopServerOptions = {}
+): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+        server.close((error?: Error) => {
+            if (error) {
+                reject(error);
+                return;
+            }
+
+            resolve();
+        });
+    });
+
+    if (options.disconnectMongo && mongoose.connection.readyState !== 0) {
+        await mongoose.disconnect();
+    }
+}
+
+function isExecutedDirectly(): boolean {
+    return process.argv.slice(1).some((arg) => {
+        try {
+            return import.meta.url === pathToFileURL(arg).href;
+        } catch {
+            return false;
+        }
+    });
+}
+
+if (isExecutedDirectly()) {
+    void startServer();
+}

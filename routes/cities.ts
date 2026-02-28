@@ -16,8 +16,10 @@ router.get(
     authenticateUser,
     asyncHandler(async (req: AuthRequest, res: express.Response) => {
         const userId = req.user!.userId;
-        const lat = parseFloat(req.query.lat as string);
-        const lng = parseFloat(req.query.lng as string);
+        const latParam = req.query.lat;
+        const lngParam = req.query.lng;
+        const lat = typeof latParam === 'string' ? parseFloat(latParam) : NaN;
+        const lng = typeof lngParam === 'string' ? parseFloat(lngParam) : NaN;
 
         if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
             throw new ValidationError('Invalid lat/lng coordinates');

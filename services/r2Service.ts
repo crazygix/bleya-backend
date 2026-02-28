@@ -4,6 +4,14 @@ import logger from '../utils/logger.js';
 
 let r2Client: S3Client | null = null;
 
+export function setR2ClientForTests(client: S3Client | null): void {
+    r2Client = client;
+}
+
+export function resetR2ClientForTests(): void {
+    r2Client = null;
+}
+
 function getR2Client(): S3Client {
     if (!r2Client) {
         if (!config.r2.endpoint || !config.r2.accessKeyId || !config.r2.secretAccessKey) {

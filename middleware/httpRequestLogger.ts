@@ -221,15 +221,15 @@ export function httpRequestLogger(req: Request, res: Response, next: NextFunctio
   const requestBody = req.body;
   let responseBody: unknown;
 
-  const originalJson = res.json.bind(res) as (body?: any) => Response;
-  const originalSend = res.send.bind(res) as (body?: any) => Response;
+  const originalJson = res.json.bind(res) as (body?: unknown) => Response;
+  const originalSend = res.send.bind(res) as (body?: unknown) => Response;
 
-  res.json = ((body?: any): Response => {
+  res.json = ((body?: unknown): Response => {
     responseBody = body;
     return originalJson(body);
   }) as Response['json'];
 
-  res.send = ((body?: any): Response => {
+  res.send = ((body?: unknown): Response => {
     if (responseBody === undefined) {
       responseBody = body;
     }
