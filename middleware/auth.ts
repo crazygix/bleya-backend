@@ -6,7 +6,6 @@ import { config } from '../config/index.js';
 export interface AuthRequest extends Request {
     user?: {
         userId: string;
-        phoneNumber: string;
     };
 }
 
@@ -20,7 +19,11 @@ export const authenticateUser = (
         const token = authHeader.split(' ')[1];
         try {
             const decoded = jwt.verify(token, config.jwtSecret);
-            req.user = decoded as { userId: string; phoneNumber: string };
+            if (typeof decoded !== 'object' || decoded === null || typeof (decoded as { userId?: unknown }).userId !== 'string') {
+                return next(new UnauthorizedError('Invalid or expired token'));
+            }
+
+            req.user = { userId: (decoded as { userId: string }).userId };
             next();
         } catch {
             return next(new UnauthorizedError('Invalid or expired token'));

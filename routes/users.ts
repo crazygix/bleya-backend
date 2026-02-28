@@ -49,14 +49,13 @@ const upload = multer({
 });
 
 router.get('/me', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
-    const user = await User.findOne({ phoneNumber: req.user?.phoneNumber });
+    const user = await User.findById(req.user?.userId);
     if (!user) {
         throw new NotFoundError('User not found', ErrorCode.USER_NOT_FOUND);
     }
 
     res.json({
         id: user._id.toString(),
-        phoneNumber: user.phoneNumber,
         username: user.username,
         bio: user.bio,
         profileImageUrl: user.profileImageUrl,
@@ -67,7 +66,7 @@ router.get('/me', authenticateUser, asyncHandler(async (req: AuthRequest, res: e
 
 router.put('/profile', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
     const { username, bio } = req.body;
-    const user = await User.findOne({ phoneNumber: req.user?.phoneNumber });
+    const user = await User.findById(req.user?.userId);
 
     if (!user) {
         throw new NotFoundError('User not found', ErrorCode.USER_NOT_FOUND);
@@ -115,7 +114,6 @@ router.put('/profile', authenticateUser, asyncHandler(async (req: AuthRequest, r
     await user.save();
 
     res.json({
-        phoneNumber: user.phoneNumber,
         username: user.username,
         bio: user.bio,
         profileImageUrl: user.profileImageUrl,
@@ -130,7 +128,7 @@ router.post('/profile-image', authenticateUser, upload.single('image'), asyncHan
         throw new ValidationError('No image selected. Pick one?');
     }
 
-    const user = await User.findOne({ phoneNumber: req.user?.phoneNumber });
+    const user = await User.findById(req.user?.userId);
     if (!user) {
         throw new NotFoundError('User not found', ErrorCode.USER_NOT_FOUND);
     }
@@ -161,7 +159,6 @@ router.post('/profile-image', authenticateUser, upload.single('image'), asyncHan
     await user.save();
 
     res.json({
-        phoneNumber: user.phoneNumber,
         username: user.username,
         bio: user.bio,
         profileImageUrl: user.profileImageUrl,
@@ -224,7 +221,6 @@ router.get('/:userId([0-9a-fA-F]{24})', authenticateUser, asyncHandler(async (re
 
     res.json({
         id: user._id.toString(),
-        phoneNumber: user.phoneNumber,
         username: user.username,
         bio: user.bio,
         profileImageUrl: user.profileImageUrl,

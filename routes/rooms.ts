@@ -50,7 +50,6 @@ interface LeanMessage {
 interface LeanUser {
     _id: mongoose.Types.ObjectId;
     username?: string;
-    phoneNumber?: string;
     bio?: string;
     profileImageUrl?: string;
 }
@@ -201,6 +200,30 @@ function toRoomLocation(room: { geo?: GeoPoint }): { latitude: number; longitude
     return { latitude, longitude };
 }
 
+function isPrivateRoomParticipant(room: LeanRoom, userId: string): boolean {
+    if ((room.type || 'public') !== 'private') {
+        return true;
+    }
+
+    return (room.participants || []).some((participantId) => participantId.toString() === userId);
+}
+
+function assertUserHasRoomAccess(
+    room: LeanRoom,
+    roomObjectId: mongoose.Types.ObjectId,
+    user: LeanJoinedRoomsUser,
+    userId: string
+): void {
+    const isJoined = (user.joinedRooms || []).some((joinedRoomId) => joinedRoomId.equals(roomObjectId));
+    if (!isJoined) {
+        throw new AppError(ErrorCode.FORBIDDEN, 'You are not a member of this room.', 403);
+    }
+
+    if (!isPrivateRoomParticipant(room, userId)) {
+        throw new AppError(ErrorCode.FORBIDDEN, 'You are not allowed to access this chat.', 403);
+    }
+}
+
 
 
 router.get('/', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
@@ -270,29 +293,24 @@ router.get('/joined', authenticateUser, asyncHandler(async (req: AuthRequest, re
         }
     }
 
-    const unreadCountEntries = await Promise.all(joinedRoomIds.map(async (roomId) => {
-        const roomIdStr = roomId.toString();
+    const unreadMessageCandidates = await Message.find({
+        roomId: { $in: joinedRoomIds },
+        parentMessageId: null,
+        userId: { $ne: currentUserObjectId },
+    })
+        .select('roomId createdAt')
+        .lean<Array<{ roomId: mongoose.Types.ObjectId; createdAt: Date }>>();
+
+    const unreadCountByRoomId = new Map<string, number>();
+    for (const message of unreadMessageCandidates) {
+        const roomIdStr = message.roomId.toString();
         const roomLastReadAt = lastReadAtByRoomId.get(roomIdStr);
-
-        const unreadFilter: {
-            roomId: mongoose.Types.ObjectId;
-            parentMessageId: null;
-            userId: { $ne: mongoose.Types.ObjectId };
-            createdAt?: { $gt: Date };
-        } = {
-            roomId,
-            parentMessageId: null,
-            userId: { $ne: currentUserObjectId },
-        };
-
-        if (roomLastReadAt) {
-            unreadFilter.createdAt = { $gt: roomLastReadAt };
+        if (roomLastReadAt && message.createdAt <= roomLastReadAt) {
+            continue;
         }
 
-        const unreadCount = await Message.countDocuments(unreadFilter);
-        return [roomIdStr, unreadCount] as const;
-    }));
-    const unreadCountByRoomId = new Map<string, number>(unreadCountEntries);
+        unreadCountByRoomId.set(roomIdStr, (unreadCountByRoomId.get(roomIdStr) || 0) + 1);
+    }
 
     const userIdSet = new Set<string>();
 
@@ -379,13 +397,22 @@ router.post('/:roomId/join', authenticateUser, asyncHandler(async (req: AuthRequ
 }));
 
 router.get('/:roomId/messages', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
+    const userId = req.user!.userId;
     const roomObjectId = validateObjectId(req.params.roomId, 'room ID');
     const { before, limit } = req.query;
 
-    const room = await Room.findById(roomObjectId).select('_id').lean();
+    const [room, user] = await Promise.all([
+        Room.findById(roomObjectId).select('_id type participants').lean<LeanRoom | null>(),
+        User.findById(userId).select('joinedRooms').lean<LeanJoinedRoomsUser | null>(),
+    ]);
+
     if (!room) {
         throw new NotFoundError('Room not found', ErrorCode.ROOM_NOT_FOUND);
     }
+    if (!user) {
+        throw new NotFoundError('User not found', ErrorCode.USER_NOT_FOUND);
+    }
+    assertUserHasRoomAccess(room, roomObjectId, user, userId);
 
     let pageSize = DEFAULT_PAGE_SIZE;
     if (typeof limit === 'string') {
@@ -471,21 +498,29 @@ router.get('/:roomId/messages', authenticateUser, asyncHandler(async (req: AuthR
 }));
 
 router.get('/:roomId/members', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
+    const userId = req.user!.userId;
     const roomObjectId = validateObjectId(req.params.roomId, 'room ID');
 
-    const room = await Room.findById(roomObjectId).select('_id').lean();
+    const [room, user] = await Promise.all([
+        Room.findById(roomObjectId).select('_id type participants').lean<LeanRoom | null>(),
+        User.findById(userId).select('joinedRooms').lean<LeanJoinedRoomsUser | null>(),
+    ]);
+
     if (!room) {
         throw new NotFoundError('Room not found', ErrorCode.ROOM_NOT_FOUND);
     }
+    if (!user) {
+        throw new NotFoundError('User not found', ErrorCode.USER_NOT_FOUND);
+    }
+    assertUserHasRoomAccess(room, roomObjectId, user, userId);
 
     const users = await User.find({ joinedRooms: roomObjectId })
-        .select('_id username phoneNumber bio profileImageUrl')
+        .select('_id username bio profileImageUrl')
         .lean<LeanUser[]>();
 
     const members = users.map((user) => ({
         id: user._id.toString(),
         username: user.username || '',
-        phoneNumber: user.phoneNumber,
         bio: user.bio || '',
         profileImageUrl: user.profileImageUrl || '',
     }));
@@ -527,9 +562,12 @@ router.post('/:roomId/read', authenticateUser, asyncHandler(async (req: AuthRequ
     const userId = req.user!.userId;
     const roomObjectId = validateObjectId(req.params.roomId, 'room ID');
 
-    const room = await Room.findById(roomObjectId).select('_id').lean();
+    const room = await Room.findById(roomObjectId).select('_id type participants').lean<LeanRoom | null>();
     if (!room) {
         throw new NotFoundError('Room not found', ErrorCode.ROOM_NOT_FOUND);
+    }
+    if (!isPrivateRoomParticipant(room, userId)) {
+        throw new AppError(ErrorCode.FORBIDDEN, 'You are not allowed to access this chat.', 403);
     }
 
     const user = await User.findById(userId).select('joinedRooms').lean<{ joinedRooms: mongoose.Types.ObjectId[] } | null>();
@@ -915,10 +953,18 @@ router.get('/:roomId', authenticateUser, asyncHandler(async (req: AuthRequest, r
     const userId = req.user!.userId;
     const roomObjectId = validateObjectId(req.params.roomId, 'room ID');
 
-    const room = await Room.findById(roomObjectId).lean<LeanRoom | null>();
+    const [room, user] = await Promise.all([
+        Room.findById(roomObjectId).lean<LeanRoom | null>(),
+        User.findById(userId).select('joinedRooms').lean<LeanJoinedRoomsUser | null>(),
+    ]);
+
     if (!room) {
         throw new NotFoundError('Room not found', ErrorCode.ROOM_NOT_FOUND);
     }
+    if (!user) {
+        throw new NotFoundError('User not found', ErrorCode.USER_NOT_FOUND);
+    }
+    assertUserHasRoomAccess(room, roomObjectId, user, userId);
 
     let roomName = room.name;
     let otherUserId: string | null = null;

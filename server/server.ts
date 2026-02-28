@@ -79,12 +79,17 @@ app.use(bodyParser.json({ limit: '10mb' }));
 app.use(bodyParser.urlencoded({ extended: true, limit: '10mb' }));
 app.use(httpRequestLogger);
 
-app.use('/api/auth', authRoutes);
-app.use('/api/rooms', roomRoutes);
-app.use('/api/users', userRoutes);
-app.use('/api/messages', messageRoutes);
-app.use('/api/notifications', notificationRoutes);
-app.use('/api/cities', citiesRoutes);
+const apiV1Router = express.Router();
+apiV1Router.use('/auth', authRoutes);
+apiV1Router.use('/rooms', roomRoutes);
+apiV1Router.use('/users', userRoutes);
+apiV1Router.use('/messages', messageRoutes);
+apiV1Router.use('/notifications', notificationRoutes);
+apiV1Router.use('/cities', citiesRoutes);
+
+app.use('/api/v1', apiV1Router);
+// Keep /api routes for backward compatibility while clients migrate to /api/v1.
+app.use('/api', apiV1Router);
 
 app.get('/', (_req: Request, res: Response) => {
     res.json({ message: 'Gde si bre zverino?' });

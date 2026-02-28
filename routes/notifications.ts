@@ -1,9 +1,50 @@
 import express from 'express';
+import mongoose from 'mongoose';
 import { authenticateUser, AuthRequest } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
-import { NotificationService } from '../services/NotificationService.js';
+import {
+    NotificationService,
+    PopulatedNotification,
+    PopulatedNotificationParticipant,
+} from '../services/NotificationService.js';
+import { ValidationError } from '../utils/errors.js';
 
 const router = express.Router();
+const OBJECT_ID_REGEX = /^[0-9a-fA-F]{24}$/;
+
+function getParticipantMeta(
+    participant: mongoose.Types.ObjectId | PopulatedNotificationParticipant
+): { id: string; username?: string } {
+    if (participant instanceof mongoose.Types.ObjectId) {
+        return { id: participant.toString() };
+    }
+
+    return {
+        id: participant._id.toString(),
+        username: participant.username,
+    };
+}
+
+function resolveDirectRoomName(
+    notification: PopulatedNotification,
+    currentUserId: string
+): string {
+    const room = notification.room;
+    const fallbackName = room.name || 'Unknown Room';
+    if (room.type !== 'private' || !room.participants) {
+        return fallbackName;
+    }
+
+    const otherParticipant = room.participants
+        .map(getParticipantMeta)
+        .find((participant) => participant.id !== currentUserId);
+
+    if (!otherParticipant) {
+        return fallbackName;
+    }
+
+    return otherParticipant.username || fallbackName;
+}
 
 router.get('/', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
     const userId = req.user!.userId;
@@ -33,37 +74,27 @@ router.get('/', authenticateUser, asyncHandler(async (req: AuthRequest, res: exp
 
     const result = await NotificationService.getNotifications(userId, parsedLimit, parsedBefore);
 
-    // Format for response
-    const formattedNotifications = result.notifications.map((n: any) => {
-        let roomName = n.room.name;
-        if (n.room.type === 'private' && n.room.participants) {
-            const otherParticipant = n.room.participants.find((p: any) =>
-                (p._id || p).toString() !== userId.toString()
-            );
-            if (otherParticipant && typeof otherParticipant === 'object') {
-                roomName = otherParticipant.username || roomName;
-            }
-        }
-
+    const formattedNotifications = result.notifications.map((notification) => {
+        const roomName = resolveDirectRoomName(notification, userId);
         return {
-            id: n._id.toString(),
+            id: notification._id.toString(),
             sender: {
-                id: n.sender._id.toString(),
-                username: n.sender.username,
-                profileImageUrl: n.sender.profileImageUrl,
+                id: notification.sender._id.toString(),
+                username: notification.sender.username || '',
+                profileImageUrl: notification.sender.profileImageUrl || null,
             },
-            type: n.type,
-            roomId: n.room._id.toString(),
-            roomName: roomName,
-            roomType: n.room.type || 'public',
-            messageId: n.message._id.toString(),
-            threadId: n.thread._id.toString(),
-            parentMessageText: n.thread ? n.thread.text : null,
-            replyText: n.message ? n.message.text : '',
-            previewText: n.message ? n.message.text.substring(0, 100) : '',
-            read: n.read,
-            isDismissed: n.isDismissed || false,
-            createdAt: n.createdAt.getTime(),
+            type: notification.type,
+            roomId: notification.room._id.toString(),
+            roomName,
+            roomType: notification.room.type || 'public',
+            messageId: notification.message._id.toString(),
+            threadId: notification.thread._id.toString(),
+            parentMessageText: notification.thread?.text || null,
+            replyText: notification.message?.text || '',
+            previewText: notification.message?.text ? notification.message.text.substring(0, 100) : '',
+            read: notification.read,
+            isDismissed: notification.isDismissed || false,
+            createdAt: notification.createdAt.getTime(),
         };
     });
 
@@ -78,10 +109,8 @@ router.post('/:id/read', authenticateUser, asyncHandler(async (req: AuthRequest,
     const userId = req.user!.userId;
     const { id } = req.params;
 
-    // Basic regex check or use mongoose check
-    if (!id.match(/^[0-9a-fA-F]{24}$/)) {
-        res.status(400).json({ error: 'Invalid ID' });
-        return;
+    if (!OBJECT_ID_REGEX.test(id)) {
+        throw new ValidationError('Invalid notification ID format');
     }
 
     await NotificationService.markAsRead(id, userId);
@@ -98,9 +127,8 @@ router.post('/:id/dismiss', authenticateUser, asyncHandler(async (req: AuthReque
     const userId = req.user!.userId;
     const { id } = req.params;
 
-    if (!id.match(/^[0-9a-fA-F]{24}$/)) {
-        res.status(400).json({ error: 'Invalid ID' });
-        return;
+    if (!OBJECT_ID_REGEX.test(id)) {
+        throw new ValidationError('Invalid notification ID format');
     }
 
     await NotificationService.dismissNotification(id, userId);

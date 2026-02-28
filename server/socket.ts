@@ -4,9 +4,14 @@ import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
 import { Room } from '../models/Room.js';
 import { Message } from '../models/Message.js';
+import { Notification } from '../models/Notification.js';
 import { User } from '../models/User.js';
 import { UserBlock } from '../models/UserBlock.js';
-import { NotificationService } from '../services/NotificationService.js';
+import {
+    NotificationService,
+    PopulatedNotification,
+    PopulatedNotificationParticipant,
+} from '../services/NotificationService.js';
 import { buildSocketCors } from '../utils/cors.js';
 import { sanitizePlainText } from '../utils/sanitize.js';
 import { ErrorCode } from '../utils/errors.js';
@@ -167,6 +172,37 @@ function toRoomLocation(room: { geo?: GeoPoint }): { latitude: number; longitude
     return { latitude, longitude };
 }
 
+function isPrivateRoomParticipant(room: LeanRoom, userId: string): boolean {
+    if ((room.type || 'public') !== 'private') {
+        return true;
+    }
+
+    return (room.participants || []).some((participantId) => participantId.toString() === userId);
+}
+
+function resolveNotificationRoomName(
+    notification: PopulatedNotification,
+    targetUserId: string
+): string {
+    const fallbackName = notification.room.name || 'Unknown Room';
+    if (notification.room.type !== 'private' || !notification.room.participants) {
+        return fallbackName;
+    }
+
+    const otherParticipant = notification.room.participants.find((participant) => {
+        if (participant instanceof mongoose.Types.ObjectId) {
+            return participant.toString() !== targetUserId;
+        }
+        return participant._id.toString() !== targetUserId;
+    });
+
+    if (!otherParticipant || otherParticipant instanceof mongoose.Types.ObjectId) {
+        return fallbackName;
+    }
+
+    return (otherParticipant as PopulatedNotificationParticipant).username || fallbackName;
+}
+
 export function setupSocketIO(server: HTTPServer) {
     const io = new SocketIOServer(server, {
         cors: buildSocketCors(),
@@ -221,6 +257,11 @@ export function setupSocketIO(server: HTTPServer) {
                 const room = await Room.findById(roomObjectId).lean<LeanRoom | null>();
                 if (!room) {
                     emitSocketError(socket, ErrorCode.ROOM_NOT_FOUND, 'Room not found');
+                    return;
+                }
+
+                if (!isPrivateRoomParticipant(room, user.userId)) {
+                    emitSocketError(socket, ErrorCode.FORBIDDEN, 'You are not allowed to join this chat');
                     return;
                 }
 
@@ -382,6 +423,12 @@ export function setupSocketIO(server: HTTPServer) {
                     return;
                 }
 
+                const senderInRoom = await User.exists({ _id: senderObjectId, joinedRooms: roomObjectId });
+                if (!senderInRoom) {
+                    emitSocketError(socket, ErrorCode.FORBIDDEN, 'You are not a member of this room');
+                    return;
+                }
+
                 let privateRoomOtherParticipantId: mongoose.Types.ObjectId | null = null;
                 if ((room.type || 'public') === 'private') {
                     const participants = room.participants || [];
@@ -514,58 +561,53 @@ export function setupSocketIO(server: HTTPServer) {
                             replyMessageId: message._id.toString(),
                         });
 
-                        for (const target of targets) {
-                            // Populate context info before emitting
-                            const populatedNotification = await target.notification.populate([
-                                { path: 'sender', select: 'username profileImageUrl' },
-                                {
+                        const notificationIds = targets.map((target) => new mongoose.Types.ObjectId(target.notificationId));
+                        if (notificationIds.length > 0) {
+                            const populatedNotifications = await Notification.find({
+                                _id: { $in: notificationIds },
+                            })
+                                .select('recipient sender type room message thread read isDismissed createdAt updatedAt')
+                                .populate('sender', 'username profileImageUrl')
+                                .populate({
                                     path: 'room',
                                     select: 'name type participants',
                                     populate: {
                                         path: 'participants',
-                                        select: 'username'
-                                    }
-                                },
-                                { path: 'message', select: 'text' },
-                                { path: 'thread', select: 'text' }
-                            ]);
+                                        select: 'username',
+                                    },
+                                })
+                                .populate('message', 'text')
+                                .populate('thread', 'text')
+                                .lean<PopulatedNotification[]>();
 
-                            const room = populatedNotification.room as any;
-                            let roomName = room?.name || 'Unknown Room';
+                            for (const notification of populatedNotifications) {
+                                const targetUserId = notification.recipient.toString();
+                                const roomName = resolveNotificationRoomName(notification, targetUserId);
 
-                            if (room?.type === 'private' && room?.participants) {
-                                const otherParticipant = room.participants.find((p: any) =>
-                                    (p._id || p).toString() !== target.userId.toString()
-                                );
-                                if (otherParticipant && typeof otherParticipant === 'object') {
-                                    roomName = otherParticipant.username || roomName;
-                                }
+                                const notificationData = {
+                                    _id: notification._id.toString(),
+                                    recipient: targetUserId,
+                                    sender: {
+                                        id: notification.sender._id.toString(),
+                                        username: notification.sender.username || 'Unknown',
+                                        profileImageUrl: notification.sender.profileImageUrl || null,
+                                    },
+                                    type: notification.type,
+                                    roomId: notification.room._id.toString(),
+                                    roomName,
+                                    roomType: notification.room.type || 'public',
+                                    messageId: notification.message._id.toString(),
+                                    threadId: notification.thread._id.toString(),
+                                    parentMessageText: notification.thread.text || null,
+                                    replyText: notification.message.text || '',
+                                    previewText: notification.message.text ? notification.message.text.substring(0, 100) : '',
+                                    read: notification.read,
+                                    createdAt: notification.createdAt.getTime(),
+                                    updatedAt: notification.updatedAt.getTime(),
+                                };
+
+                                io.to(`user:${targetUserId}`).emit('new_notification', notificationData);
                             }
-
-                            // Convert to plain object with enriched data
-                            const notificationData = {
-                                _id: populatedNotification._id.toString(),
-                                recipient: populatedNotification.recipient.toString(),
-                                sender: {
-                                    id: populatedNotification.sender._id.toString(),
-                                    username: (populatedNotification.sender as any).username || 'Unknown',
-                                    profileImageUrl: (populatedNotification.sender as any).profileImageUrl || null,
-                                },
-                                type: populatedNotification.type,
-                                roomId: populatedNotification.room._id.toString(),
-                                roomName: roomName,
-                                roomType: room?.type || 'public',
-                                messageId: populatedNotification.message._id.toString(),
-                                threadId: populatedNotification.thread._id.toString(),
-                                parentMessageText: (populatedNotification.thread as any).text || null,
-                                replyText: (populatedNotification.message as any).text || '',
-                                previewText: (populatedNotification.message as any).text ? (populatedNotification.message as any).text.substring(0, 100) : '',
-                                read: populatedNotification.read,
-                                createdAt: populatedNotification.createdAt.toISOString(),
-                                updatedAt: populatedNotification.updatedAt.toISOString(),
-                            };
-
-                            io.to(`user:${target.userId}`).emit('new_notification', notificationData);
                         }
                     } catch (err) {
                         logger.error('socket.notification.failed', {

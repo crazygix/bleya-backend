@@ -2,8 +2,7 @@ import mongoose from 'mongoose';
 import { Room } from '../models/Room.js';
 import { User } from '../models/User.js';
 
-import { NotFoundError, ValidationError, ErrorCode } from '../utils/errors.js';
-import logger from '../utils/logger.js';
+import { AppError, NotFoundError, ValidationError, ErrorCode } from '../utils/errors.js';
 
 const MAX_PUBLIC_ROOMS = 5;
 
@@ -16,6 +15,7 @@ interface LeanRoom {
     _id: mongoose.Types.ObjectId;
     name: string;
     type?: 'public' | 'private';
+    participants?: mongoose.Types.ObjectId[];
     cityKey?: string;
     imageUrl?: string;
     geo?: GeoPoint;
@@ -121,11 +121,18 @@ export async function listPublicRooms(input: ListPublicRoomsInput = {}): Promise
 
 export async function joinRoomForUser(input: JoinRoomForUserInput): Promise<JoinRoomResponseDto> {
     const room = await Room.findById(input.roomId)
-        .select('_id name type imageUrl cityKey geo')
+        .select('_id name type participants imageUrl cityKey geo')
         .lean<LeanRoom | null>();
 
     if (!room) {
         throw new NotFoundError('Room not found', ErrorCode.ROOM_NOT_FOUND);
+    }
+
+    if ((room.type || 'public') === 'private') {
+        const isParticipant = (room.participants || []).some((participantId) => participantId.equals(input.userId));
+        if (!isParticipant) {
+            throw new AppError(ErrorCode.FORBIDDEN, 'You are not allowed to join this chat.', 403);
+        }
     }
 
     const roomSummary = toRoomSummary(room);

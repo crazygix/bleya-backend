@@ -24,13 +24,29 @@ function normalizePhoneNumber(phoneNumber: string): string {
     return sanitizePhoneNumber(phoneNumber);
 }
 
-function signAccessToken(payload: { userId: string; phoneNumber: string }): string {
+function signAccessToken(payload: { userId: string }): string {
     const options: jwt.SignOptions = {
         expiresIn: ACCESS_TOKEN_TTL,
         algorithm: 'HS256',
     };
 
     return jwt.sign(payload, config.jwtSecret, options);
+}
+
+function generateVerificationCode(): string {
+    return crypto.randomInt(0, 1_000_000).toString().padStart(6, '0');
+}
+
+function buildVerificationCodeResponse(message: string, code: string, codeSentAt: Date): {
+    message: string;
+    codeSentAt: number;
+    code?: string;
+} {
+    return {
+        message,
+        codeSentAt: codeSentAt.getTime(),
+        ...(config.isProduction ? {} : { code }),
+    };
 }
 
 function generateRefreshToken(): string {
@@ -73,7 +89,7 @@ router.post('/request-code', rateLimiter(requestCodeRateLimit, 15 * 60 * 1000), 
         throw new ValidationError("That doesn't look like a valid number. Try again?");
     }
 
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const code = generateVerificationCode();
     const codeExpiresAt = new Date();
     codeExpiresAt.setMinutes(codeExpiresAt.getMinutes() + CODE_EXPIRY_MINUTES);
     const codeSentAt = new Date();
@@ -101,11 +117,7 @@ router.post('/request-code', rateLimiter(requestCodeRateLimit, 15 * 60 * 1000), 
         throw new Error('Failed to create or update user for OTP request');
     }
 
-    res.json({
-        message: 'Verification code sent',
-        code,
-        codeSentAt: codeSentAt.getTime(),
-    });
+    res.json(buildVerificationCodeResponse('Verification code sent', code, codeSentAt));
 }));
 
 router.post('/verify-code', rateLimiter(authRateLimit, 15 * 60 * 1000), asyncHandler(async (req: express.Request, res: express.Response) => {
@@ -155,7 +167,7 @@ router.post('/verify-code', rateLimiter(authRateLimit, 15 * 60 * 1000), asyncHan
     user.refreshTokenExpiresAt = getRefreshExpiryDate();
     await user.save();
 
-    const payload = { phoneNumber: user.phoneNumber, userId: user._id.toString() };
+    const payload = { userId: user._id.toString() };
     const accessToken = signAccessToken(payload);
 
     setRefreshCookie(res, refreshToken);
@@ -194,7 +206,7 @@ router.post('/resend-code', rateLimiter(requestCodeRateLimit, 15 * 60 * 1000), a
         }
     }
 
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const code = generateVerificationCode();
     const codeExpiresAt = new Date();
     codeExpiresAt.setMinutes(codeExpiresAt.getMinutes() + CODE_EXPIRY_MINUTES);
     const codeSentAt = new Date();
@@ -204,22 +216,17 @@ router.post('/resend-code', rateLimiter(requestCodeRateLimit, 15 * 60 * 1000), a
     user.codeSentAt = codeSentAt;
     await user.save();
 
-    res.json({
-        message: 'Verification code resent',
-        code,
-        codeSentAt: codeSentAt.getTime(),
-    });
+    res.json(buildVerificationCodeResponse('Verification code resent', code, codeSentAt));
 }));
 
 router.get('/me', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
-    const user = await User.findOne({ phoneNumber: req.user?.phoneNumber });
+    const user = await User.findById(req.user?.userId);
     if (!user) {
         throw new NotFoundError('User not found', ErrorCode.USER_NOT_FOUND);
     }
 
     res.json({
         id: user._id.toString(),
-        phoneNumber: user.phoneNumber,
         username: user.username,
         bio: user.bio,
         profileImageUrl: user.profileImageUrl,
@@ -262,7 +269,7 @@ router.post('/refresh', rateLimiter(authRateLimit, 15 * 60 * 1000), asyncHandler
         throw new UnauthorizedError('Invalid or expired refresh token');
     }
 
-    const payload = { phoneNumber: user.phoneNumber, userId: user._id.toString() };
+    const payload = { userId: user._id.toString() };
     const accessToken = signAccessToken(payload);
 
     setRefreshCookie(res, newRefresh);
@@ -300,7 +307,7 @@ router.post('/set-username', authenticateUser, asyncHandler(async (req: AuthRequ
         throw new ValidationError('Keep it simple: 3-30 characters, just letters, numbers, and underscores.');
     }
 
-    const user = await User.findOne({ phoneNumber: req.user?.phoneNumber });
+    const user = await User.findById(req.user?.userId);
     if (!user) {
         throw new NotFoundError('User not found', ErrorCode.USER_NOT_FOUND);
     }
@@ -319,7 +326,6 @@ router.post('/set-username', authenticateUser, asyncHandler(async (req: AuthRequ
     await user.save();
 
     res.json({
-        phoneNumber: user.phoneNumber,
         username: user.username,
         bio: user.bio,
         profileImageUrl: user.profileImageUrl,

@@ -22,6 +22,10 @@ const DEFAULT_REDACT_FIELDS = [
   'secret',
   'api_key',
   'apikey',
+  'phone',
+  'phone_number',
+  'phonenumber',
+  'phoneNumber',
 ];
 
 function requiredEnv(name: string): string {

@@ -1,7 +1,6 @@
 import mongoose from 'mongoose';
 import { Notification } from '../models/Notification.js';
 import { Message } from '../models/Message.js';
-import { User } from '../models/User.js';
 import logger from '../utils/logger.js';
 
 interface CreateReplyNotificationParams {
@@ -11,6 +10,58 @@ interface CreateReplyNotificationParams {
     roomId: string;
 }
 
+interface NotificationInsertPayload {
+    recipient: mongoose.Types.ObjectId;
+    sender: mongoose.Types.ObjectId;
+    type: 'reply';
+    room: mongoose.Types.ObjectId;
+    message: mongoose.Types.ObjectId;
+    thread: mongoose.Types.ObjectId;
+}
+
+export interface PopulatedNotificationParticipant {
+    _id: mongoose.Types.ObjectId;
+    username?: string;
+}
+
+export interface PopulatedNotificationRoom {
+    _id: mongoose.Types.ObjectId;
+    name?: string;
+    type?: 'public' | 'private';
+    participants?: Array<mongoose.Types.ObjectId | PopulatedNotificationParticipant>;
+}
+
+export interface PopulatedNotificationUser {
+    _id: mongoose.Types.ObjectId;
+    username?: string;
+    profileImageUrl?: string;
+}
+
+export interface PopulatedNotificationMessage {
+    _id: mongoose.Types.ObjectId;
+    text?: string;
+}
+
+export interface PopulatedNotification {
+    _id: mongoose.Types.ObjectId;
+    recipient: mongoose.Types.ObjectId;
+    sender: PopulatedNotificationUser;
+    type: 'reply';
+    room: PopulatedNotificationRoom;
+    message: PopulatedNotificationMessage;
+    thread: PopulatedNotificationMessage;
+    read: boolean;
+    isDismissed?: boolean;
+    createdAt: Date;
+    updatedAt: Date;
+}
+
+type NotificationsQuery = {
+    recipient: string;
+    isDismissed: false;
+    createdAt?: { $lt: Date };
+};
+
 export class NotificationService {
     static async createReplyNotification({
         replyMessageId,
@@ -18,7 +69,7 @@ export class NotificationService {
         senderId,
         roomId,
     }: CreateReplyNotificationParams): Promise<UserNotifyTarget[]> {
-        const parentMessage = await Message.findById(parentMessageId);
+        const parentMessage = await Message.findById(parentMessageId).select('userId').lean<{ userId: mongoose.Types.ObjectId } | null>();
         if (!parentMessage) {
             return [];
         }
@@ -37,7 +88,7 @@ export class NotificationService {
         const otherReplies = await Message.find({
             parentMessageId,
             userId: { $ne: senderId }, // Exclude current sender
-        }).distinct('userId'); // Get unique user IDs
+        }).distinct('userId') as mongoose.Types.ObjectId[]; // Get unique user IDs
 
         for (const userId of otherReplies) {
             if (userId.toString() !== senderId) {
@@ -45,34 +96,36 @@ export class NotificationService {
             }
         }
 
-        const notifications: any[] = [];
-        const resultTargets: UserNotifyTarget[] = [];
+        const notifications: NotificationInsertPayload[] = [];
 
         for (const targetUserId of targets) {
-            // Check if user is still in the room? (Optimization, maybe not strictly necessary but good practice)
-            // We can assume they are interested if they participated.
-
-            const notification = new Notification({
-                recipient: targetUserId,
-                sender: senderId,
+            notifications.push({
+                recipient: new mongoose.Types.ObjectId(targetUserId),
+                sender: new mongoose.Types.ObjectId(senderId),
                 type: 'reply',
-                room: roomId,
-                message: replyMessageId,
-                thread: parentMessageId,
+                room: new mongoose.Types.ObjectId(roomId),
+                message: new mongoose.Types.ObjectId(replyMessageId),
+                thread: new mongoose.Types.ObjectId(parentMessageId),
             });
-            notifications.push(notification);
-            resultTargets.push({ userId: targetUserId, notification });
         }
 
-        if (notifications.length > 0) {
-            await Notification.insertMany(notifications);
+        if (notifications.length === 0) {
+            return [];
         }
 
-        return resultTargets;
+        const insertedNotifications = await Notification.insertMany(notifications);
+        return insertedNotifications.map((notification) => ({
+            userId: notification.recipient.toString(),
+            notificationId: notification._id.toString(),
+        }));
     }
 
-    static async getNotifications(userId: string, limit = 20, before?: Date) {
-        const query: any = { recipient: userId, isDismissed: false };
+    static async getNotifications(userId: string, limit = 20, before?: Date): Promise<{
+        notifications: PopulatedNotification[];
+        nextCursor: Date | null;
+        unreadCount: number;
+    }> {
+        const query: NotificationsQuery = { recipient: userId, isDismissed: false };
         if (before) {
             query.createdAt = { $lt: before };
         }
@@ -93,7 +146,7 @@ export class NotificationService {
             .populate('message', 'text')
             .populate('thread', 'text')
             .maxTimeMS(7000)
-            .lean();
+            .lean<PopulatedNotification[]>();
 
         const unreadCountQuery = Notification.countDocuments({
             recipient: userId,
@@ -113,7 +166,7 @@ export class NotificationService {
         const notifications = notificationsResult.value;
         const unreadCount = unreadCountResult.status === 'fulfilled'
             ? unreadCountResult.value
-            : notifications.reduce((count, notification: any) => (
+            : notifications.reduce((count, notification) => (
                 notification.read ? count : count + 1
             ), 0);
 
@@ -172,5 +225,5 @@ export class NotificationService {
 
 export interface UserNotifyTarget {
     userId: string;
-    notification: any;
+    notificationId: string;
 }
