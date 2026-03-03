@@ -1,12 +1,47 @@
+import fs from 'fs';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const envPath = path.resolve(__dirname, '../../.env');
 
-dotenv.config({ path: envPath });
+function findProjectRoot(startDir: string): string {
+  let current = startDir;
+
+  while (true) {
+    if (fs.existsSync(path.join(current, 'package.json'))) {
+      return current;
+    }
+
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return startDir;
+    }
+
+    current = parent;
+  }
+}
+
+function loadEnvFiles(projectRoot: string, nodeEnv: string): void {
+  const candidates = [
+    '.env',
+    `.env.${nodeEnv}`,
+    '.env.local',
+    `.env.${nodeEnv}.local`,
+  ];
+
+  for (const candidate of candidates) {
+    const filePath = path.join(projectRoot, candidate);
+    if (fs.existsSync(filePath)) {
+      dotenv.config({ path: filePath, override: true });
+    }
+  }
+}
+
+const bootNodeEnv = process.env.NODE_ENV || 'development';
+const projectRoot = findProjectRoot(__dirname);
+loadEnvFiles(projectRoot, bootNodeEnv);
 
 export type HttpLogBodyMode = 'off' | 'errors' | 'all';
 

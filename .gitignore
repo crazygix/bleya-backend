@@ -15,7 +15,8 @@ yarn-debug.log*
 yarn-error.log*
 
 # Environment variables
-.env
+.env*
+!.env.example
 
 # IDEs and editors
 .idea/
