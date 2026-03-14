@@ -68,10 +68,8 @@ export function createApp(): express.Express {
     app.use(bodyParser.urlencoded({ extended: true, limit: '10mb' }));
     app.use(httpRequestLogger);
 
-    const apiV1Router = createApiRouter();
-    app.use('/api/v1', apiV1Router);
-    // Keep /api routes for backward compatibility while clients migrate to /api/v1.
-    app.use('/api', apiV1Router);
+    const v1Router = createApiRouter();
+    app.use('/v1', v1Router);
 
     app.get('/', (_req: Request, res: Response) => {
         res.json({ message: 'Gde si bre zverino?' });

@@ -37,7 +37,7 @@ describe('Rooms API', () => {
         resetTestApp();
     });
 
-    describe('GET /api/v1/rooms', () => {
+    describe('GET /v1/rooms', () => {
         it('lists public rooms', async () => {
             const user = await createTestUser({ phoneNumber: '+11111111111' });
             await createPublicRoom('Room Alpha');
@@ -45,7 +45,7 @@ describe('Rooms API', () => {
 
             const agent = getTestAgent();
             const res = await agent
-                .get('/api/v1/rooms')
+                .get('/v1/rooms')
                 .set(authHeader(user._id.toString()))
                 .expect(200);
 
@@ -62,7 +62,7 @@ describe('Rooms API', () => {
 
             const agent = getTestAgent();
             const res = await agent
-                .get('/api/v1/rooms?search=berlin')
+                .get('/v1/rooms?search=berlin')
                 .set(authHeader(user._id.toString()))
                 .expect(200);
 
@@ -72,18 +72,18 @@ describe('Rooms API', () => {
 
         it('returns 401 without auth', async () => {
             const agent = getTestAgent();
-            await agent.get('/api/v1/rooms').expect(401);
+            await agent.get('/v1/rooms').expect(401);
         });
     });
 
-    describe('POST /api/v1/rooms/:roomId/join', () => {
+    describe('POST /v1/rooms/:roomId/join', () => {
         it('joins a public room', async () => {
             const user = await createTestUser({ phoneNumber: '+11111111113' });
             const room = await createPublicRoom('Join Me');
 
             const agent = getTestAgent();
             const res = await agent
-                .post(`/api/v1/rooms/${room._id}/join`)
+                .post(`/v1/rooms/${room._id}/join`)
                 .set(authHeader(user._id.toString()))
                 .expect(200);
 
@@ -103,7 +103,7 @@ describe('Rooms API', () => {
 
             const agent = getTestAgent();
             const res = await agent
-                .post(`/api/v1/rooms/${room._id}/join`)
+                .post(`/v1/rooms/${room._id}/join`)
                 .set(authHeader(user._id.toString()))
                 .expect(200);
 
@@ -123,7 +123,7 @@ describe('Rooms API', () => {
 
             const agent = getTestAgent();
             await agent
-                .post(`/api/v1/rooms/${extraRoom._id}/join`)
+                .post(`/v1/rooms/${extraRoom._id}/join`)
                 .set(authHeader(user._id.toString()))
                 .expect(400);
         });
@@ -137,7 +137,7 @@ describe('Rooms API', () => {
 
             const agent = getTestAgent();
             await agent
-                .post(`/api/v1/rooms/${room._id}/join`)
+                .post(`/v1/rooms/${room._id}/join`)
                 .set(authHeader(user._id.toString()))
                 .expect(403);
         });
@@ -148,7 +148,7 @@ describe('Rooms API', () => {
 
             const agent = getTestAgent();
             await agent
-                .post(`/api/v1/rooms/${fakeId}/join`)
+                .post(`/v1/rooms/${fakeId}/join`)
                 .set(authHeader(user._id.toString()))
                 .expect(404);
         });

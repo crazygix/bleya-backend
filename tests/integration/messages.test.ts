@@ -31,7 +31,7 @@ describe('Messages API', () => {
         resetTestApp();
     });
 
-    describe('GET /api/v1/rooms/:roomId/messages', () => {
+    describe('GET /v1/rooms/:roomId/messages', () => {
         it('returns messages for a room the user is in', async () => {
             const { room, user } = await createRoomWithMember('+13333333333');
             const roomId = room._id as mongoose.Types.ObjectId;
@@ -43,7 +43,7 @@ describe('Messages API', () => {
 
             const agent = getTestAgent();
             const res = await agent
-                .get(`/api/v1/rooms/${roomId}/messages`)
+                .get(`/v1/rooms/${roomId}/messages`)
                 .set(authHeader(user._id.toString()))
                 .expect(200);
 
@@ -64,7 +64,7 @@ describe('Messages API', () => {
 
             const agent = getTestAgent();
             const res = await agent
-                .get(`/api/v1/rooms/${room._id}/messages`)
+                .get(`/v1/rooms/${room._id}/messages`)
                 .set(authHeader(user._id.toString()))
                 .expect(200);
 
@@ -78,13 +78,13 @@ describe('Messages API', () => {
 
             const agent = getTestAgent();
             await agent
-                .get(`/api/v1/rooms/${room._id}/messages`)
+                .get(`/v1/rooms/${room._id}/messages`)
                 .set(authHeader(user._id.toString()))
                 .expect(403);
         });
     });
 
-    describe('GET /api/v1/messages/:messageId', () => {
+    describe('GET /v1/messages/:messageId', () => {
         it('returns a single message', async () => {
             const { room, user } = await createRoomWithMember('+13333333336');
             const roomId = room._id as mongoose.Types.ObjectId;
@@ -92,7 +92,7 @@ describe('Messages API', () => {
 
             const agent = getTestAgent();
             const res = await agent
-                .get(`/api/v1/messages/${message._id}`)
+                .get(`/v1/messages/${message._id}`)
                 .set(authHeader(user._id.toString()))
                 .expect(200);
 
@@ -106,13 +106,13 @@ describe('Messages API', () => {
 
             const agent = getTestAgent();
             await agent
-                .get(`/api/v1/messages/${fakeId}`)
+                .get(`/v1/messages/${fakeId}`)
                 .set(authHeader(user._id.toString()))
                 .expect(404);
         });
     });
 
-    describe('GET /api/v1/messages/:messageId/thread', () => {
+    describe('GET /v1/messages/:messageId/thread', () => {
         it('returns parent message and replies', async () => {
             const { room, user } = await createRoomWithMember('+13333333338');
             const roomId = room._id as mongoose.Types.ObjectId;
@@ -122,7 +122,7 @@ describe('Messages API', () => {
 
             const agent = getTestAgent();
             const res = await agent
-                .get(`/api/v1/messages/${parent._id}/thread`)
+                .get(`/v1/messages/${parent._id}/thread`)
                 .set(authHeader(user._id.toString()))
                 .expect(200);
 

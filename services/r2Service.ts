@@ -45,11 +45,7 @@ function getBucketName(): string {
 }
 
 function getPublicBaseUrl(bucketName: string): string {
-    if (config.isProduction) {
-        return config.r2.publicUrl || `${config.r2.endpoint}/${bucketName}`;
-    }
-
-    return config.r2.publicUrlDev || config.r2.publicUrl || `${config.r2.endpoint}/${bucketName}`;
+    return config.r2.publicBaseUrl || `${config.r2.endpoint}/${bucketName}`;
 }
 
 export interface UploadResult {

@@ -57,8 +57,8 @@ Its full content is preserved below as code for easy reference.
 /// - Provide clear, user-friendly error messages
 ///
 /// API Versioning:
-/// - Use versioned endpoints: `/api/v1/...` (future-proofing)
-/// - Plan for backward compatibility when adding v2
+/// - Use versioned endpoints: `/v1/...` (future-proofing)
+/// - Before launch, prefer changing the current version cleanly over keeping legacy aliases
 ///
 /// Example:
 /// ```typescript
@@ -458,7 +458,7 @@ Its full content is preserved below as code for easy reference.
 ///   jwtSecret: process.env.JWT_SECRET || (() => {
 ///     throw new Error('JWT_SECRET is required');
 ///   })(),
-///   corsOrigins: process.env.CORS_ORIGINS?.split(',') || ['http://localhost:3000'],
+///   corsOrigins: process.env.CORS_ORIGINS?.split(',') || [process.env.CLIENT_ORIGIN || 'http://localhost:3000'],
 /// };
 ///
 /// // ❌ WRONG - unvalidated config
@@ -566,4 +566,3 @@ Its full content is preserved below as code for easy reference.
 /// END OF ARCHITECTURE RULES
 /// ========================================
 ```
-

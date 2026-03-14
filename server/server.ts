@@ -222,9 +222,7 @@ export async function startServer(options: StartServerOptions = {}): Promise<{
             }
         });
 
-        const protocol = config.isProduction ? 'https' : 'http';
-        const url = `${protocol}://${config.host}:${resolvedOptions.port}`;
-        logger.info('server.started', { url });
+        logger.info('server.started', { url: config.urls.publicOrigin });
 
         return { app, server };
     } catch (error) {

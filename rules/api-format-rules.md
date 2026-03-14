@@ -20,8 +20,8 @@ Their content is preserved below as code for reference.
 /// - Provide clear, user-friendly error messages
 ///
 /// API Versioning:
-/// - Use versioned endpoints: `/api/v1/...` (future-proofing)
-/// - Plan for backward compatibility when adding v2
+/// - Use versioned endpoints: `/v1/...` (future-proofing)
+/// - Before launch, prefer changing the current version cleanly over keeping legacy aliases
 ///
 /// Example:
 /// ```typescript
@@ -42,4 +42,3 @@ Their content is preserved below as code for reference.
 /// res.json(user); // Raw mongoose document
 /// ```
 ```
-

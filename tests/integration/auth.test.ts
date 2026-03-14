@@ -22,11 +22,11 @@ describe('Auth API', () => {
         resetTestApp();
     });
 
-    describe('POST /api/v1/auth/request-code', () => {
+    describe('POST /v1/auth/request-code', () => {
         it('creates user and returns verification code', async () => {
             const agent = getTestAgent();
             const res = await agent
-                .post('/api/v1/auth/request-code')
+                .post('/v1/auth/request-code')
                 .send({ phoneNumber: '+12345678901' })
                 .expect(200);
 
@@ -42,7 +42,7 @@ describe('Auth API', () => {
         it('returns 400 for invalid phone number', async () => {
             const agent = getTestAgent();
             await agent
-                .post('/api/v1/auth/request-code')
+                .post('/v1/auth/request-code')
                 .send({ phoneNumber: 'abc' })
                 .expect(400);
         });
@@ -50,13 +50,13 @@ describe('Auth API', () => {
         it('returns 400 for missing phone number', async () => {
             const agent = getTestAgent();
             await agent
-                .post('/api/v1/auth/request-code')
+                .post('/v1/auth/request-code')
                 .send({})
                 .expect(400);
         });
     });
 
-    describe('POST /api/v1/auth/verify-code', () => {
+    describe('POST /v1/auth/verify-code', () => {
         it('returns tokens and requiresUsername for correct code', async () => {
             const agent = getTestAgent();
             const codeExpiresAt = new Date();
@@ -70,7 +70,7 @@ describe('Auth API', () => {
             });
 
             const res = await agent
-                .post('/api/v1/auth/verify-code')
+                .post('/v1/auth/verify-code')
                 .send({ phoneNumber: '+19999999999', code: '123456' })
                 .expect(200);
 
@@ -92,7 +92,7 @@ describe('Auth API', () => {
 
             const agent = getTestAgent();
             await agent
-                .post('/api/v1/auth/verify-code')
+                .post('/v1/auth/verify-code')
                 .send({ phoneNumber: '+19999999998', code: '000000' })
                 .expect(401);
         });
@@ -110,7 +110,7 @@ describe('Auth API', () => {
 
             const agent = getTestAgent();
             await agent
-                .post('/api/v1/auth/verify-code')
+                .post('/v1/auth/verify-code')
                 .send({ phoneNumber: '+19999999997', code: '123456' })
                 .expect(401);
         });
@@ -118,13 +118,13 @@ describe('Auth API', () => {
         it('returns 400 for missing fields', async () => {
             const agent = getTestAgent();
             await agent
-                .post('/api/v1/auth/verify-code')
+                .post('/v1/auth/verify-code')
                 .send({ phoneNumber: '+19999999999' })
                 .expect(400);
         });
     });
 
-    describe('POST /api/v1/auth/refresh', () => {
+    describe('POST /v1/auth/refresh', () => {
         it('rotates refresh token and returns new access token', async () => {
             const agent = getTestAgent();
             const codeExpiresAt = new Date();
@@ -138,7 +138,7 @@ describe('Auth API', () => {
             });
 
             const verifyRes = await agent
-                .post('/api/v1/auth/verify-code')
+                .post('/v1/auth/verify-code')
                 .send({ phoneNumber: '+18888888888', code: '111111' })
                 .expect(200);
 
@@ -146,7 +146,7 @@ describe('Auth API', () => {
             assert.ok(cookies);
 
             const res = await agent
-                .post('/api/v1/auth/refresh')
+                .post('/v1/auth/refresh')
                 .set('Cookie', cookies)
                 .expect(200);
 
@@ -157,26 +157,26 @@ describe('Auth API', () => {
         it('returns 401 when no refresh cookie', async () => {
             const agent = getTestAgent();
             await agent
-                .post('/api/v1/auth/refresh')
+                .post('/v1/auth/refresh')
                 .expect(401);
         });
 
         it('returns 401 for invalid refresh token', async () => {
             const agent = getTestAgent();
             await agent
-                .post('/api/v1/auth/refresh')
+                .post('/v1/auth/refresh')
                 .set('Cookie', 'refreshToken=invalid-token')
                 .expect(401);
         });
     });
 
-    describe('POST /api/v1/auth/set-username', () => {
+    describe('POST /v1/auth/set-username', () => {
         it('sets username for user without one', async () => {
             const user = await createTestUser({ phoneNumber: '+17777777777' });
             const agent = getTestAgent();
 
             const res = await agent
-                .post('/api/v1/auth/set-username')
+                .post('/v1/auth/set-username')
                 .set(authHeader(user._id.toString()))
                 .send({ username: 'testuser' })
                 .expect(200);
@@ -190,7 +190,7 @@ describe('Auth API', () => {
             const agent = getTestAgent();
 
             await agent
-                .post('/api/v1/auth/set-username')
+                .post('/v1/auth/set-username')
                 .set(authHeader(user._id.toString()))
                 .send({ username: 'taken' })
                 .expect(400);
@@ -201,7 +201,7 @@ describe('Auth API', () => {
             const agent = getTestAgent();
 
             await agent
-                .post('/api/v1/auth/set-username')
+                .post('/v1/auth/set-username')
                 .set(authHeader(user._id.toString()))
                 .send({ username: 'newname' })
                 .expect(400);
@@ -210,19 +210,19 @@ describe('Auth API', () => {
         it('returns 401 without auth', async () => {
             const agent = getTestAgent();
             await agent
-                .post('/api/v1/auth/set-username')
+                .post('/v1/auth/set-username')
                 .send({ username: 'test' })
                 .expect(401);
         });
     });
 
-    describe('POST /api/v1/auth/check-username', () => {
+    describe('POST /v1/auth/check-username', () => {
         it('returns available true for unused username', async () => {
             const user = await createTestUser({ phoneNumber: '+16666666666' });
             const agent = getTestAgent();
 
             const res = await agent
-                .post('/api/v1/auth/check-username')
+                .post('/v1/auth/check-username')
                 .set(authHeader(user._id.toString()))
                 .send({ username: 'uniquename' })
                 .expect(200);
@@ -236,7 +236,7 @@ describe('Auth API', () => {
             const agent = getTestAgent();
 
             const res = await agent
-                .post('/api/v1/auth/check-username')
+                .post('/v1/auth/check-username')
                 .set(authHeader(user._id.toString()))
                 .send({ username: 'alice' })
                 .expect(200);
@@ -245,11 +245,11 @@ describe('Auth API', () => {
         });
     });
 
-    describe('POST /api/v1/auth/logout', () => {
+    describe('POST /v1/auth/logout', () => {
         it('clears refresh cookie', async () => {
             const agent = getTestAgent();
             const res = await agent
-                .post('/api/v1/auth/logout')
+                .post('/v1/auth/logout')
                 .expect(200);
 
             assert.equal(res.body.success, true);

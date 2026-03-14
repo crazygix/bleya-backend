@@ -19,7 +19,27 @@ Recommended local setup:
 - Never commit `.env.local` (ignored by git)
 - Keep `.env.example` updated whenever a new env key is added
 
-### 2) Required keys
+### 2) URL config
+
+Use one key per concept and let the env file decide the environment-specific value:
+
+- `APP_HOST`: local machine/device host used to derive backend URLs
+- `PUBLIC_ORIGIN`: optional explicit backend origin, e.g. `http://<LAN_IP_OF_MAC>:8080`
+- `API_BASE_URL`: optional explicit API base URL, defaults to `<PUBLIC_ORIGIN>/v1`
+- `CLIENT_ORIGIN`: optional primary client origin used for CORS fallback
+- `R2_PUBLIC_BASE_URL`: optional public CDN/base URL for uploads
+
+If `CORS_ORIGINS` is empty, the backend now defaults to `CLIENT_ORIGIN`.
+
+Recommended production split:
+
+- website: `https://bleyachat.com`
+- api: `https://api.bleyachat.com`
+- backend env: `PUBLIC_ORIGIN=https://api.bleyachat.com`
+- backend env: `API_BASE_URL=https://api.bleyachat.com/v1`
+- backend env: `CLIENT_ORIGIN=https://bleyachat.com`
+
+### 3) Required keys
 
 Set these at minimum in `.env.local`:
 
@@ -30,7 +50,7 @@ Set these at minimum in `.env.local`:
 - `R2_SECRET_ACCESS_KEY`
 - `R2_BUCKET_NAME`
 
-### 3) Run locally
+### 4) Run locally
 
 ```bash
 npm run build && npm start

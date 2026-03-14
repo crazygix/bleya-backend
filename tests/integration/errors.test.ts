@@ -25,7 +25,7 @@ describe('Error handling', () => {
         const agent = getTestAgent();
 
         const res = await agent
-            .post('/api/v1/rooms/not-a-valid-id/join')
+            .post('/v1/rooms/not-a-valid-id/join')
             .set(authHeader(user._id.toString()))
             .expect(400);
 
@@ -37,7 +37,7 @@ describe('Error handling', () => {
         const agent = getTestAgent();
 
         await agent
-            .get('/api/v1/rooms/507f1f77bcf86cd799439011')
+            .get('/v1/rooms/507f1f77bcf86cd799439011')
             .set(authHeader(user._id.toString()))
             .expect(404);
     });
@@ -46,7 +46,7 @@ describe('Error handling', () => {
         const agent = getTestAgent();
 
         const res = await agent
-            .get('/api/v1/users/me')
+            .get('/v1/users/me')
             .expect(401);
 
         assert.ok(res.body.error);
@@ -56,7 +56,7 @@ describe('Error handling', () => {
         const agent = getTestAgent();
 
         const res = await agent
-            .get('/api/v1/users/me')
+            .get('/v1/users/me')
             .set('Authorization', 'Bearer invalid-token')
             .expect(401);
 
@@ -68,7 +68,7 @@ describe('Error handling', () => {
         const agent = getTestAgent();
 
         await agent
-            .get('/api/v1/messages/not-valid')
+            .get('/v1/messages/not-valid')
             .set(authHeader(user._id.toString()))
             .expect(400);
     });

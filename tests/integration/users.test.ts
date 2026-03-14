@@ -20,7 +20,7 @@ describe('Users API', () => {
         resetTestApp();
     });
 
-    describe('GET /api/v1/users/me', () => {
+    describe('GET /v1/users/me', () => {
         it('returns the authenticated user profile', async () => {
             const user = await createTestUser({
                 phoneNumber: '+12222222222',
@@ -30,7 +30,7 @@ describe('Users API', () => {
 
             const agent = getTestAgent();
             const res = await agent
-                .get('/api/v1/users/me')
+                .get('/v1/users/me')
                 .set(authHeader(user._id.toString()))
                 .expect(200);
 
@@ -43,11 +43,11 @@ describe('Users API', () => {
 
         it('returns 401 without auth', async () => {
             const agent = getTestAgent();
-            await agent.get('/api/v1/users/me').expect(401);
+            await agent.get('/v1/users/me').expect(401);
         });
     });
 
-    describe('PUT /api/v1/users/profile', () => {
+    describe('PUT /v1/users/profile', () => {
         it('updates bio', async () => {
             const user = await createTestUser({
                 phoneNumber: '+12222222223',
@@ -56,7 +56,7 @@ describe('Users API', () => {
 
             const agent = getTestAgent();
             const res = await agent
-                .put('/api/v1/users/profile')
+                .put('/v1/users/profile')
                 .set(authHeader(user._id.toString()))
                 .send({ bio: 'new bio' })
                 .expect(200);
@@ -72,7 +72,7 @@ describe('Users API', () => {
 
             const agent = getTestAgent();
             await agent
-                .put('/api/v1/users/profile')
+                .put('/v1/users/profile')
                 .set(authHeader(user._id.toString()))
                 .send({ bio: 123 })
                 .expect(400);
@@ -81,13 +81,13 @@ describe('Users API', () => {
         it('returns 401 without auth', async () => {
             const agent = getTestAgent();
             await agent
-                .put('/api/v1/users/profile')
+                .put('/v1/users/profile')
                 .send({ bio: 'x' })
                 .expect(401);
         });
     });
 
-    describe('GET /api/v1/users/:userId', () => {
+    describe('GET /v1/users/:userId', () => {
         it('returns public profile of another user', async () => {
             const viewer = await createTestUser({ phoneNumber: '+12222222225' });
             const target = await createTestUser({
@@ -98,7 +98,7 @@ describe('Users API', () => {
 
             const agent = getTestAgent();
             const res = await agent
-                .get(`/api/v1/users/${target._id}`)
+                .get(`/v1/users/${target._id}`)
                 .set(authHeader(viewer._id.toString()))
                 .expect(200);
 
@@ -112,7 +112,7 @@ describe('Users API', () => {
             const viewer = await createTestUser({ phoneNumber: '+12222222227' });
             const agent = getTestAgent();
             await agent
-                .get('/api/v1/users/507f1f77bcf86cd799439011')
+                .get('/v1/users/507f1f77bcf86cd799439011')
                 .set(authHeader(viewer._id.toString()))
                 .expect(404);
         });

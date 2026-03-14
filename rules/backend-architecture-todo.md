@@ -104,12 +104,12 @@ Add minimum test coverage:
 ## 🔲 Low Priority
 
 ### 8. API Versioning
-**Status:** Not started  
+**Status:** Completed  
 **Files:** `server/server.ts`, all route files
 
-Add API versioning:
-- Change routes from `/api/auth` to `/api/v1/auth`
-- Plan for backward compatibility
+API versioning:
+- Routes are mounted under `/v1/...`
+- No legacy aliases are kept before public launch
 
 **Reference:** `core/architecture_rules.ts` section 2
 
@@ -133,4 +133,3 @@ Add rate limiting for Socket.IO events:
 - Medium Priority items improve maintainability and consistency
 - Low Priority items are nice-to-haves for future scalability
 ```
-

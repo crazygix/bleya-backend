@@ -125,6 +125,18 @@ function parseList(value: string | undefined): string[] {
     .filter((entry) => entry.length > 0);
 }
 
+function trimTrailingSlash(value: string): string {
+  return value.replace(/\/+$/, '');
+}
+
+function normalizeUrl(value: string): string {
+  return trimTrailingSlash(value.trim());
+}
+
+function buildOrigin(protocol: string, host: string, port: number): string {
+  return `${protocol}://${host}:${port}`;
+}
+
 function parseHttpLogBodyMode(name: string, defaultValue: HttpLogBodyMode): HttpLogBodyMode {
   const raw = process.env[name];
   if (!raw || raw.trim().length === 0) {
@@ -145,14 +157,30 @@ const isLocal = nodeEnv === 'development';
 const isTest = nodeEnv === 'test';
 
 const bodyRedactFields = parseList(process.env.HTTP_LOG_BODY_REDACT_FIELDS);
+const port = parseNumberEnv('PORT', 8080);
+const appHost = process.env.APP_HOST?.trim() || 'localhost';
+const defaultProtocol = isProduction ? 'https' : 'http';
+const publicOrigin =
+  normalizeUrl(process.env.PUBLIC_ORIGIN || buildOrigin(defaultProtocol, appHost, port));
+const apiBaseUrl = normalizeUrl(process.env.API_BASE_URL || `${publicOrigin}/v1`);
+const clientOrigin = normalizeUrl(process.env.CLIENT_ORIGIN || publicOrigin);
+const configuredCorsOrigins = parseOrigins(process.env.CORS_ORIGINS);
+const corsOrigins = configuredCorsOrigins.length > 0 ? configuredCorsOrigins : [clientOrigin];
+const r2PublicBaseUrl = normalizeUrl(process.env.R2_PUBLIC_BASE_URL || '');
 
 export const config = {
   nodeEnv,
   isProduction,
   isLocal,
   isTest,
-  port: parseNumberEnv('PORT', 8080),
-  host: process.env.HOST || 'localhost',
+  port,
+
+  urls: {
+    publicOrigin,
+    apiBaseUrl,
+    clientOrigin,
+    corsOrigins,
+  },
 
   mongoUri: requiredEnv('MONGODB_URI', { defaultInTest: 'mongodb://127.0.0.1:27017/bleya_test' }),
   jwtSecret: requiredEnv('JWT_SECRET', { defaultInTest: 'test-jwt-secret' }),
@@ -160,7 +188,6 @@ export const config = {
   accessTokenTtl: (process.env.ACCESS_TOKEN_TTL || '1h') as string,
   refreshTokenTtlDays: parseNumberEnv('REFRESH_TOKEN_TTL_DAYS', 365),
 
-  corsOrigins: parseOrigins(process.env.CORS_ORIGINS),
   corsAllowAllInDev: process.env.CORS_ALLOW_ALL_IN_DEV === 'true',
 
   httpLogging: {
@@ -177,8 +204,7 @@ export const config = {
     accessKeyId: process.env.R2_ACCESS_KEY_ID || '',
     secretAccessKey: process.env.R2_SECRET_ACCESS_KEY || '',
     bucketName: process.env.R2_BUCKET_NAME || '',
-    publicUrl: process.env.R2_PUBLIC_URL || '',
-    publicUrlDev: process.env.R2_PUBLIC_URL_DEV || '',
+    publicBaseUrl: r2PublicBaseUrl,
   },
 
   citySearch: {

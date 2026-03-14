@@ -2,7 +2,7 @@ import type { CorsOptions } from 'cors';
 import { config } from '../config/index.js';
 
 function parseAllowedOrigins(): string[] {
-  return config.corsOrigins;
+  return config.urls.corsOrigins;
 }
 
 export function buildCorsOptions(): CorsOptions {
