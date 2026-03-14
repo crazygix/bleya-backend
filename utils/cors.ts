@@ -7,8 +7,6 @@ function parseAllowedOrigins(): string[] {
 
 export function buildCorsOptions(): CorsOptions {
   const allowed = parseAllowedOrigins();
-  const allowAllInDev = config.corsAllowAllInDev;
-  const isDev = !config.isProduction;
 
   return {
     credentials: true,
@@ -18,7 +16,7 @@ export function buildCorsOptions(): CorsOptions {
       // Non-browser clients (mobile apps, curl, server-to-server) often send no Origin.
       if (!origin) return callback(null, true);
 
-      if (isDev && allowAllInDev) return callback(null, true);
+      if (!config.isProduction) return callback(null, true);
 
       if (allowed.includes(origin)) return callback(null, true);
 
@@ -38,13 +36,11 @@ export interface SocketCorsOptions {
 
 export function buildSocketCors(): SocketCorsOptions {
   const allowed = parseAllowedOrigins();
-  const allowAllInDev = config.corsAllowAllInDev;
-  const isDev = !config.isProduction;
 
   // socket.io accepts `origin` as string|string[]|boolean|function depending on version.
   const origin = (originHeader: string | undefined, callback: (err: Error | null, ok: boolean) => void) => {
     if (!originHeader) return callback(null, true);
-    if (isDev && allowAllInDev) return callback(null, true);
+    if (!config.isProduction) return callback(null, true);
     if (allowed.includes(originHeader)) return callback(null, true);
     return callback(new Error('CORS: origin not allowed'), false);
   };
