@@ -3,23 +3,23 @@ import assert from 'node:assert/strict';
 import mongoose from 'mongoose';
 import { createAuthService } from '../../services/authService.js';
 import type { UserRepository } from '../../repositories/userRepository.js';
+import type { UserIdentityRepository } from '../../repositories/userIdentityRepository.js';
+import type { PasskeyCredentialRepository } from '../../repositories/passkeyCredentialRepository.js';
+import type { AuthChallengeRepository } from '../../repositories/authChallengeRepository.js';
+import type { ProviderIdentityService } from '../../services/providerIdentityService.js';
+import type { PasskeyService } from '../../services/passkeyService.js';
 
-function makeFakeUser(overrides: Record<string, unknown> = {}) {
+function createMockUser(overrides: Record<string, unknown> = {}) {
     return {
         _id: new mongoose.Types.ObjectId(),
-        phoneNumber: '+12345678901',
         username: '',
-        code: undefined as string | undefined,
-        codeExpiresAt: undefined as Date | undefined,
-        codeSentAt: undefined as Date | undefined,
-        refreshTokenHash: undefined as string | undefined,
-        refreshTokenExpiresAt: undefined as Date | undefined,
-        lastLogin: new Date(),
-        createdAt: new Date(),
-        updatedAt: new Date(),
-        bio: '',
-        profileImageUrl: '',
-        save: async () => {},
+        refreshTokenHash: undefined,
+        refreshTokenExpiresAt: undefined,
+        lastLogin: new Date(0),
+        updatedAt: new Date(0),
+        save: async function save() {
+            return this;
+        },
         ...overrides,
     };
 }
@@ -30,9 +30,9 @@ function fakeUserRepo(overrides: Partial<UserRepository> = {}): UserRepository {
         findByIdLean: async () => null,
         findByIdSelectJoinedRooms: async () => null,
         findByIdSelectUsername: async () => null,
-        findByPhone: async () => null,
+        create: async (data = {}) => createMockUser(data) as any,
+        updateLastLogin: async () => {},
         findByUsernameLean: async () => null,
-        findOneAndUpdateByPhone: async () => null,
         findOneAndUpdateByRefreshToken: async () => null,
         clearRefreshToken: async () => {},
         addToJoinedRooms: async () => ({ modifiedCount: 0 }),
@@ -43,166 +43,254 @@ function fakeUserRepo(overrides: Partial<UserRepository> = {}): UserRepository {
     };
 }
 
+function fakeUserIdentityRepo(overrides: Partial<UserIdentityRepository> = {}): UserIdentityRepository {
+    return {
+        findByProviderIdentity: async () => null,
+        findByUserId: async () => [],
+        findVerifiedByEmail: async () => [],
+        create: async (data) => ({
+            _id: new mongoose.Types.ObjectId(),
+            userId: new mongoose.Types.ObjectId(data.userId),
+            provider: data.provider,
+            providerUserId: data.providerUserId,
+            email: data.email,
+            emailVerified: data.emailVerified,
+            isPrivateRelay: data.isPrivateRelay,
+            linkedAt: new Date(),
+            lastUsedAt: new Date(),
+        }),
+        updateLastUsed: async () => {},
+        ...overrides,
+    };
+}
+
+function fakePasskeyCredentialRepo(overrides: Partial<PasskeyCredentialRepository> = {}): PasskeyCredentialRepository {
+    return {
+        listForUser: async () => [],
+        findByCredentialId: async () => null,
+        create: async () => {},
+        updateCounterAndLastUsed: async () => {},
+        existsForUser: async () => false,
+        ...overrides,
+    };
+}
+
+function fakeAuthChallengeRepo(overrides: Partial<AuthChallengeRepository> = {}): AuthChallengeRepository {
+    return {
+        create: async ({ ceremony, challenge, userId }) => ({
+            _id: new mongoose.Types.ObjectId(),
+            ceremony,
+            challenge,
+            ...(userId ? { userId: new mongoose.Types.ObjectId(userId) } : {}),
+            createdAt: new Date(),
+        }),
+        findById: async () => null,
+        deleteById: async () => {},
+        ...overrides,
+    };
+}
+
+function fakeProviderIdentityService(overrides: Partial<ProviderIdentityService> = {}): ProviderIdentityService {
+    return {
+        verifyGoogleIdToken: async () => ({
+            provider: 'google',
+            providerUserId: 'google-user-1',
+            email: 'alice@example.com',
+            emailVerified: true,
+            isPrivateRelay: false,
+        }),
+        verifyAppleIdToken: async () => ({
+            provider: 'apple',
+            providerUserId: 'apple-user-1',
+            email: 'alice@example.com',
+            emailVerified: true,
+            isPrivateRelay: false,
+        }),
+        ...overrides,
+    };
+}
+
+function fakePasskeyService(overrides: Partial<PasskeyService> = {}): PasskeyService {
+    return {
+        generateRegistrationOptions: async () => ({
+            rp: { id: 'bleyachat.com', name: 'Bleya' },
+            user: { id: 'dXNlcg==', name: 'alice', displayName: 'alice' },
+            challenge: 'challenge-1',
+            pubKeyCredParams: [],
+        }),
+        verifyRegistration: async () => ({
+            credentialId: 'credential-1',
+            publicKey: 'public-key-1',
+            counter: 0,
+            transports: ['internal'],
+            deviceType: 'singleDevice',
+            backedUp: false,
+            aaguid: 'aaguid',
+        }),
+        generateAuthenticationOptions: async () => ({
+            challenge: 'challenge-2',
+            rpId: 'bleyachat.com',
+        }),
+        verifyAuthentication: async () => ({
+            credentialId: 'credential-1',
+            newCounter: 1,
+        }),
+        ...overrides,
+    };
+}
+
 describe('authService (mocked)', () => {
-    describe('verifyCode', () => {
-        it('returns tokens on valid code', async () => {
-            const futureDate = new Date();
-            futureDate.setMinutes(futureDate.getMinutes() + 10);
+    it('creates a new user on first provider sign-in', async () => {
+        let createdIdentityCount = 0;
+        const createdUsers: any[] = [];
+        const user = createMockUser();
 
-            const user = makeFakeUser({
-                code: '123456',
-                codeExpiresAt: futureDate,
-            });
-
-            const repo = fakeUserRepo({
-                findByPhone: async () => user as any,
-            });
-
-            const svc = createAuthService({ userRepo: repo });
-            const result = await svc.verifyCode('+12345678901', '123456');
-
-            assert.ok(result.accessToken);
-            assert.ok(result.refreshToken);
-            assert.equal(typeof result.requiresUsername, 'boolean');
+        const svc = createAuthService({
+            userRepo: fakeUserRepo({
+                create: async () => {
+                    createdUsers.push(user);
+                    return user as any;
+                },
+            }),
+            userIdentityRepo: fakeUserIdentityRepo({
+                create: async (data) => {
+                    createdIdentityCount += 1;
+                    return {
+                        _id: new mongoose.Types.ObjectId(),
+                        userId: new mongoose.Types.ObjectId(data.userId),
+                        provider: data.provider,
+                        providerUserId: data.providerUserId,
+                    } as any;
+                },
+            }),
+            passkeyCredentialRepo: fakePasskeyCredentialRepo(),
+            authChallengeRepo: fakeAuthChallengeRepo(),
+            providerIdentityService: fakeProviderIdentityService(),
+            passkeyService: fakePasskeyService(),
         });
 
-        it('throws on wrong code', async () => {
-            const futureDate = new Date();
-            futureDate.setMinutes(futureDate.getMinutes() + 10);
-
-            const user = makeFakeUser({
-                code: '123456',
-                codeExpiresAt: futureDate,
-            });
-
-            const repo = fakeUserRepo({
-                findByPhone: async () => user as any,
-            });
-
-            const svc = createAuthService({ userRepo: repo });
-
-            await assert.rejects(
-                () => svc.verifyCode('+12345678901', '000000'),
-                (err: Error) => err.message.includes("doesn't look right")
-            );
+        const result = await svc.providerSignIn({
+            provider: 'google',
+            idToken: 'token',
         });
 
-        it('throws on expired code', async () => {
-            const pastDate = new Date();
-            pastDate.setMinutes(pastDate.getMinutes() - 1);
-
-            const user = makeFakeUser({
-                code: '123456',
-                codeExpiresAt: pastDate,
-            });
-
-            const repo = fakeUserRepo({
-                findByPhone: async () => user as any,
-            });
-
-            const svc = createAuthService({ userRepo: repo });
-
-            await assert.rejects(
-                () => svc.verifyCode('+12345678901', '123456'),
-                (err: Error) => err.message.includes('expired')
-            );
-        });
-
-        it('throws when user not found', async () => {
-            const repo = fakeUserRepo({
-                findByPhone: async () => null,
-            });
-
-            const svc = createAuthService({ userRepo: repo });
-
-            await assert.rejects(
-                () => svc.verifyCode('+19999999999', '123456'),
-                (err: Error) => err.message.includes("doesn't look right")
-            );
-        });
-
-        it('throws on missing fields', async () => {
-            const repo = fakeUserRepo();
-            const svc = createAuthService({ userRepo: repo });
-
-            await assert.rejects(
-                () => svc.verifyCode('+12345678901', undefined),
-                (err: Error) => err.message.includes('both your number')
-            );
-        });
+        assert.ok(result.token);
+        assert.equal(result.requiresUsername, true);
+        assert.equal(result.hasPasskey, false);
+        assert.equal(createdUsers.length, 1);
+        assert.equal(createdIdentityCount, 1);
     });
 
-    describe('requestCode', () => {
-        it('returns code and codeSentAt on success', async () => {
-            const user = makeFakeUser();
-            const repo = fakeUserRepo({
-                findOneAndUpdateByPhone: async () => user as any,
-            });
+    it('links a second provider to an existing account', async () => {
+        const userId = new mongoose.Types.ObjectId().toString();
+        let createdIdentityCount = 0;
 
-            const svc = createAuthService({ userRepo: repo });
-            const result = await svc.requestCode('+12345678901');
-
-            assert.ok(result.code);
-            assert.equal(result.code.length, 6);
-            assert.ok(result.codeSentAt instanceof Date);
+        const svc = createAuthService({
+            userRepo: fakeUserRepo({
+                findById: async () => createMockUser({ _id: new mongoose.Types.ObjectId(userId), username: 'alice' }) as any,
+            }),
+            userIdentityRepo: fakeUserIdentityRepo({
+                findByUserId: async () => [{
+                    _id: new mongoose.Types.ObjectId(),
+                    userId: new mongoose.Types.ObjectId(userId),
+                    provider: 'google',
+                    providerUserId: 'google-user-1',
+                    email: 'alice@example.com',
+                    emailVerified: true,
+                    isPrivateRelay: false,
+                    linkedAt: new Date(),
+                    lastUsedAt: new Date(),
+                }],
+                create: async (data) => {
+                    createdIdentityCount += 1;
+                    return {
+                        _id: new mongoose.Types.ObjectId(),
+                        userId: new mongoose.Types.ObjectId(data.userId),
+                        provider: data.provider,
+                        providerUserId: data.providerUserId,
+                        linkedAt: new Date(),
+                        lastUsedAt: new Date(),
+                    } as any;
+                },
+            }),
+            passkeyCredentialRepo: fakePasskeyCredentialRepo(),
+            authChallengeRepo: fakeAuthChallengeRepo(),
+            providerIdentityService: fakeProviderIdentityService({
+                verifyAppleIdToken: async () => ({
+                    provider: 'apple',
+                    providerUserId: 'apple-user-1',
+                    email: 'alice@example.com',
+                    emailVerified: true,
+                    isPrivateRelay: false,
+                }),
+            }),
+            passkeyService: fakePasskeyService(),
         });
 
-        it('throws on invalid phone', async () => {
-            const repo = fakeUserRepo();
-            const svc = createAuthService({ userRepo: repo });
-
-            await assert.rejects(
-                () => svc.requestCode('abc'),
-                (err: Error) => err.message.includes("doesn't look like a valid number")
-            );
+        const result = await svc.linkIdentity(userId, {
+            provider: 'apple',
+            idToken: 'token',
         });
+
+        assert.equal(createdIdentityCount, 1);
+        assert.equal(result.linkedProviders.length, 1);
+        assert.equal(result.hasPasskey, false);
     });
 
-    describe('refreshAccessToken', () => {
-        it('returns new tokens on valid refresh', async () => {
-            const userId = new mongoose.Types.ObjectId();
-            const repo = fakeUserRepo({
-                findOneAndUpdateByRefreshToken: async () => ({ _id: userId }),
-            });
+    it('starts and finishes passkey registration', async () => {
+        const userId = new mongoose.Types.ObjectId().toString();
+        let createdCredential = '';
 
-            const svc = createAuthService({ userRepo: repo });
-            const result = await svc.refreshAccessToken('some-refresh-token');
-
-            assert.ok(result.accessToken);
-            assert.ok(result.refreshToken);
+        const svc = createAuthService({
+            userRepo: fakeUserRepo({
+                findById: async () => createMockUser({ _id: new mongoose.Types.ObjectId(userId), username: 'alice' }) as any,
+            }),
+            userIdentityRepo: fakeUserIdentityRepo({
+                findByUserId: async () => [{
+                    _id: new mongoose.Types.ObjectId(),
+                    userId: new mongoose.Types.ObjectId(userId),
+                    provider: 'google',
+                    providerUserId: 'google-user-1',
+                    email: 'alice@example.com',
+                    emailVerified: true,
+                    isPrivateRelay: false,
+                    linkedAt: new Date(),
+                    lastUsedAt: new Date(),
+                }],
+            }),
+            passkeyCredentialRepo: fakePasskeyCredentialRepo({
+                create: async (data) => {
+                    createdCredential = data.credentialId;
+                },
+                existsForUser: async () => true,
+            }),
+            authChallengeRepo: fakeAuthChallengeRepo({
+                findById: async (id) => ({
+                    _id: new mongoose.Types.ObjectId(id),
+                    ceremony: 'passkey-registration',
+                    challenge: 'challenge-1',
+                    userId: new mongoose.Types.ObjectId(userId),
+                }),
+            }),
+            providerIdentityService: fakeProviderIdentityService(),
+            passkeyService: fakePasskeyService(),
         });
 
-        it('throws on invalid/expired refresh token', async () => {
-            const repo = fakeUserRepo({
-                findOneAndUpdateByRefreshToken: async () => null,
-            });
+        const options = await svc.beginPasskeyRegistration(userId);
+        assert.equal(typeof options.challengeId, 'string');
 
-            const svc = createAuthService({ userRepo: repo });
-
-            await assert.rejects(
-                () => svc.refreshAccessToken('bad-token'),
-                (err: Error) => err.message.includes('Invalid or expired')
-            );
-        });
-    });
-
-    describe('checkUsernameAvailability', () => {
-        it('returns true when username is available', async () => {
-            const repo = fakeUserRepo({
-                findByUsernameLean: async () => null,
-            });
-
-            const svc = createAuthService({ userRepo: repo });
-            assert.equal(await svc.checkUsernameAvailability('newuser'), true);
+        const result = await svc.finishPasskeyRegistration(userId, options.challengeId, {
+            id: 'credential-1',
+            rawId: 'credential-1',
+            type: 'public-key',
+            response: {
+                clientDataJSON: 'abc',
+                attestationObject: 'def',
+            },
+            clientExtensionResults: {},
         });
 
-        it('returns false when username is taken', async () => {
-            const repo = fakeUserRepo({
-                findByUsernameLean: async () => ({ _id: new mongoose.Types.ObjectId() }),
-            });
-
-            const svc = createAuthService({ userRepo: repo });
-            assert.equal(await svc.checkUsernameAvailability('taken'), false);
-        });
+        assert.equal(createdCredential, 'credential-1');
+        assert.equal(result.hasPasskey, true);
     });
 });

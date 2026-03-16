@@ -39,7 +39,7 @@ describe('Rooms API', () => {
 
     describe('GET /v1/rooms', () => {
         it('lists public rooms', async () => {
-            const user = await createTestUser({ phoneNumber: '+11111111111' });
+            const user = await createTestUser();
             await createPublicRoom('Room Alpha');
             await createPublicRoom('Room Beta');
 
@@ -56,7 +56,7 @@ describe('Rooms API', () => {
         });
 
         it('filters rooms by search query', async () => {
-            const user = await createTestUser({ phoneNumber: '+11111111112' });
+            const user = await createTestUser();
             await createPublicRoom('Berlin');
             await createPublicRoom('Paris');
 
@@ -78,7 +78,7 @@ describe('Rooms API', () => {
 
     describe('POST /v1/rooms/:roomId/join', () => {
         it('joins a public room', async () => {
-            const user = await createTestUser({ phoneNumber: '+11111111113' });
+            const user = await createTestUser();
             const room = await createPublicRoom('Join Me');
 
             const agent = getTestAgent();
@@ -97,7 +97,6 @@ describe('Rooms API', () => {
         it('returns idempotent response when already joined', async () => {
             const room = await createPublicRoom('Already Joined');
             const user = await createTestUser({
-                phoneNumber: '+11111111114',
                 joinedRooms: [room._id as mongoose.Types.ObjectId],
             });
 
@@ -116,7 +115,6 @@ describe('Rooms API', () => {
                 rooms.push(await createPublicRoom(`Room ${i}`));
             }
             const user = await createTestUser({
-                phoneNumber: '+11111111115',
                 joinedRooms: rooms.map((r) => r._id as mongoose.Types.ObjectId),
             });
             const extraRoom = await createPublicRoom('Room Extra');
@@ -129,9 +127,9 @@ describe('Rooms API', () => {
         });
 
         it('rejects non-participant joining private room', async () => {
-            const user = await createTestUser({ phoneNumber: '+11111111116' });
-            const otherUser = await createTestUser({ phoneNumber: '+11111111117' });
-            const thirdUser = await createTestUser({ phoneNumber: '+11111111118' });
+            const user = await createTestUser();
+            const otherUser = await createTestUser();
+            const thirdUser = await createTestUser();
 
             const room = await createPrivateRoom([otherUser._id.toString(), thirdUser._id.toString()]);
 
@@ -143,7 +141,7 @@ describe('Rooms API', () => {
         });
 
         it('returns 404 for non-existent room', async () => {
-            const user = await createTestUser({ phoneNumber: '+11111111119' });
+            const user = await createTestUser();
             const fakeId = new mongoose.Types.ObjectId();
 
             const agent = getTestAgent();

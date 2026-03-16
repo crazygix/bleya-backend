@@ -9,10 +9,10 @@ import { Room } from '../../models/Room.js';
 import { Message } from '../../models/Message.js';
 import { User } from '../../models/User.js';
 
-async function createRoomWithMember(phoneNumber: string) {
+async function createRoomWithMember() {
     const room = await Room.create({ name: `Room-${Date.now()}`, type: 'public' });
     const roomId = room._id as mongoose.Types.ObjectId;
-    const user = await createTestUser({ phoneNumber, joinedRooms: [roomId] });
+    const user = await createTestUser({ joinedRooms: [roomId] });
     return { room, user };
 }
 
@@ -33,7 +33,7 @@ describe('Messages API', () => {
 
     describe('GET /v1/rooms/:roomId/messages', () => {
         it('returns messages for a room the user is in', async () => {
-            const { room, user } = await createRoomWithMember('+13333333333');
+            const { room, user } = await createRoomWithMember();
             const roomId = room._id as mongoose.Types.ObjectId;
 
             await Message.create([
@@ -60,7 +60,7 @@ describe('Messages API', () => {
         });
 
         it('returns empty messages for room with no messages', async () => {
-            const { room, user } = await createRoomWithMember('+13333333334');
+            const { room, user } = await createRoomWithMember();
 
             const agent = getTestAgent();
             const res = await agent
@@ -74,7 +74,7 @@ describe('Messages API', () => {
 
         it('returns 403 for non-member', async () => {
             const room = await Room.create({ name: 'Secret Room', type: 'public' });
-            const user = await createTestUser({ phoneNumber: '+13333333335' });
+            const user = await createTestUser();
 
             const agent = getTestAgent();
             await agent
@@ -86,7 +86,7 @@ describe('Messages API', () => {
 
     describe('GET /v1/messages/:messageId', () => {
         it('returns a single message', async () => {
-            const { room, user } = await createRoomWithMember('+13333333336');
+            const { room, user } = await createRoomWithMember();
             const roomId = room._id as mongoose.Types.ObjectId;
             const message = await Message.create({ roomId, userId: user._id, text: 'Test msg' });
 
@@ -101,7 +101,7 @@ describe('Messages API', () => {
         });
 
         it('returns 404 for non-existent message', async () => {
-            const user = await createTestUser({ phoneNumber: '+13333333337' });
+            const user = await createTestUser();
             const fakeId = new mongoose.Types.ObjectId();
 
             const agent = getTestAgent();
@@ -114,7 +114,7 @@ describe('Messages API', () => {
 
     describe('GET /v1/messages/:messageId/thread', () => {
         it('returns parent message and replies', async () => {
-            const { room, user } = await createRoomWithMember('+13333333338');
+            const { room, user } = await createRoomWithMember();
             const roomId = room._id as mongoose.Types.ObjectId;
             const parent = await Message.create({ roomId, userId: user._id, text: 'Parent' });
             await Message.create({ roomId, userId: user._id, text: 'Reply 1', parentMessageId: parent._id });

@@ -175,7 +175,7 @@ Its full content is preserved below as code for easy reference.
 /// ```typescript
 /// // ✅ CORRECT
 /// router.get('/profile', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
-///   const user = await User.findOne({ phoneNumber: req.user?.phoneNumber });
+///   const user = await User.findById(req.user!.userId);
 ///   if (!user) {
 ///     throw new NotFoundError('User not found', ErrorCode.USER_NOT_FOUND);
 ///   }
@@ -339,26 +339,32 @@ Its full content is preserved below as code for easy reference.
 /// ```typescript
 /// // ✅ CORRECT - thin route, business logic in service
 /// // routes/auth.ts
-/// router.post('/verify-code', asyncHandler(async (req, res) => {
-///   const { phoneNumber, code } = req.body;
-///   const result = await authService.verifyCode(phoneNumber, code);
+/// router.post('/provider-sign-in', asyncHandler(async (req, res) => {
+///   const result = await authService.providerSignIn({
+///     provider: req.body.provider,
+///     idToken: req.body.idToken,
+///     rawNonce: req.body.rawNonce,
+///   });
 ///   setRefreshCookie(res, result.refreshToken);
-///   res.json({ token: result.accessToken, requiresUsername: result.requiresUsername });
+///   res.json({ token: result.token, requiresUsername: result.requiresUsername, hasPasskey: result.hasPasskey });
 /// }));
 ///
 /// // services/authService.ts
-/// export async function verifyCode(phoneNumber: string, code: string) {
-///   const normalizedPhone = normalizePhoneNumber(phoneNumber);
-///   const user = await User.findOne({ phoneNumber: normalizedPhone });
+/// export async function providerSignIn(input: {
+///   provider: unknown;
+///   idToken: unknown;
+///   rawNonce?: unknown;
+/// }) {
+///   const identity = await verifyProviderIdentity(input);
+///   const user = await resolveUserForVerifiedIdentity(identity);
 ///   // ... business logic here
-///   return { accessToken, refreshToken, requiresUsername };
+///   return issueSessionForUser(user);
 /// }
 ///
 /// // ❌ WRONG - business logic in route
-/// router.post('/verify-code', asyncHandler(async (req, res) => {
-///   const { phoneNumber, code } = req.body;
-///   const normalizedPhone = normalizePhoneNumber(phoneNumber);
-///   const user = await User.findOne({ phoneNumber: normalizedPhone });
+/// router.post('/provider-sign-in', asyncHandler(async (req, res) => {
+///   const identity = await verifyProviderIdentity(req.body);
+///   const user = await resolveUserForVerifiedIdentity(identity);
 ///   // ... 50 lines of business logic here
 /// }));
 /// ```
@@ -373,7 +379,7 @@ Its full content is preserved below as code for easy reference.
 /// - Validate input format/types before processing
 /// - Sanitize all user-generated content (XSS prevention)
 /// - Use centralized sanitization utilities from `utils/sanitize.ts`
-/// - Apply sanitization to: message text, bio, usernames, phone numbers
+/// - Apply sanitization to: message text, bio, usernames
 ///
 /// Example:
 /// ```typescript
@@ -513,9 +519,9 @@ Its full content is preserved below as code for easy reference.
 /// // ✅ CORRECT - service test
 /// // __tests__/services/authService.test.ts
 /// describe('authService', () => {
-///   it('should verify code correctly', async () => {
-///     const result = await authService.verifyCode('+1234567890', '123456');
-///     expect(result).toHaveProperty('accessToken');
+///   it('should issue a session for a verified provider identity', async () => {
+///     const result = await authService.providerSignIn({ provider: 'google', idToken: 'token' });
+///     expect(result).toHaveProperty('token');
 ///   });
 /// });
 /// ```

@@ -34,6 +34,7 @@ Set these at minimum in `.env.local`:
 
 - `MONGODB_URI`
 - `JWT_SECRET`
+- `GOOGLE_ALLOWED_AUDIENCES`
 - `R2_ENDPOINT`
 - `R2_ACCESS_KEY_ID`
 - `R2_SECRET_ACCESS_KEY`
@@ -44,6 +45,13 @@ Set these at minimum in `.env.local`:
 
 - `IMAGE_SERVICE_PROVIDER`: `pexels` or `wikidata`
 - `PEXELS_API_KEY`: used when `IMAGE_SERVICE_PROVIDER=pexels`; falls back to Wikidata if missing
+- `APPLE_ALLOWED_AUDIENCES`
+- `APPLE_ANDROID_SERVICE_ID`
+- `APPLE_ANDROID_REDIRECT_PATH`
+- `ANDROID_PACKAGE_NAME`
+- `PASSKEY_RP_ID`
+- `PASSKEY_RP_NAME`
+- `PASSKEY_EXPECTED_ORIGINS`
 - `HTTP_LOG_BODY_MODE`: `off`, `errors`, or `all`
 - `HTTP_LOG_BODY_REDACT`
 - `HTTP_LOG_BODY_TRUNCATE`

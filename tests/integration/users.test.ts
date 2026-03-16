@@ -23,7 +23,6 @@ describe('Users API', () => {
     describe('GET /v1/users/me', () => {
         it('returns the authenticated user profile', async () => {
             const user = await createTestUser({
-                phoneNumber: '+12222222222',
                 username: 'myuser',
                 bio: 'hello',
             });
@@ -50,7 +49,6 @@ describe('Users API', () => {
     describe('PUT /v1/users/profile', () => {
         it('updates bio', async () => {
             const user = await createTestUser({
-                phoneNumber: '+12222222223',
                 username: 'edituser',
             });
 
@@ -66,7 +64,6 @@ describe('Users API', () => {
 
         it('rejects invalid bio type', async () => {
             const user = await createTestUser({
-                phoneNumber: '+12222222224',
                 username: 'biouser',
             });
 
@@ -89,9 +86,8 @@ describe('Users API', () => {
 
     describe('GET /v1/users/:userId', () => {
         it('returns public profile of another user', async () => {
-            const viewer = await createTestUser({ phoneNumber: '+12222222225' });
+            const viewer = await createTestUser();
             const target = await createTestUser({
-                phoneNumber: '+12222222226',
                 username: 'publicuser',
                 bio: 'public bio',
             });
@@ -109,7 +105,7 @@ describe('Users API', () => {
         });
 
         it('returns 404 for non-existent user', async () => {
-            const viewer = await createTestUser({ phoneNumber: '+12222222227' });
+            const viewer = await createTestUser();
             const agent = getTestAgent();
             await agent
                 .get('/v1/users/507f1f77bcf86cd799439011')

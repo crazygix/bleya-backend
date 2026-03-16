@@ -7,13 +7,9 @@ export interface UserRepository {
     findByIdLean(id: string): Promise<LeanFullUser | null>;
     findByIdSelectJoinedRooms(id: string): Promise<LeanJoinedRoomsUser | null>;
     findByIdSelectUsername(id: string): Promise<Pick<LeanUser, '_id' | 'username'> | null>;
-    findByPhone(phone: string): Promise<mongoose.Document | null>;
+    create(data?: Record<string, unknown>): Promise<mongoose.Document>;
+    updateLastLogin(userId: string, lastLogin: Date): Promise<void>;
     findByUsernameLean(username: string): Promise<{ _id: mongoose.Types.ObjectId } | null>;
-    findOneAndUpdateByPhone(
-        phone: string,
-        update: Record<string, unknown>,
-        options: Record<string, unknown>
-    ): Promise<mongoose.Document | null>;
     findOneAndUpdateByRefreshToken(
         hash: string,
         expiresAfter: Date,
@@ -43,20 +39,16 @@ export class MongoUserRepository implements UserRepository {
         return User.findById(id).select('_id username').lean<Pick<LeanUser, '_id' | 'username'> | null>();
     }
 
-    async findByPhone(phone: string) {
-        return User.findOne({ phoneNumber: phone });
+    async create(data: Record<string, unknown> = {}) {
+        return User.create(data);
+    }
+
+    async updateLastLogin(userId: string, lastLogin: Date) {
+        await User.updateOne({ _id: userId }, { $set: { lastLogin } });
     }
 
     async findByUsernameLean(username: string) {
         return User.findOne({ username }).select('_id').lean<{ _id: mongoose.Types.ObjectId } | null>();
-    }
-
-    async findOneAndUpdateByPhone(
-        phone: string,
-        update: Record<string, unknown>,
-        options: Record<string, unknown>
-    ) {
-        return User.findOneAndUpdate({ phoneNumber: phone }, update, options);
     }
 
     async findOneAndUpdateByRefreshToken(

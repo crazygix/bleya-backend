@@ -10,19 +10,6 @@ import { getUserProfile } from '../services/userService.js';
 const router = express.Router();
 
 const authRateLimit = config.isProduction ? 5 : 100;
-const requestCodeRateLimit = config.isProduction ? 3 : 100;
-
-function buildVerificationCodeResponse(message: string, code: string, codeSentAt: Date): {
-    message: string;
-    codeSentAt: number;
-    code?: string;
-} {
-    return {
-        message,
-        codeSentAt: codeSentAt.getTime(),
-        ...(config.isProduction ? {} : { code }),
-    };
-}
 
 function setRefreshCookie(res: express.Response, refreshToken: string): void {
     res.cookie('refreshToken', refreshToken, {
@@ -34,20 +21,83 @@ function setRefreshCookie(res: express.Response, refreshToken: string): void {
     });
 }
 
-router.post('/request-code', rateLimiter(requestCodeRateLimit, 15 * 60 * 1000), asyncHandler(async (req: express.Request, res: express.Response) => {
-    const result = await authService.requestCode(req.body.phoneNumber);
-    res.json(buildVerificationCodeResponse('Verification code sent', result.code, result.codeSentAt));
-}));
+function buildAndroidAppleRedirect(body: Record<string, unknown>): string {
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(body)) {
+        if (typeof value === 'string') {
+            params.append(key, value);
+        }
+    }
 
-router.post('/verify-code', rateLimiter(authRateLimit, 15 * 60 * 1000), asyncHandler(async (req: express.Request, res: express.Response) => {
-    const result = await authService.verifyCode(req.body.phoneNumber, req.body.code);
+    return `intent://callback?${params.toString()}#Intent;package=${config.authProviders.androidPackageName};scheme=signinwithapple;end`;
+}
+
+router.post('/provider-sign-in', rateLimiter(authRateLimit, 15 * 60 * 1000), asyncHandler(async (req: express.Request, res: express.Response) => {
+    const result = await authService.providerSignIn({
+        provider: req.body.provider,
+        idToken: req.body.idToken,
+        rawNonce: req.body.rawNonce,
+        platform: req.body.platform,
+    });
+
     setRefreshCookie(res, result.refreshToken);
-    res.json({ token: result.accessToken, requiresUsername: result.requiresUsername });
+    res.json({
+        token: result.token,
+        requiresUsername: result.requiresUsername,
+        hasPasskey: result.hasPasskey,
+    });
 }));
 
-router.post('/resend-code', rateLimiter(requestCodeRateLimit, 15 * 60 * 1000), asyncHandler(async (req: express.Request, res: express.Response) => {
-    const result = await authService.resendCode(req.body.phoneNumber);
-    res.json(buildVerificationCodeResponse('Verification code resent', result.code, result.codeSentAt));
+router.get('/identities', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
+    const result = await authService.getSecurityStatus(req.user!.userId);
+    res.json(result);
+}));
+
+router.post('/identities/link', authenticateUser, rateLimiter(authRateLimit, 15 * 60 * 1000), asyncHandler(async (req: AuthRequest, res: express.Response) => {
+    const result = await authService.linkIdentity(req.user!.userId, {
+        provider: req.body.provider,
+        idToken: req.body.idToken,
+        rawNonce: req.body.rawNonce,
+    });
+
+    res.json(result);
+}));
+
+router.post('/passkeys/registration/options', authenticateUser, rateLimiter(authRateLimit, 15 * 60 * 1000), asyncHandler(async (req: AuthRequest, res: express.Response) => {
+    const result = await authService.beginPasskeyRegistration(req.user!.userId);
+    res.json(result);
+}));
+
+router.post('/passkeys/registration/verify', authenticateUser, rateLimiter(authRateLimit, 15 * 60 * 1000), asyncHandler(async (req: AuthRequest, res: express.Response) => {
+    const result = await authService.finishPasskeyRegistration(
+        req.user!.userId,
+        req.body.challengeId,
+        req.body.response,
+    );
+    res.json(result);
+}));
+
+router.post('/passkeys/authentication/options', rateLimiter(authRateLimit, 15 * 60 * 1000), asyncHandler(async (_req: express.Request, res: express.Response) => {
+    const result = await authService.beginPasskeyAuthentication();
+    res.json(result);
+}));
+
+router.post('/passkeys/authentication/verify', rateLimiter(authRateLimit, 15 * 60 * 1000), asyncHandler(async (req: express.Request, res: express.Response) => {
+    const result = await authService.finishPasskeyAuthentication(req.body.challengeId, req.body.response);
+    setRefreshCookie(res, result.refreshToken);
+    res.json({
+        token: result.token,
+        requiresUsername: result.requiresUsername,
+        hasPasskey: result.hasPasskey,
+    });
+}));
+
+router.post('/apple/android/callback', asyncHandler(async (req: express.Request, res: express.Response) => {
+    res.redirect(302, buildAndroidAppleRedirect(req.body || {}));
+}));
+
+router.get('/apple/android/callback', asyncHandler(async (req: express.Request, res: express.Response) => {
+    res.redirect(302, buildAndroidAppleRedirect(req.query as Record<string, unknown>));
 }));
 
 router.get('/me', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {

@@ -41,14 +41,6 @@ export function sanitizePlainText(
   return out;
 }
 
-export function sanitizePhoneNumber(input: string): string {
-  return sanitizePlainText(input, {
-    maxLength: 32,
-    collapseWhitespace: true,
-    escapeHtml: false,
-  }).replace(/[\s\-\(\)]/g, '');
-}
-
 export function sanitizeUsername(input: string): string {
   return sanitizePlainText(input, {
     maxLength: 30,

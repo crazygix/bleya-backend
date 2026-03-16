@@ -34,7 +34,6 @@ Extract business logic from routes to service layer:
 **Files:** `routes/auth.ts`, `routes/users.ts`, `routes/messages.ts`
 
 Apply sanitization to all user-generated input in HTTP routes:
-- Phone numbers: use `sanitizePhoneNumber()`
 - Usernames: use `sanitizeUsername()`
 - Bio/message text: use `sanitizePlainText()`
 

@@ -21,7 +21,7 @@ describe('Error handling', () => {
     });
 
     it('returns 400 for invalid ObjectId in room join', async () => {
-        const user = await createTestUser({ phoneNumber: '+14444444444' });
+        const user = await createTestUser();
         const agent = getTestAgent();
 
         const res = await agent
@@ -33,7 +33,7 @@ describe('Error handling', () => {
     });
 
     it('returns 404 for non-existent room', async () => {
-        const user = await createTestUser({ phoneNumber: '+14444444445' });
+        const user = await createTestUser();
         const agent = getTestAgent();
 
         await agent
@@ -64,7 +64,7 @@ describe('Error handling', () => {
     });
 
     it('returns 400 for invalid message ID format', async () => {
-        const user = await createTestUser({ phoneNumber: '+14444444446' });
+        const user = await createTestUser();
         const agent = getTestAgent();
 
         await agent

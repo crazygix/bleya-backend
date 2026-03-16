@@ -1,46 +1,99 @@
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
-import { AppError, ValidationError, UnauthorizedError, NotFoundError, ErrorCode } from '../utils/errors.js';
-import { sanitizePhoneNumber, sanitizeUsername } from '../utils/sanitize.js';
+import mongoose from 'mongoose';
+import { ValidationError, UnauthorizedError, NotFoundError, ErrorCode } from '../utils/errors.js';
+import { sanitizeUsername } from '../utils/sanitize.js';
 import { config } from '../config/index.js';
 import { type UserProfileResponse, toUserProfileResponse } from './userService.js';
 import { type UserRepository, userRepository as defaultUserRepo } from '../repositories/userRepository.js';
+import {
+    type UserIdentityRepository,
+    userIdentityRepository as defaultUserIdentityRepo,
+    type StoredUserIdentity,
+} from '../repositories/userIdentityRepository.js';
+import {
+    type PasskeyCredentialRepository,
+    passkeyCredentialRepository as defaultPasskeyCredentialRepo,
+} from '../repositories/passkeyCredentialRepository.js';
+import {
+    type AuthChallengeRepository,
+    authChallengeRepository as defaultAuthChallengeRepo,
+} from '../repositories/authChallengeRepository.js';
+import {
+    type ProviderIdentityService,
+    providerIdentityService as defaultProviderIdentityService,
+    type VerifiedIdentityProfile,
+} from './providerIdentityService.js';
+import {
+    type PasskeyService,
+    passkeyService as defaultPasskeyService,
+} from './passkeyService.js';
+import type {
+    RegistrationResponseJSON,
+    AuthenticationResponseJSON,
+} from '@simplewebauthn/server';
 
 const ACCESS_TOKEN_TTL = config.accessTokenTtl as jwt.SignOptions['expiresIn'];
 const REFRESH_TOKEN_TTL_DAYS = config.refreshTokenTtlDays;
-const CODE_EXPIRY_MINUTES = 10;
-const RESEND_COOLDOWN_MS = 60 * 1000;
 
-export function isValidPhoneNumber(phoneNumber: string): boolean {
-    return /^\+?[0-9]{10,15}$/.test(phoneNumber);
+export type AuthProvider = 'google' | 'apple';
+
+export interface AuthSessionResult {
+    token: string;
+    requiresUsername: boolean;
+    hasPasskey: boolean;
 }
 
-function normalizePhoneNumber(phoneNumber: string): string {
-    return sanitizePhoneNumber(phoneNumber);
+export interface RefreshResult {
+    accessToken: string;
+    refreshToken: string;
 }
 
-export function validatePhoneInput(phoneNumber: unknown): string {
-    if (typeof phoneNumber !== 'string' || phoneNumber.trim().length === 0) {
-        throw new ValidationError("What's your number?");
-    }
-
-    const normalized = normalizePhoneNumber(phoneNumber);
-    if (!isValidPhoneNumber(normalized)) {
-        throw new ValidationError("That doesn't look like a valid number. Try again?");
-    }
-
-    return normalized;
+export interface LinkedIdentitySummary {
+    provider: AuthProvider;
+    email: string;
+    emailVerified: boolean;
+    isPrivateRelay: boolean;
+    linkedAt: number;
+    lastUsedAt: number;
 }
+
+export interface AuthSecurityStatus {
+    hasPasskey: boolean;
+    linkedProviders: LinkedIdentitySummary[];
+}
+
+export interface PasskeyOptionsResult {
+    challengeId: string;
+    options: Record<string, unknown>;
+}
+
+export interface AuthServiceDeps {
+    userRepo: UserRepository;
+    userIdentityRepo: UserIdentityRepository;
+    passkeyCredentialRepo: PasskeyCredentialRepository;
+    authChallengeRepo: AuthChallengeRepository;
+    providerIdentityService: ProviderIdentityService;
+    passkeyService: PasskeyService;
+}
+
+type AuthUserDocument = mongoose.Document & {
+    _id: mongoose.Types.ObjectId;
+    username?: string;
+    bio?: string;
+    profileImageUrl?: string;
+    createdAt: Date;
+    updatedAt: Date;
+    lastLogin: Date;
+    refreshTokenHash?: string;
+    refreshTokenExpiresAt?: Date;
+};
 
 export function signAccessToken(payload: { userId: string }): string {
     return jwt.sign(payload, config.jwtSecret, {
         expiresIn: ACCESS_TOKEN_TTL,
         algorithm: 'HS256',
     });
-}
-
-function generateVerificationCode(): string {
-    return crypto.randomInt(0, 1_000_000).toString().padStart(6, '0');
 }
 
 function generateRefreshToken(): string {
@@ -57,134 +110,334 @@ export function getRefreshExpiryDate(): Date {
     return expiry;
 }
 
-export interface RequestCodeResult {
-    code: string;
-    codeSentAt: Date;
+function normalizeProvider(value: unknown): AuthProvider {
+    if (value === 'google' || value === 'apple') {
+        return value;
+    }
+
+    throw new ValidationError('Choose a supported sign-in method.');
 }
 
-export interface VerifyCodeResult {
-    accessToken: string;
-    refreshToken: string;
-    requiresUsername: boolean;
+function normalizeIdToken(value: unknown): string {
+    if (typeof value !== 'string' || value.trim().length === 0) {
+        throw new ValidationError('Missing identity token.');
+    }
+
+    return value.trim();
 }
 
-export interface RefreshResult {
-    accessToken: string;
-    refreshToken: string;
+function normalizeOptionalString(value: unknown): string | undefined {
+    if (typeof value !== 'string') {
+        return undefined;
+    }
+
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
 }
 
-export interface AuthServiceDeps {
-    userRepo: UserRepository;
+function validateChallengeId(value: unknown): string {
+    if (typeof value !== 'string' || !mongoose.Types.ObjectId.isValid(value)) {
+        throw new ValidationError('That passkey request is no longer valid. Try again.');
+    }
+
+    return value;
+}
+
+function validateCredentialResponse(value: unknown): Record<string, unknown> {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        throw new ValidationError('That passkey response could not be processed.');
+    }
+
+    return value as Record<string, unknown>;
+}
+
+function validateRegistrationResponse(value: unknown): RegistrationResponseJSON {
+    return validateCredentialResponse(value) as unknown as RegistrationResponseJSON;
+}
+
+function validateAuthenticationResponse(value: unknown): AuthenticationResponseJSON {
+    return validateCredentialResponse(value) as unknown as AuthenticationResponseJSON;
+}
+
+function dedupeUserIds(identities: StoredUserIdentity[]): string[] {
+    return [...new Set(identities.map((identity) => identity.userId.toString()))];
+}
+
+function toLinkedIdentitySummary(identity: StoredUserIdentity): LinkedIdentitySummary {
+    return {
+        provider: identity.provider,
+        email: identity.email || '',
+        emailVerified: identity.emailVerified || false,
+        isPrivateRelay: identity.isPrivateRelay || false,
+        linkedAt: identity.linkedAt?.getTime() || 0,
+        lastUsedAt: identity.lastUsedAt?.getTime() || 0,
+    };
 }
 
 export function createAuthService(deps: AuthServiceDeps) {
-    const { userRepo } = deps;
+    const {
+        userRepo,
+        userIdentityRepo,
+        passkeyCredentialRepo,
+        authChallengeRepo,
+        providerIdentityService,
+        passkeyService,
+    } = deps;
 
-    async function requestCode(phoneNumber: unknown): Promise<RequestCodeResult> {
-        const normalizedPhone = validatePhoneInput(phoneNumber);
-
-        const code = generateVerificationCode();
-        const codeExpiresAt = new Date();
-        codeExpiresAt.setMinutes(codeExpiresAt.getMinutes() + CODE_EXPIRY_MINUTES);
-        const codeSentAt = new Date();
-
-        const user = await userRepo.findOneAndUpdateByPhone(
-            normalizedPhone,
-            {
-                $set: { code, codeExpiresAt, codeSentAt },
-                $setOnInsert: { phoneNumber: normalizedPhone },
-            },
-            { upsert: true, new: true, setDefaultsOnInsert: true }
-        );
-
-        if (!user) {
-            throw new AppError(ErrorCode.INTERNAL_ERROR, 'Failed to process verification request', 500);
-        }
-
-        return { code, codeSentAt };
-    }
-
-    async function verifyCode(phoneNumber: unknown, code: unknown): Promise<VerifyCodeResult> {
-        if (!phoneNumber || !code) {
-            throw new ValidationError('We need both your number and the code.');
-        }
-
-        if (typeof phoneNumber !== 'string' || phoneNumber.trim().length === 0) {
-            throw new ValidationError("What's your number?");
-        }
-
-        if (typeof code !== 'string' || !/^[0-9]{6}$/.test(code)) {
-            throw new ValidationError("That code doesn't look complete. Try again?");
-        }
-
-        const normalizedPhone = normalizePhoneNumber(phoneNumber);
-        const user = await userRepo.findByPhone(normalizedPhone) as any;
-
-        if (!user) {
-            throw new UnauthorizedError("That code doesn't look right. Try again?");
-        }
-
-        if (!user.code || !user.codeExpiresAt) {
-            throw new UnauthorizedError('No code found. Request a new one?');
-        }
-
+    async function issueSessionForUser(user: AuthUserDocument): Promise<AuthSessionResult & { refreshToken: string }> {
         const now = new Date();
-        if (user.codeExpiresAt < now) {
-            user.code = undefined;
-            user.codeExpiresAt = undefined;
-            await user.save();
-            throw new UnauthorizedError('That code expired. Request a new one?');
-        }
-
-        if (user.code !== code) {
-            throw new UnauthorizedError("That code doesn't look right. Try again?");
-        }
-
-        user.code = undefined;
-        user.codeExpiresAt = undefined;
-        user.lastLogin = now;
-
         const refreshToken = generateRefreshToken();
         user.refreshTokenHash = hashRefreshToken(refreshToken);
         user.refreshTokenExpiresAt = getRefreshExpiryDate();
+        user.lastLogin = now;
         await user.save();
 
         const accessToken = signAccessToken({ userId: user._id.toString() });
         const requiresUsername = !user.username || user.username.trim().length === 0;
+        const hasPasskey = await passkeyCredentialRepo.existsForUser(user._id.toString());
 
-        return { accessToken, refreshToken, requiresUsername };
+        return {
+            token: accessToken,
+            refreshToken,
+            requiresUsername,
+            hasPasskey,
+        };
     }
 
-    async function resendCode(phoneNumber: unknown): Promise<RequestCodeResult> {
-        const normalizedPhone = validatePhoneInput(phoneNumber);
-
-        const user = await userRepo.findByPhone(normalizedPhone) as any;
+    async function loadUser(userId: string): Promise<AuthUserDocument> {
+        const user = await userRepo.findById(userId) as AuthUserDocument | null;
         if (!user) {
-            throw new NotFoundError('User not found');
+            throw new NotFoundError('User not found', ErrorCode.USER_NOT_FOUND);
         }
 
-        const now = new Date();
-        if (user.codeSentAt) {
-            const timeSinceLastSent = now.getTime() - user.codeSentAt.getTime();
-            if (timeSinceLastSent < RESEND_COOLDOWN_MS) {
-                const remainingSeconds = Math.ceil((RESEND_COOLDOWN_MS - timeSinceLastSent) / 1000);
-                throw new ValidationError(
-                    `Hold on! Wait ${remainingSeconds} second${remainingSeconds !== 1 ? 's' : ''} before requesting a new code.`
-                );
+        return user;
+    }
+
+    async function resolveUserForVerifiedIdentity(identity: VerifiedIdentityProfile): Promise<AuthUserDocument> {
+        const existingIdentity = await userIdentityRepo.findByProviderIdentity(identity.provider, identity.providerUserId);
+        if (existingIdentity) {
+            await userIdentityRepo.updateLastUsed(existingIdentity._id!.toString());
+            return loadUser(existingIdentity.userId.toString());
+        }
+
+        let linkedUserId: string | null = null;
+        if (identity.emailVerified && identity.email && !identity.isPrivateRelay) {
+            const matchingIdentities = await userIdentityRepo.findVerifiedByEmail(identity.email);
+            const matchingUserIds = dedupeUserIds(matchingIdentities);
+
+            if (matchingUserIds.length > 1) {
+                throw new ValidationError('That email is already linked to multiple accounts. Sign in with an existing method first.');
+            }
+
+            if (matchingUserIds.length === 1) {
+                linkedUserId = matchingUserIds[0];
             }
         }
 
-        const code = generateVerificationCode();
-        const codeExpiresAt = new Date();
-        codeExpiresAt.setMinutes(codeExpiresAt.getMinutes() + CODE_EXPIRY_MINUTES);
-        const codeSentAt = new Date();
+        const user = linkedUserId
+            ? await loadUser(linkedUserId)
+            : (await userRepo.create({}) as AuthUserDocument);
 
-        user.code = code;
-        user.codeExpiresAt = codeExpiresAt;
-        user.codeSentAt = codeSentAt;
-        await user.save();
+        await userIdentityRepo.create({
+            userId: user._id.toString(),
+            provider: identity.provider,
+            providerUserId: identity.providerUserId,
+            email: identity.email,
+            emailVerified: identity.emailVerified,
+            isPrivateRelay: identity.isPrivateRelay,
+        });
 
-        return { code, codeSentAt };
+        return user;
+    }
+
+    async function verifyProviderIdentity(input: {
+        provider: unknown;
+        idToken: unknown;
+        rawNonce?: unknown;
+    }): Promise<VerifiedIdentityProfile> {
+        const provider = normalizeProvider(input.provider);
+        const idToken = normalizeIdToken(input.idToken);
+        const rawNonce = normalizeOptionalString(input.rawNonce);
+
+        if (provider === 'google') {
+            return providerIdentityService.verifyGoogleIdToken(idToken, rawNonce);
+        }
+
+        return providerIdentityService.verifyAppleIdToken(idToken, rawNonce);
+    }
+
+    async function providerSignIn(input: {
+        provider: unknown;
+        idToken: unknown;
+        rawNonce?: unknown;
+        platform?: unknown;
+    }): Promise<AuthSessionResult & { refreshToken: string }> {
+        const identity = await verifyProviderIdentity(input);
+        const user = await resolveUserForVerifiedIdentity(identity);
+        return issueSessionForUser(user);
+    }
+
+    async function linkIdentity(userId: string, input: {
+        provider: unknown;
+        idToken: unknown;
+        rawNonce?: unknown;
+    }): Promise<AuthSecurityStatus> {
+        const identity = await verifyProviderIdentity(input);
+        const existingIdentity = await userIdentityRepo.findByProviderIdentity(identity.provider, identity.providerUserId);
+        if (existingIdentity) {
+            if (existingIdentity.userId.toString() !== userId) {
+                throw new ValidationError('That sign-in method is already linked to another account.');
+            }
+
+            await userIdentityRepo.updateLastUsed(existingIdentity._id!.toString());
+            return getSecurityStatus(userId);
+        }
+
+        const currentIdentities = await userIdentityRepo.findByUserId(userId);
+        if (currentIdentities.some((item) => item.provider === identity.provider)) {
+            throw new ValidationError('That sign-in method is already linked to this account.');
+        }
+
+        await loadUser(userId);
+        await userIdentityRepo.create({
+            userId,
+            provider: identity.provider,
+            providerUserId: identity.providerUserId,
+            email: identity.email,
+            emailVerified: identity.emailVerified,
+            isPrivateRelay: identity.isPrivateRelay,
+        });
+
+        return getSecurityStatus(userId);
+    }
+
+    async function getSecurityStatus(userId: string): Promise<AuthSecurityStatus> {
+        await loadUser(userId);
+        const [linkedProviders, hasPasskey] = await Promise.all([
+            userIdentityRepo.findByUserId(userId),
+            passkeyCredentialRepo.existsForUser(userId),
+        ]);
+
+        return {
+            hasPasskey,
+            linkedProviders: linkedProviders.map(toLinkedIdentitySummary),
+        };
+    }
+
+    async function beginPasskeyRegistration(userId: string): Promise<PasskeyOptionsResult> {
+        const user = await loadUser(userId);
+        const identities = await userIdentityRepo.findByUserId(userId);
+        const existingPasskeys = await passkeyCredentialRepo.listForUser(userId);
+
+        const primaryIdentity = identities.find((identity) => identity.email) || identities[0];
+        const username = user.username?.trim()
+            || primaryIdentity?.email
+            || `user-${user._id.toString()}`;
+
+        const options = await passkeyService.generateRegistrationOptions({
+            userId: user._id.toString(),
+            username,
+            displayName: user.username?.trim() || 'Bleya user',
+            existingCredentials: existingPasskeys.map((credential) => ({
+                credentialId: credential.credentialId,
+                transports: credential.transports,
+            })),
+        });
+
+        const challengeDoc = await authChallengeRepo.create({
+            ceremony: 'passkey-registration',
+            challenge: options.challenge,
+            userId: user._id.toString(),
+        });
+
+        return {
+            challengeId: challengeDoc._id.toString(),
+            options: options as unknown as Record<string, unknown>,
+        };
+    }
+
+    async function finishPasskeyRegistration(userId: string, challengeId: unknown, response: unknown): Promise<AuthSecurityStatus> {
+        const normalizedChallengeId = validateChallengeId(challengeId);
+        const credentialResponse = validateRegistrationResponse(response);
+        const challengeDoc = await authChallengeRepo.findById(normalizedChallengeId);
+
+        if (!challengeDoc || challengeDoc.ceremony !== 'passkey-registration' || challengeDoc.userId?.toString() !== userId) {
+            throw new ValidationError('That passkey request is no longer valid. Try again.');
+        }
+
+        const verification = await passkeyService.verifyRegistration({
+            expectedChallenge: challengeDoc.challenge,
+            response: credentialResponse,
+        });
+
+        await passkeyCredentialRepo.create({
+            userId,
+            credentialId: verification.credentialId,
+            publicKey: verification.publicKey,
+            counter: verification.counter,
+            transports: verification.transports,
+            deviceType: verification.deviceType,
+            backedUp: verification.backedUp,
+            aaguid: verification.aaguid,
+        });
+
+        await authChallengeRepo.deleteById(normalizedChallengeId);
+        return getSecurityStatus(userId);
+    }
+
+    async function beginPasskeyAuthentication(): Promise<PasskeyOptionsResult> {
+        const options = await passkeyService.generateAuthenticationOptions();
+        const challengeDoc = await authChallengeRepo.create({
+            ceremony: 'passkey-authentication',
+            challenge: options.challenge,
+        });
+
+        return {
+            challengeId: challengeDoc._id.toString(),
+            options: options as unknown as Record<string, unknown>,
+        };
+    }
+
+    async function finishPasskeyAuthentication(challengeId: unknown, response: unknown): Promise<AuthSessionResult & { refreshToken: string }> {
+        const normalizedChallengeId = validateChallengeId(challengeId);
+        const credentialResponse = validateAuthenticationResponse(response);
+        const challengeDoc = await authChallengeRepo.findById(normalizedChallengeId);
+
+        if (!challengeDoc || challengeDoc.ceremony !== 'passkey-authentication') {
+            throw new ValidationError('That passkey request is no longer valid. Try again.');
+        }
+
+        const rawId = typeof credentialResponse.rawId === 'string' && credentialResponse.rawId.trim().length > 0
+            ? credentialResponse.rawId.trim()
+            : typeof credentialResponse.id === 'string'
+                ? credentialResponse.id.trim()
+                : '';
+
+        if (!rawId) {
+            throw new ValidationError('That passkey response could not be processed.');
+        }
+
+        const authenticator = await passkeyCredentialRepo.findByCredentialId(rawId);
+        if (!authenticator) {
+            throw new UnauthorizedError('No passkey found for that device.');
+        }
+
+        const verification = await passkeyService.verifyAuthentication({
+            expectedChallenge: challengeDoc.challenge,
+            response: credentialResponse,
+            authenticator: {
+                credentialId: authenticator.credentialId,
+                publicKey: authenticator.publicKey,
+                counter: authenticator.counter,
+                transports: authenticator.transports,
+            },
+        });
+
+        await passkeyCredentialRepo.updateCounterAndLastUsed(verification.credentialId, verification.newCounter);
+        await authChallengeRepo.deleteById(normalizedChallengeId);
+
+        const user = await loadUser(authenticator.userId.toString());
+        return issueSessionForUser(user);
     }
 
     async function refreshAccessToken(currentRefreshToken: string): Promise<RefreshResult> {
@@ -237,10 +490,7 @@ export function createAuthService(deps: AuthServiceDeps) {
             throw new ValidationError('Keep it simple: 3-30 characters, just letters, numbers, and underscores.');
         }
 
-        const user = await userRepo.findById(userId) as any;
-        if (!user) {
-            throw new NotFoundError('User not found', ErrorCode.USER_NOT_FOUND);
-        }
+        const user = await loadUser(userId);
 
         if (user.username && user.username.trim().length > 0) {
             throw new ValidationError("You've already set your username and can't change it.");
@@ -259,9 +509,13 @@ export function createAuthService(deps: AuthServiceDeps) {
     }
 
     return {
-        requestCode,
-        verifyCode,
-        resendCode,
+        providerSignIn,
+        linkIdentity,
+        getSecurityStatus,
+        beginPasskeyRegistration,
+        finishPasskeyRegistration,
+        beginPasskeyAuthentication,
+        finishPasskeyAuthentication,
         refreshAccessToken,
         logout,
         checkUsernameAvailability,
@@ -269,11 +523,22 @@ export function createAuthService(deps: AuthServiceDeps) {
     };
 }
 
-const defaultAuthService = createAuthService({ userRepo: defaultUserRepo });
+const defaultAuthService = createAuthService({
+    userRepo: defaultUserRepo,
+    userIdentityRepo: defaultUserIdentityRepo,
+    passkeyCredentialRepo: defaultPasskeyCredentialRepo,
+    authChallengeRepo: defaultAuthChallengeRepo,
+    providerIdentityService: defaultProviderIdentityService,
+    passkeyService: defaultPasskeyService,
+});
 
-export const requestCode = defaultAuthService.requestCode;
-export const verifyCode = defaultAuthService.verifyCode;
-export const resendCode = defaultAuthService.resendCode;
+export const providerSignIn = defaultAuthService.providerSignIn;
+export const linkIdentity = defaultAuthService.linkIdentity;
+export const getSecurityStatus = defaultAuthService.getSecurityStatus;
+export const beginPasskeyRegistration = defaultAuthService.beginPasskeyRegistration;
+export const finishPasskeyRegistration = defaultAuthService.finishPasskeyRegistration;
+export const beginPasskeyAuthentication = defaultAuthService.beginPasskeyAuthentication;
+export const finishPasskeyAuthentication = defaultAuthService.finishPasskeyAuthentication;
 export const refreshAccessToken = defaultAuthService.refreshAccessToken;
 export const logout = defaultAuthService.logout;
 export const checkUsernameAvailability = defaultAuthService.checkUsernameAvailability;

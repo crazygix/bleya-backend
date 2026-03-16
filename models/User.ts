@@ -1,20 +1,6 @@
 import mongoose from 'mongoose';
 
 const userSchema = new mongoose.Schema({
-    phoneNumber: {
-        type: String,
-        required: true,
-        unique: true,
-    },
-    code: {
-        type: String,
-    },
-    codeExpiresAt: {
-        type: Date,
-    },
-    codeSentAt: {
-        type: Date,
-    },
     refreshTokenHash: {
         type: String,
     },

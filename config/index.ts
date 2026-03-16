@@ -51,16 +51,18 @@ const DEFAULT_REDACT_FIELDS = [
   'token',
   'access_token',
   'refresh_token',
+  'id_token',
+  'identityToken',
+  'authorizationCode',
+  'challenge',
+  'nonce',
+  'rawNonce',
   'authorization',
   'cookie',
   'set-cookie',
   'secret',
   'api_key',
   'apikey',
-  'phone',
-  'phone_number',
-  'phonenumber',
-  'phoneNumber',
 ];
 
 function requiredEnv(name: string, options?: { defaultInTest?: string }): string {
@@ -139,7 +141,7 @@ function parseHttpLogBodyMode(name: string, defaultValue: HttpLogBodyMode): Http
   return normalized as HttpLogBodyMode;
 }
 
-const nodeEnv = process.env.NODE_ENV || 'development';
+const nodeEnv = bootNodeEnv;
 const isProduction = nodeEnv === 'production';
 const isLocal = nodeEnv === 'development';
 const isTest = nodeEnv === 'test';
@@ -152,6 +154,11 @@ const corsOrigins = isProduction
 const r2PublicBaseUrl = normalizeUrl(process.env.R2_PUBLIC_BASE_URL || '');
 const accessTokenTtl = '1h';
 const refreshTokenTtlDays = 365;
+const googleAllowedAudiences = parseList(process.env.GOOGLE_ALLOWED_AUDIENCES);
+const appleAllowedAudiences = parseList(process.env.APPLE_ALLOWED_AUDIENCES);
+const passkeyExpectedOrigins = parseList(process.env.PASSKEY_EXPECTED_ORIGINS);
+const passkeyRpId = process.env.PASSKEY_RP_ID?.trim() || 'bleyachat.com';
+const passkeyRpName = process.env.PASSKEY_RP_NAME?.trim() || 'Bleya';
 const citySearchDefaults = {
   defaultRadiusKm: 30,
   defaultLimit: 20,
@@ -176,6 +183,20 @@ export const config = {
 
   accessTokenTtl,
   refreshTokenTtlDays,
+
+  authProviders: {
+    googleAllowedAudiences,
+    appleAllowedAudiences,
+    appleAndroidServiceId: process.env.APPLE_ANDROID_SERVICE_ID || '',
+    appleAndroidRedirectPath: process.env.APPLE_ANDROID_REDIRECT_PATH || '/v1/auth/apple/android/callback',
+    androidPackageName: process.env.ANDROID_PACKAGE_NAME || 'com.bleyachat',
+  },
+
+  passkey: {
+    rpId: passkeyRpId,
+    rpName: passkeyRpName,
+    expectedOrigins: passkeyExpectedOrigins,
+  },
 
   httpLogging: {
     bodyMode: parseHttpLogBodyMode('HTTP_LOG_BODY_MODE', isProduction ? 'errors' : 'all'),

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { sanitizePlainText, sanitizePhoneNumber, sanitizeUsername } from '../../utils/sanitize.js';
+import { sanitizePlainText, sanitizeUsername } from '../../utils/sanitize.js';
 
 test('sanitizePlainText escapes HTML and removes control chars', () => {
     const value = sanitizePlainText('hi\u0000 <script>alert(1)</script>');
@@ -30,14 +30,6 @@ test('sanitizePlainText handles unicode content', () => {
     const result = sanitizePlainText('Hello 你好 🌍');
     assert.ok(result.includes('Hello'));
     assert.ok(result.includes('你好'));
-});
-
-test('sanitizePhoneNumber normalizes punctuation and spacing', () => {
-    assert.equal(sanitizePhoneNumber(' +1 (234) 567-8900 '), '+12345678900');
-});
-
-test('sanitizePhoneNumber handles clean number', () => {
-    assert.equal(sanitizePhoneNumber('+12345678900'), '+12345678900');
 });
 
 test('sanitizeUsername lowercases and strips unsupported chars', () => {

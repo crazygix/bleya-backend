@@ -5,8 +5,6 @@ import {
     signAccessToken,
     hashRefreshToken,
     getRefreshExpiryDate,
-    isValidPhoneNumber,
-    validatePhoneInput,
 } from '../../services/authService.js';
 import { config } from '../../config/index.js';
 
@@ -46,32 +44,4 @@ test('getRefreshExpiryDate offset matches configured TTL days', () => {
     const diff = expiry.getTime() - before;
     assert.ok(diff >= expectedMs - 1000);
     assert.ok(diff <= expectedMs + 1000);
-});
-
-test('isValidPhoneNumber accepts valid numbers', () => {
-    assert.ok(isValidPhoneNumber('+12345678901'));
-    assert.ok(isValidPhoneNumber('1234567890'));
-    assert.ok(isValidPhoneNumber('+123456789012345'));
-});
-
-test('isValidPhoneNumber rejects invalid numbers', () => {
-    assert.equal(isValidPhoneNumber('123'), false);
-    assert.equal(isValidPhoneNumber('abcdefghijk'), false);
-    assert.equal(isValidPhoneNumber(''), false);
-    assert.equal(isValidPhoneNumber('+1234567890123456'), false); // 16 digits
-});
-
-test('validatePhoneInput throws on empty string', () => {
-    assert.throws(() => validatePhoneInput(''), { name: 'Error' });
-});
-
-test('validatePhoneInput throws on non-string', () => {
-    assert.throws(() => validatePhoneInput(123), { name: 'Error' });
-    assert.throws(() => validatePhoneInput(null), { name: 'Error' });
-    assert.throws(() => validatePhoneInput(undefined), { name: 'Error' });
-});
-
-test('validatePhoneInput normalizes and returns valid phone', () => {
-    const result = validatePhoneInput('+1 (234) 567-8901');
-    assert.equal(result, '+12345678901');
 });
