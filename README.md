@@ -45,9 +45,9 @@ Set these at minimum in `.env.local`:
 
 - `IMAGE_SERVICE_PROVIDER`: `pexels` or `wikidata`
 - `PEXELS_API_KEY`: used when `IMAGE_SERVICE_PROVIDER=pexels`; falls back to Wikidata if missing
-- `APPLE_ALLOWED_AUDIENCES`
-- `APPLE_ANDROID_SERVICE_ID`
-- `APPLE_ANDROID_REDIRECT_PATH`
+- `APPLE_ALLOWED_AUDIENCES`: comma-separated Apple token audiences; include the iOS bundle ID and, if Android Sign in with Apple is enabled, the Android Service ID
+- `APPLE_ANDROID_SERVICE_ID`: Apple Service ID used for the Android web flow; it must also appear in `APPLE_ALLOWED_AUDIENCES`
+- `APPLE_ANDROID_REDIRECT_PATH`: absolute backend callback path for the Android Apple flow; must stay under `/v1/auth/` so production resolves to `https://api.bleyachat.com${APPLE_ANDROID_REDIRECT_PATH}`
 - `ANDROID_PACKAGE_NAME`
 - `PASSKEY_RP_ID`
 - `PASSKEY_RP_NAME`

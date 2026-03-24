@@ -48,18 +48,8 @@ router.post('/provider-sign-in', rateLimiter(authRateLimit, 15 * 60 * 1000), asy
     });
 }));
 
-router.get('/identities', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
+router.get('/security', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
     const result = await authService.getSecurityStatus(req.user!.userId);
-    res.json(result);
-}));
-
-router.post('/identities/link', authenticateUser, rateLimiter(authRateLimit, 15 * 60 * 1000), asyncHandler(async (req: AuthRequest, res: express.Response) => {
-    const result = await authService.linkIdentity(req.user!.userId, {
-        provider: req.body.provider,
-        idToken: req.body.idToken,
-        rawNonce: req.body.rawNonce,
-    });
-
     res.json(result);
 }));
 
@@ -92,11 +82,11 @@ router.post('/passkeys/authentication/verify', rateLimiter(authRateLimit, 15 * 6
     });
 }));
 
-router.post('/apple/android/callback', asyncHandler(async (req: express.Request, res: express.Response) => {
+router.post(config.authProviders.appleAndroidCallbackRoute, asyncHandler(async (req: express.Request, res: express.Response) => {
     res.redirect(302, buildAndroidAppleRedirect(req.body || {}));
 }));
 
-router.get('/apple/android/callback', asyncHandler(async (req: express.Request, res: express.Response) => {
+router.get(config.authProviders.appleAndroidCallbackRoute, asyncHandler(async (req: express.Request, res: express.Response) => {
     res.redirect(302, buildAndroidAppleRedirect(req.query as Record<string, unknown>));
 }));
 

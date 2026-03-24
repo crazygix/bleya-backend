@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { isValidUsername } from '../utils/username.js';
 
 const userSchema = new mongoose.Schema({
     refreshTokenHash: {
@@ -11,13 +12,12 @@ const userSchema = new mongoose.Schema({
         type: String,
         default: '',
         trim: true,
-        lowercase: true,
         validate: {
             validator: function (v: string) {
                 // Allow empty string (for existing users without username)
                 if (!v || v.length === 0) return true;
                 // Username must be 3-30 characters, alphanumeric and underscores only
-                return /^[a-z0-9_]{3,30}$/.test(v);
+                return isValidUsername(v);
             },
             message: 'Username must be 3-30 characters and contain only lowercase letters, numbers, and underscores'
         }

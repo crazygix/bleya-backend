@@ -75,6 +75,19 @@ describe('Users API', () => {
                 .expect(400);
         });
 
+        it('rejects uppercase usernames instead of lowercasing them', async () => {
+            const user = await createTestUser({
+                username: 'edituser',
+            });
+
+            const agent = getTestAgent();
+            await agent
+                .put('/v1/users/profile')
+                .set(authHeader(user._id.toString()))
+                .send({ username: 'UpperCase' })
+                .expect(400);
+        });
+
         it('returns 401 without auth', async () => {
             const agent = getTestAgent();
             await agent

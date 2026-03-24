@@ -70,6 +70,22 @@ function sha256Base64Url(input: string): string {
     return crypto.createHash('sha256').update(input).digest('base64url');
 }
 
+function assertNonceMatches(
+    provider: 'google' | 'apple',
+    claims: JWTPayload,
+    rawNonce?: string,
+): void {
+    if (!rawNonce) {
+        return;
+    }
+
+    const tokenNonce = typeof claims.nonce === 'string' ? claims.nonce : '';
+    const expectedHashed = sha256Base64Url(rawNonce);
+    if (tokenNonce && tokenNonce !== rawNonce && tokenNonce !== expectedHashed) {
+        throw new UnauthorizedError(`Unable to verify that ${provider === 'google' ? 'Google' : 'Apple'} sign-in attempt.`);
+    }
+}
+
 function buildVerifiedIdentity(
     provider: 'google' | 'apple',
     claims: JWTPayload,
@@ -92,13 +108,7 @@ export class RemoteProviderIdentityService implements ProviderIdentityService {
     async verifyGoogleIdToken(idToken: string, rawNonce?: string): Promise<VerifiedIdentityProfile> {
         const testClaims = parseTestClaims(idToken);
         if (testClaims) {
-            if (rawNonce) {
-                const tokenNonce = typeof testClaims.nonce === 'string' ? testClaims.nonce : '';
-                const expectedHashed = sha256Base64Url(rawNonce);
-                if (tokenNonce && tokenNonce !== rawNonce && tokenNonce !== expectedHashed) {
-                    throw new UnauthorizedError('Unable to verify that Google sign-in attempt.');
-                }
-            }
+            assertNonceMatches('google', testClaims, rawNonce);
             return buildVerifiedIdentity('google', testClaims);
         }
 
@@ -108,13 +118,7 @@ export class RemoteProviderIdentityService implements ProviderIdentityService {
             audience: audiences,
         });
 
-        if (rawNonce) {
-            const tokenNonce = typeof payload.nonce === 'string' ? payload.nonce : '';
-            const expectedHashed = sha256Base64Url(rawNonce);
-            if (tokenNonce && tokenNonce !== rawNonce && tokenNonce !== expectedHashed) {
-                throw new UnauthorizedError('Unable to verify that Google sign-in attempt.');
-            }
-        }
+        assertNonceMatches('google', payload, rawNonce);
 
         return buildVerifiedIdentity('google', payload);
     }
@@ -122,6 +126,7 @@ export class RemoteProviderIdentityService implements ProviderIdentityService {
     async verifyAppleIdToken(idToken: string, rawNonce?: string): Promise<VerifiedIdentityProfile> {
         const testClaims = parseTestClaims(idToken);
         if (testClaims) {
+            assertNonceMatches('apple', testClaims, rawNonce);
             return buildVerifiedIdentity('apple', testClaims);
         }
 
@@ -131,13 +136,7 @@ export class RemoteProviderIdentityService implements ProviderIdentityService {
             audience: audiences,
         });
 
-        if (rawNonce) {
-            const tokenNonce = typeof payload.nonce === 'string' ? payload.nonce : '';
-            const expectedHashed = sha256Base64Url(rawNonce);
-            if (tokenNonce && tokenNonce !== rawNonce && tokenNonce !== expectedHashed) {
-                throw new UnauthorizedError('Unable to verify that Apple sign-in attempt.');
-            }
-        }
+        assertNonceMatches('apple', payload, rawNonce);
 
         return buildVerifiedIdentity('apple', payload);
     }

@@ -2,14 +2,13 @@ import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import mongoose from 'mongoose';
 import { ValidationError, UnauthorizedError, NotFoundError, ErrorCode } from '../utils/errors.js';
-import { sanitizeUsername } from '../utils/sanitize.js';
+import { isValidUsername, normalizeUsernameInput } from '../utils/username.js';
 import { config } from '../config/index.js';
 import { type UserProfileResponse, toUserProfileResponse } from './userService.js';
 import { type UserRepository, userRepository as defaultUserRepo } from '../repositories/userRepository.js';
 import {
     type UserIdentityRepository,
     userIdentityRepository as defaultUserIdentityRepo,
-    type StoredUserIdentity,
 } from '../repositories/userIdentityRepository.js';
 import {
     type PasskeyCredentialRepository,
@@ -49,18 +48,8 @@ export interface RefreshResult {
     refreshToken: string;
 }
 
-export interface LinkedIdentitySummary {
-    provider: AuthProvider;
-    email: string;
-    emailVerified: boolean;
-    isPrivateRelay: boolean;
-    linkedAt: number;
-    lastUsedAt: number;
-}
-
 export interface AuthSecurityStatus {
     hasPasskey: boolean;
-    linkedProviders: LinkedIdentitySummary[];
 }
 
 export interface PasskeyOptionsResult {
@@ -159,21 +148,6 @@ function validateAuthenticationResponse(value: unknown): AuthenticationResponseJ
     return validateCredentialResponse(value) as unknown as AuthenticationResponseJSON;
 }
 
-function dedupeUserIds(identities: StoredUserIdentity[]): string[] {
-    return [...new Set(identities.map((identity) => identity.userId.toString()))];
-}
-
-function toLinkedIdentitySummary(identity: StoredUserIdentity): LinkedIdentitySummary {
-    return {
-        provider: identity.provider,
-        email: identity.email || '',
-        emailVerified: identity.emailVerified || false,
-        isPrivateRelay: identity.isPrivateRelay || false,
-        linkedAt: identity.linkedAt?.getTime() || 0,
-        lastUsedAt: identity.lastUsedAt?.getTime() || 0,
-    };
-}
-
 export function createAuthService(deps: AuthServiceDeps) {
     const {
         userRepo,
@@ -220,23 +194,7 @@ export function createAuthService(deps: AuthServiceDeps) {
             return loadUser(existingIdentity.userId.toString());
         }
 
-        let linkedUserId: string | null = null;
-        if (identity.emailVerified && identity.email && !identity.isPrivateRelay) {
-            const matchingIdentities = await userIdentityRepo.findVerifiedByEmail(identity.email);
-            const matchingUserIds = dedupeUserIds(matchingIdentities);
-
-            if (matchingUserIds.length > 1) {
-                throw new ValidationError('That email is already linked to multiple accounts. Sign in with an existing method first.');
-            }
-
-            if (matchingUserIds.length === 1) {
-                linkedUserId = matchingUserIds[0];
-            }
-        }
-
-        const user = linkedUserId
-            ? await loadUser(linkedUserId)
-            : (await userRepo.create({}) as AuthUserDocument);
+        const user = await userRepo.create({}) as AuthUserDocument;
 
         await userIdentityRepo.create({
             userId: user._id.toString(),
@@ -277,62 +235,20 @@ export function createAuthService(deps: AuthServiceDeps) {
         return issueSessionForUser(user);
     }
 
-    async function linkIdentity(userId: string, input: {
-        provider: unknown;
-        idToken: unknown;
-        rawNonce?: unknown;
-    }): Promise<AuthSecurityStatus> {
-        const identity = await verifyProviderIdentity(input);
-        const existingIdentity = await userIdentityRepo.findByProviderIdentity(identity.provider, identity.providerUserId);
-        if (existingIdentity) {
-            if (existingIdentity.userId.toString() !== userId) {
-                throw new ValidationError('That sign-in method is already linked to another account.');
-            }
-
-            await userIdentityRepo.updateLastUsed(existingIdentity._id!.toString());
-            return getSecurityStatus(userId);
-        }
-
-        const currentIdentities = await userIdentityRepo.findByUserId(userId);
-        if (currentIdentities.some((item) => item.provider === identity.provider)) {
-            throw new ValidationError('That sign-in method is already linked to this account.');
-        }
-
-        await loadUser(userId);
-        await userIdentityRepo.create({
-            userId,
-            provider: identity.provider,
-            providerUserId: identity.providerUserId,
-            email: identity.email,
-            emailVerified: identity.emailVerified,
-            isPrivateRelay: identity.isPrivateRelay,
-        });
-
-        return getSecurityStatus(userId);
-    }
-
     async function getSecurityStatus(userId: string): Promise<AuthSecurityStatus> {
         await loadUser(userId);
-        const [linkedProviders, hasPasskey] = await Promise.all([
-            userIdentityRepo.findByUserId(userId),
-            passkeyCredentialRepo.existsForUser(userId),
-        ]);
+        const hasPasskey = await passkeyCredentialRepo.existsForUser(userId);
 
         return {
             hasPasskey,
-            linkedProviders: linkedProviders.map(toLinkedIdentitySummary),
         };
     }
 
     async function beginPasskeyRegistration(userId: string): Promise<PasskeyOptionsResult> {
         const user = await loadUser(userId);
-        const identities = await userIdentityRepo.findByUserId(userId);
         const existingPasskeys = await passkeyCredentialRepo.listForUser(userId);
 
-        const primaryIdentity = identities.find((identity) => identity.email) || identities[0];
-        const username = user.username?.trim()
-            || primaryIdentity?.email
-            || `user-${user._id.toString()}`;
+        const username = user.username?.trim() || `user-${user._id.toString()}`;
 
         const options = await passkeyService.generateRegistrationOptions({
             userId: user._id.toString(),
@@ -471,8 +387,8 @@ export function createAuthService(deps: AuthServiceDeps) {
             throw new ValidationError('How should we call you?');
         }
 
-        const normalizedUsername = sanitizeUsername(username);
-        if (!/^[a-z0-9_]{3,30}$/.test(normalizedUsername)) {
+        const normalizedUsername = normalizeUsernameInput(username);
+        if (!isValidUsername(normalizedUsername)) {
             return false;
         }
 
@@ -485,8 +401,8 @@ export function createAuthService(deps: AuthServiceDeps) {
             throw new ValidationError('How should we call you?');
         }
 
-        const normalizedUsername = sanitizeUsername(username);
-        if (!/^[a-z0-9_]{3,30}$/.test(normalizedUsername)) {
+        const normalizedUsername = normalizeUsernameInput(username);
+        if (!isValidUsername(normalizedUsername)) {
             throw new ValidationError('Keep it simple: 3-30 characters, just letters, numbers, and underscores.');
         }
 
@@ -510,7 +426,6 @@ export function createAuthService(deps: AuthServiceDeps) {
 
     return {
         providerSignIn,
-        linkIdentity,
         getSecurityStatus,
         beginPasskeyRegistration,
         finishPasskeyRegistration,
@@ -533,7 +448,6 @@ const defaultAuthService = createAuthService({
 });
 
 export const providerSignIn = defaultAuthService.providerSignIn;
-export const linkIdentity = defaultAuthService.linkIdentity;
 export const getSecurityStatus = defaultAuthService.getSecurityStatus;
 export const beginPasskeyRegistration = defaultAuthService.beginPasskeyRegistration;
 export const finishPasskeyRegistration = defaultAuthService.finishPasskeyRegistration;

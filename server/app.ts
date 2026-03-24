@@ -15,7 +15,7 @@ import { errorHandler } from '../middleware/errorHandler.js';
 import { httpRequestLogger } from '../middleware/httpRequestLogger.js';
 import { buildCorsOptions } from '../utils/cors.js';
 import logger from '../utils/logger.js';
-import { config, validateR2Config } from '../config/index.js';
+import { config, validateAppleAuthConfig, validateR2Config } from '../config/index.js';
 
 function createApiRouter(): express.Router {
     const apiV1Router = express.Router();
@@ -39,6 +39,20 @@ export function validateRuntimeConfig(): void {
             missing: r2Validation.missing,
             note: 'File uploads will fail until R2 env vars are configured',
         });
+    }
+
+    const appleValidation = validateAppleAuthConfig();
+    if (!appleValidation.complete) {
+        if (config.isProduction) {
+            throw new Error(`Apple authentication configuration is invalid in production. ${appleValidation.errors.join(' ')}`);
+        }
+
+        if (!config.isTest) {
+            logger.warn('apple.auth.config.invalid', {
+                errors: appleValidation.errors,
+                note: 'Apple sign-in may fail until the configuration is corrected',
+            });
+        }
     }
 }
 

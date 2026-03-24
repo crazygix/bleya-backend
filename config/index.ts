@@ -127,6 +127,36 @@ function normalizeUrl(value: string): string {
   return trimTrailingSlash(value.trim());
 }
 
+function parsePathEnv(name: string, value: string | undefined, defaultValue: string): string {
+  const candidate = (value && value.trim().length > 0 ? value : defaultValue).trim();
+  if (!candidate.startsWith('/')) {
+    throw new Error(`${name} must start with '/'`);
+  }
+
+  if (candidate.includes('://')) {
+    throw new Error(`${name} must be a path, not a full URL`);
+  }
+
+  if (candidate.includes('?') || candidate.includes('#')) {
+    throw new Error(`${name} must not include a query string or fragment`);
+  }
+
+  return trimTrailingSlash(candidate) || '/';
+}
+
+function deriveMountedRoutePath(name: string, absolutePath: string, mountPath: string): string {
+  const normalizedMountPath = trimTrailingSlash(mountPath) || '/';
+  if (absolutePath === normalizedMountPath) {
+    return '/';
+  }
+
+  if (!absolutePath.startsWith(`${normalizedMountPath}/`)) {
+    throw new Error(`${name} must start with '${normalizedMountPath}/'`);
+  }
+
+  return absolutePath.slice(normalizedMountPath.length);
+}
+
 function parseHttpLogBodyMode(name: string, defaultValue: HttpLogBodyMode): HttpLogBodyMode {
   const raw = process.env[name];
   if (!raw || raw.trim().length === 0) {
@@ -156,6 +186,16 @@ const accessTokenTtl = '1h';
 const refreshTokenTtlDays = 365;
 const googleAllowedAudiences = parseList(process.env.GOOGLE_ALLOWED_AUDIENCES);
 const appleAllowedAudiences = parseList(process.env.APPLE_ALLOWED_AUDIENCES);
+const appleAndroidRedirectPath = parsePathEnv(
+  'APPLE_ANDROID_REDIRECT_PATH',
+  process.env.APPLE_ANDROID_REDIRECT_PATH,
+  '/v1/auth/apple/android/callback'
+);
+const appleAndroidCallbackRoute = deriveMountedRoutePath(
+  'APPLE_ANDROID_REDIRECT_PATH',
+  appleAndroidRedirectPath,
+  '/v1/auth'
+);
 const passkeyExpectedOrigins = parseList(process.env.PASSKEY_EXPECTED_ORIGINS);
 const passkeyRpId = process.env.PASSKEY_RP_ID?.trim() || 'bleyachat.com';
 const passkeyRpName = process.env.PASSKEY_RP_NAME?.trim() || 'Bleya';
@@ -187,9 +227,10 @@ export const config = {
   authProviders: {
     googleAllowedAudiences,
     appleAllowedAudiences,
-    appleAndroidServiceId: process.env.APPLE_ANDROID_SERVICE_ID || '',
-    appleAndroidRedirectPath: process.env.APPLE_ANDROID_REDIRECT_PATH || '/v1/auth/apple/android/callback',
-    androidPackageName: process.env.ANDROID_PACKAGE_NAME || 'com.bleyachat',
+    appleAndroidServiceId: process.env.APPLE_ANDROID_SERVICE_ID?.trim() || '',
+    appleAndroidRedirectPath,
+    appleAndroidCallbackRoute,
+    androidPackageName: process.env.ANDROID_PACKAGE_NAME?.trim() || 'com.bleyachat',
   },
 
   passkey: {
@@ -242,5 +283,28 @@ export function validateR2Config(): { complete: boolean; missing: string[] } {
   return {
     complete: missing.length === 0,
     missing,
+  };
+}
+
+export function validateAppleAuthConfig(): { complete: boolean; errors: string[] } {
+  const errors: string[] = [];
+  const hasAndroidServiceId = config.authProviders.appleAndroidServiceId.length > 0;
+  const hasAppleAudiences = config.authProviders.appleAllowedAudiences.length > 0;
+
+  if (hasAndroidServiceId && !hasAppleAudiences) {
+    errors.push('APPLE_ALLOWED_AUDIENCES must include the Apple Android Service ID when Apple Android sign-in is enabled.');
+  }
+
+  if (
+    hasAndroidServiceId
+    && hasAppleAudiences
+    && !config.authProviders.appleAllowedAudiences.includes(config.authProviders.appleAndroidServiceId)
+  ) {
+    errors.push('APPLE_ANDROID_SERVICE_ID must also be listed in APPLE_ALLOWED_AUDIENCES.');
+  }
+
+  return {
+    complete: errors.length === 0,
+    errors,
   };
 }

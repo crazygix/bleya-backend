@@ -15,8 +15,6 @@ export interface StoredUserIdentity {
 
 export interface UserIdentityRepository {
     findByProviderIdentity(provider: 'google' | 'apple', providerUserId: string): Promise<StoredUserIdentity | null>;
-    findByUserId(userId: string): Promise<StoredUserIdentity[]>;
-    findVerifiedByEmail(email: string): Promise<StoredUserIdentity[]>;
     create(data: {
         userId: string;
         provider: 'google' | 'apple';
@@ -31,19 +29,6 @@ export interface UserIdentityRepository {
 export class MongoUserIdentityRepository implements UserIdentityRepository {
     async findByProviderIdentity(provider: 'google' | 'apple', providerUserId: string) {
         return UserIdentity.findOne({ provider, providerUserId }).lean<StoredUserIdentity | null>();
-    }
-
-    async findByUserId(userId: string) {
-        return UserIdentity.find({ userId: new mongoose.Types.ObjectId(userId) })
-            .sort({ linkedAt: 1 })
-            .lean<StoredUserIdentity[]>();
-    }
-
-    async findVerifiedByEmail(email: string) {
-        return UserIdentity.find({
-            email,
-            emailVerified: true,
-        }).lean<StoredUserIdentity[]>();
     }
 
     async create(data: {

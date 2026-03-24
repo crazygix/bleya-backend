@@ -46,8 +46,6 @@ function fakeUserRepo(overrides: Partial<UserRepository> = {}): UserRepository {
 function fakeUserIdentityRepo(overrides: Partial<UserIdentityRepository> = {}): UserIdentityRepository {
     return {
         findByProviderIdentity: async () => null,
-        findByUserId: async () => [],
-        findVerifiedByEmail: async () => [],
         create: async (data) => ({
             _id: new mongoose.Types.ObjectId(),
             userId: new mongoose.Types.ObjectId(data.userId),
@@ -181,26 +179,19 @@ describe('authService (mocked)', () => {
         assert.equal(createdIdentityCount, 1);
     });
 
-    it('links a second provider to an existing account', async () => {
-        const userId = new mongoose.Types.ObjectId().toString();
+    it('creates a separate user when a different provider signs in with the same email', async () => {
         let createdIdentityCount = 0;
+        const createdUsers: any[] = [];
 
         const svc = createAuthService({
             userRepo: fakeUserRepo({
-                findById: async () => createMockUser({ _id: new mongoose.Types.ObjectId(userId), username: 'alice' }) as any,
+                create: async () => {
+                    const user = createMockUser();
+                    createdUsers.push(user);
+                    return user as any;
+                },
             }),
             userIdentityRepo: fakeUserIdentityRepo({
-                findByUserId: async () => [{
-                    _id: new mongoose.Types.ObjectId(),
-                    userId: new mongoose.Types.ObjectId(userId),
-                    provider: 'google',
-                    providerUserId: 'google-user-1',
-                    email: 'alice@example.com',
-                    emailVerified: true,
-                    isPrivateRelay: false,
-                    linkedAt: new Date(),
-                    lastUsedAt: new Date(),
-                }],
                 create: async (data) => {
                     createdIdentityCount += 1;
                     return {
@@ -215,26 +206,21 @@ describe('authService (mocked)', () => {
             }),
             passkeyCredentialRepo: fakePasskeyCredentialRepo(),
             authChallengeRepo: fakeAuthChallengeRepo(),
-            providerIdentityService: fakeProviderIdentityService({
-                verifyAppleIdToken: async () => ({
-                    provider: 'apple',
-                    providerUserId: 'apple-user-1',
-                    email: 'alice@example.com',
-                    emailVerified: true,
-                    isPrivateRelay: false,
-                }),
-            }),
+            providerIdentityService: fakeProviderIdentityService(),
             passkeyService: fakePasskeyService(),
         });
 
-        const result = await svc.linkIdentity(userId, {
+        await svc.providerSignIn({
+            provider: 'google',
+            idToken: 'token',
+        });
+        await svc.providerSignIn({
             provider: 'apple',
             idToken: 'token',
         });
 
-        assert.equal(createdIdentityCount, 1);
-        assert.equal(result.linkedProviders.length, 1);
-        assert.equal(result.hasPasskey, false);
+        assert.equal(createdUsers.length, 2);
+        assert.equal(createdIdentityCount, 2);
     });
 
     it('starts and finishes passkey registration', async () => {
@@ -245,19 +231,7 @@ describe('authService (mocked)', () => {
             userRepo: fakeUserRepo({
                 findById: async () => createMockUser({ _id: new mongoose.Types.ObjectId(userId), username: 'alice' }) as any,
             }),
-            userIdentityRepo: fakeUserIdentityRepo({
-                findByUserId: async () => [{
-                    _id: new mongoose.Types.ObjectId(),
-                    userId: new mongoose.Types.ObjectId(userId),
-                    provider: 'google',
-                    providerUserId: 'google-user-1',
-                    email: 'alice@example.com',
-                    emailVerified: true,
-                    isPrivateRelay: false,
-                    linkedAt: new Date(),
-                    lastUsedAt: new Date(),
-                }],
-            }),
+            userIdentityRepo: fakeUserIdentityRepo(),
             passkeyCredentialRepo: fakePasskeyCredentialRepo({
                 create: async (data) => {
                     createdCredential = data.credentialId;

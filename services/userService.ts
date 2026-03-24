@@ -1,7 +1,8 @@
 import path from 'path';
 import { uploadToR2, deleteFromR2, extractKeyFromUrl } from './r2Service.js';
 import { NotFoundError, ValidationError, ErrorCode } from '../utils/errors.js';
-import { sanitizePlainText, sanitizeUsername } from '../utils/sanitize.js';
+import { sanitizePlainText } from '../utils/sanitize.js';
+import { isValidUsername, normalizeUsernameInput } from '../utils/username.js';
 import logger from '../utils/logger.js';
 import { type UserRepository, userRepository as defaultUserRepo } from '../repositories/userRepository.js';
 
@@ -91,8 +92,8 @@ export function createUserService(deps: UserServiceDeps) {
                 throw new ValidationError("Username can't be empty.");
             }
 
-            const normalizedUsername = sanitizeUsername(updates.username);
-            if (!/^[a-z0-9_]{3,30}$/.test(normalizedUsername)) {
+            const normalizedUsername = normalizeUsernameInput(updates.username);
+            if (!isValidUsername(normalizedUsername)) {
                 throw new ValidationError('Keep it simple: 3-30 characters, just letters, numbers, and underscores.');
             }
 
