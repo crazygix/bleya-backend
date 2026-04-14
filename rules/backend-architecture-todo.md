@@ -1,134 +1,80 @@
 ## Backend Architecture Improvements TODO
 
-This file tracks remaining architecture improvements to be implemented
-according to the backend architecture rules.
+Last reviewed: 2026-04-14
 
-The original TODO content from the project root is preserved below.
+This file tracks architecture work that still remains after the refactors
+already landed. It is intended to reflect the current codebase, not the
+original pre-refactor checklist.
 
-```md
-## ✅ Completed
+## Completed
 
-- [x] CORS allowlist configuration (utils/cors.ts)
-- [x] Input sanitization utilities (utils/sanitize.ts)
-- [x] Socket.IO input sanitization applied
-- [x] Architecture rules documentation updated
+- [x] CORS allowlist configuration (`utils/cors.ts`)
+- [x] Centralized config loading and validation (`config/index.ts`, `server/app.ts`, `.env.example`)
+- [x] Structured logging with request IDs and body redaction/truncation controls (`utils/logger.ts`, `middleware/httpRequestLogger.ts`, `middleware/errorHandler.ts`)
+- [x] Data model consistency for `Message.userId` plus normalization migration (`models/Message.ts`, `migrations/003_normalize_user_references.ts`)
+- [x] API versioning under `/v1/...`
+- [x] Socket.IO event rate limiting for `join_room` and `send_message` (`server/socket.ts`)
+- [x] Baseline automated test suite in `tests/`
 
-## 🔲 High Priority
+## Remaining
 
-### 1. Service Layer Extraction
-**Status:** Not started  
-**Files:** `routes/auth.ts`, `routes/users.ts`, `routes/rooms.ts`, `routes/messages.ts`, `server/socket.ts`
+### High Priority
 
-Extract business logic from routes to service layer:
-- Create `services/authService.ts` for authentication logic
-- Create `services/userService.ts` for user profile operations
-- Create `services/roomService.ts` for room management
-- Create `services/messageService.ts` for message operations
-- Refactor routes to be thin controllers (validation → service call → response formatting)
-- Refactor Socket.IO handlers to use services
+#### 1. Finish service-layer extraction
+**Status:** Partially complete  
+**Files:** `routes/rooms.ts`, `server/socket.ts`
+
+Completed:
+- `services/authService.ts`, `services/userService.ts`, `services/roomService.ts`, and `services/messageService.ts` exist.
+- `routes/auth.ts`, `routes/users.ts`, and parts of `routes/messages.ts` are already thin controllers.
+
+Remaining:
+- Move room listing/detail aggregation, member listing, read pointers, direct-message lifecycle, and block/unblock orchestration out of `routes/rooms.ts`.
+- Move more Socket.IO orchestration into services, especially `join_room`, room summary fanout, and notification fanout.
 
 **Reference:** `core/architecture_rules.ts` section 9
 
-### 2. Input Sanitization (HTTP Routes)
-**Status:** Partially done (Socket.IO only)  
-**Files:** `routes/auth.ts`, `routes/users.ts`, `routes/messages.ts`
+#### 2. Keep HTTP input handling consistent
+**Status:** Mostly complete  
+**Files:** `services/authService.ts`, `services/userService.ts`, `services/messageService.ts`, `routes/rooms.ts`
 
-Apply sanitization to all user-generated input in HTTP routes:
-- Usernames: use `sanitizeUsername()`
-- Bio/message text: use `sanitizePlainText()`
+Completed:
+- Username inputs are normalized and validated before persistence.
+- Bio, message text, and room search query inputs are sanitized.
+
+Remaining:
+- Review new free-form inputs as they are added; there is no known large sanitization gap in the current HTTP routes.
 
 **Reference:** `core/architecture_rules.ts` section 10
 
-### 3. Configuration Management
-**Status:** Not started  
-**File:** `config/index.ts` (to be created)
+### Medium Priority
 
-Create centralized config module:
-- Validate all required env vars at startup
-- Type-safe configuration object
-- Fail fast if required vars missing
-- Document in `.env.example`
+#### 3. Migration workflow
+**Status:** Partially complete  
+**Files:** `migrations/001_seed_public_rooms.ts`, `migrations/002_drop_legacy_room_name_index.ts`, `migrations/003_normalize_user_references.ts`
 
-**Reference:** `core/architecture_rules.ts` section 13
+Completed:
+- One-off migration scripts exist for preset rooms, legacy index cleanup, and user-reference normalization.
 
-### 4. Structured Logging
-**Status:** Not started  
-**Files:** `server/server.ts`, `server/socket.ts`, `middleware/errorHandler.ts`
-
-Replace `console.log` with structured logger:
-- Install Winston or Pino
-- Create `utils/logger.ts`
-- Add request ID middleware for tracing
-- Remove sensitive data from logs (tokens, passwords, full request bodies)
-- Use appropriate log levels
-
-**Reference:** `core/architecture_rules.ts` section 14
-
-## 🔲 Medium Priority
-
-### 5. Data Model Consistency
-**Status:** Not started  
-**File:** `models/Message.ts`
-
-Fix inconsistent data types:
-- Change `Message.userId` from `String` to `mongoose.Schema.Types.ObjectId`
-- Create migration script to update existing data
-- Update all code that references `Message.userId`
-
-**Reference:** `core/architecture_rules.ts` section 4
-
-### 6. Migration System
-**Status:** Not started  
-**Files:** `migrations/` (to be created), `server/server.ts`
-
-Move schema/index changes to proper migrations:
-- Create migration system (or use library)
-- Move index cleanup from `server.ts` to migration script
-- Move preset rooms initialization to migration
-- Document all schema changes
+Remaining:
+- Add a single migration runner or deployment playbook so migrations run in a documented, ordered way.
+- Document operational ownership for applying new migrations.
 
 **Reference:** `core/architecture_rules.ts` section 6.1
 
-### 7. Testing
-**Status:** Not started  
-**Files:** `__tests__/` or `tests/` (to be created)
+#### 4. Testing depth
+**Status:** Mostly complete  
+**Files:** `tests/`
 
-Add minimum test coverage:
-- Unit tests for service layer functions
-- Integration tests for critical API endpoints (auth flows, room creation)
-- Test error handling paths
+Completed:
+- Unit, service, integration, and error-path tests exist and currently pass.
+
+Remaining:
+- Add coverage for notifications, cities, profile-image upload, passkey verification endpoints, direct-message block/unblock flows, and Socket.IO behavior.
 
 **Reference:** `core/architecture_rules.ts` section 15
 
-## 🔲 Low Priority
-
-### 8. API Versioning
-**Status:** Completed  
-**Files:** `server/server.ts`, all route files
-
-API versioning:
-- Routes are mounted under `/v1/...`
-- No legacy aliases are kept before public launch
-
-**Reference:** `core/architecture_rules.ts` section 2
-
-### 9. Socket.IO Rate Limiting
-**Status:** Not started  
-**File:** `server/socket.ts`
-
-Add rate limiting for Socket.IO events:
-- Limit `send_message` events per user
-- Limit `join_room` events per user
-- Use similar approach as HTTP rate limiting
-
-**Reference:** `core/architecture_rules.ts` section 5.1
-
----
-
 ## Notes
 
-- All TODO comments in code reference specific sections in the architecture rules
-- Prioritize High Priority items for better architecture and security
-- Medium Priority items improve maintainability and consistency
-- Low Priority items are nice-to-haves for future scalability
-```
+- This file intentionally replaces the old "not started" checklist, which no longer matched the codebase.
+- Update this note when architecture work changes materially so it stays useful as a source of truth.
