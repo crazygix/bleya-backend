@@ -20,6 +20,7 @@ export interface UserRepository {
     removeFromJoinedRooms(userId: string, roomId: mongoose.Types.ObjectId): Promise<void>;
     existsWithRoom(userId: string, roomId: mongoose.Types.ObjectId): Promise<boolean>;
     findByIds(ids: mongoose.Types.ObjectId[], select: string): Promise<LeanUser[]>;
+    findJoinedUserIds(roomId: mongoose.Types.ObjectId): Promise<string[]>;
 }
 
 export class MongoUserRepository implements UserRepository {
@@ -90,6 +91,14 @@ export class MongoUserRepository implements UserRepository {
 
     async findByIds(ids: mongoose.Types.ObjectId[], select: string) {
         return User.find({ _id: { $in: ids } }).select(select).lean<LeanUser[]>();
+    }
+
+    async findJoinedUserIds(roomId: mongoose.Types.ObjectId) {
+        const users = await User.find({ joinedRooms: roomId })
+            .select('_id')
+            .lean<Array<{ _id: mongoose.Types.ObjectId }>>();
+
+        return users.map((user) => user._id.toString());
     }
 }
 

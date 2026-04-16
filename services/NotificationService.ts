@@ -1,13 +1,13 @@
 import mongoose from 'mongoose';
 import { Notification } from '../models/Notification.js';
-import { Message } from '../models/Message.js';
 import logger from '../utils/logger.js';
 
-interface CreateReplyNotificationParams {
+interface CreateReplyNotificationsParams {
     replyMessageId: string;
     parentMessageId: string;
     senderId: string;
     roomId: string;
+    recipientUserIds: string[];
 }
 
 interface NotificationInsertPayload {
@@ -63,42 +63,17 @@ type NotificationsQuery = {
 };
 
 export class NotificationService {
-    static async createReplyNotification({
+    static async createReplyNotifications({
         replyMessageId,
         parentMessageId,
         senderId,
         roomId,
-    }: CreateReplyNotificationParams): Promise<UserNotifyTarget[]> {
-        const parentMessage = await Message.findById(parentMessageId).select('userId').lean<{ userId: mongoose.Types.ObjectId } | null>();
-        if (!parentMessage) {
-            return [];
-        }
-
-        const targets = new Set<string>();
-
-        // 1. Notify the author of the parent message (if not the sender)
-        if (parentMessage.userId.toString() !== senderId) {
-            targets.add(parentMessage.userId.toString());
-        }
-
-        // 2. Notify other participants in the thread?
-        // For now, let's stick to just the parent message author to avoid noise,
-        // or we could check who else replied.
-        // Let's also notify people who have replied to this thread previously.
-        const otherReplies = await Message.find({
-            parentMessageId,
-            userId: { $ne: senderId }, // Exclude current sender
-        }).distinct('userId') as mongoose.Types.ObjectId[]; // Get unique user IDs
-
-        for (const userId of otherReplies) {
-            if (userId.toString() !== senderId) {
-                targets.add(userId.toString());
-            }
-        }
-
+        recipientUserIds,
+    }: CreateReplyNotificationsParams): Promise<UserNotifyTarget[]> {
         const notifications: NotificationInsertPayload[] = [];
+        const dedupedRecipients = [...new Set(recipientUserIds)].filter((userId) => userId !== senderId);
 
-        for (const targetUserId of targets) {
+        for (const targetUserId of dedupedRecipients) {
             notifications.push({
                 recipient: new mongoose.Types.ObjectId(targetUserId),
                 sender: new mongoose.Types.ObjectId(senderId),

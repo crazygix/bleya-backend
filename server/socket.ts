@@ -7,13 +7,15 @@ import { Message } from '../models/Message.js';
 import { Notification } from '../models/Notification.js';
 import { User } from '../models/User.js';
 import {
-    NotificationService,
     PopulatedNotification,
     PopulatedNotificationParticipant,
+    UserNotifyTarget,
 } from '../services/NotificationService.js';
+import { prepareMessageDelivery } from '../services/messageDeliveryService.js';
 import { createMessage } from '../services/messageService.js';
+import { sendPushNotifications } from '../services/pushNotificationService.js';
 import { buildSocketCors } from '../utils/cors.js';
-import { ErrorCode, AppError } from '../utils/errors.js';
+import { ErrorCode, AppError, ValidationError } from '../utils/errors.js';
 import { validateObjectId } from '../utils/validation.js';
 import { toRoomLocation, isPrivateRoomParticipant } from '../utils/room.js';
 import { formatMessage, buildUsernameMap } from '../utils/message.js';
@@ -25,6 +27,7 @@ import type { FormattedMessage } from '../utils/message.js';
 interface AuthenticatedSocket {
     userId: string;
     roomId?: string;
+    threadId?: string;
 }
 
 interface EventRateState {
@@ -37,14 +40,22 @@ interface SocketDataState {
     eventRateLimits?: Map<string, EventRateState>;
 }
 
+interface SocketPresence {
+    roomId?: string;
+    threadId?: string;
+}
+
 type SocketWithState = Socket & { data: SocketDataState };
 
 const ROOM_MESSAGES_PAGE_SIZE = 50;
 const MAX_PUBLIC_ROOMS = 5;
+const userPresenceBySocketId = new Map<string, Map<string, SocketPresence>>();
 
 const EVENT_RATE_LIMITS: Record<string, { max: number; windowMs: number }> = {
     join_room: { max: 20, windowMs: 60_000 },
     send_message: { max: 60, windowMs: 60_000 },
+    open_thread: { max: 120, windowMs: 60_000 },
+    close_thread: { max: 120, windowMs: 60_000 },
 };
 
 function emitSocketError(socket: SocketWithState, code: ErrorCode, message: string): void {
@@ -105,6 +116,104 @@ function getSocketUser(socket: SocketWithState): AuthenticatedSocket {
     return user;
 }
 
+function parseRequiredSocketString(value: unknown, fieldName: string): string {
+    if (typeof value !== 'string' || value.trim().length === 0) {
+        throw new ValidationError(`${fieldName} is required`);
+    }
+
+    return value.trim();
+}
+
+function parseOptionalSocketString(value: unknown, fieldName: string): string | undefined {
+    if (value === undefined || value === null) {
+        return undefined;
+    }
+
+    if (typeof value !== 'string' || value.trim().length === 0) {
+        throw new ValidationError(`${fieldName} must be a non-empty string`);
+    }
+
+    return value.trim();
+}
+
+function parseSocketObjectPayload(value: unknown, eventName: string): Record<string, unknown> {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        throw new ValidationError(`${eventName} payload must be an object`);
+    }
+
+    return value as Record<string, unknown>;
+}
+
+function parseJoinRoomPayload(value: unknown): { roomId: string } {
+    const payload = parseSocketObjectPayload(value, 'join_room');
+    return {
+        roomId: parseRequiredSocketString(payload.roomId, 'Room ID'),
+    };
+}
+
+function parseOpenThreadPayload(value: unknown): { threadId: string } {
+    const payload = parseSocketObjectPayload(value, 'open_thread');
+    return {
+        threadId: parseRequiredSocketString(payload.threadId, 'Thread ID'),
+    };
+}
+
+function parseSendMessagePayload(value: unknown): { text: string; parentMessageId?: string } {
+    const payload = parseSocketObjectPayload(value, 'send_message');
+    return {
+        text: parseRequiredSocketString(payload.text, 'Message text'),
+        parentMessageId: parseOptionalSocketString(payload.parentMessageId, 'Parent message ID'),
+    };
+}
+
+function setSocketPresence(userId: string, socketId: string, presence: SocketPresence): void {
+    const userPresence = userPresenceBySocketId.get(userId) || new Map<string, SocketPresence>();
+    userPresence.set(socketId, presence);
+    userPresenceBySocketId.set(userId, userPresence);
+}
+
+function clearSocketPresence(userId: string, socketId: string): void {
+    const userPresence = userPresenceBySocketId.get(userId);
+    if (!userPresence) {
+        return;
+    }
+
+    userPresence.delete(socketId);
+    if (userPresence.size === 0) {
+        userPresenceBySocketId.delete(userId);
+    }
+}
+
+function isUserActiveInRoom(userId: string, roomId: string): boolean {
+    const userPresence = userPresenceBySocketId.get(userId);
+    if (!userPresence) {
+        return false;
+    }
+
+    for (const presence of userPresence.values()) {
+        if (presence.roomId === roomId) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+function isUserActiveInThread(userId: string, threadId: string): boolean {
+    const userPresence = userPresenceBySocketId.get(userId);
+    if (!userPresence) {
+        return false;
+    }
+
+    for (const presence of userPresence.values()) {
+        if (presence.threadId === threadId) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 function resolveNotificationRoomName(
     notification: PopulatedNotification,
     targetUserId: string
@@ -130,10 +239,12 @@ function resolveNotificationRoomName(
 
 async function emitReplyNotifications(
     io: SocketIOServer,
-    targets: { notificationId: string }[]
+    targets: UserNotifyTarget[]
 ): Promise<void> {
-    const notificationIds = targets.map((t) => new mongoose.Types.ObjectId(t.notificationId));
-    if (notificationIds.length === 0) return;
+    const notificationIds = targets.map((target) => new mongoose.Types.ObjectId(target.notificationId));
+    if (notificationIds.length === 0) {
+        return;
+    }
 
     const populatedNotifications = await Notification.find({ _id: { $in: notificationIds } })
         .select('recipient sender type room message thread read isDismissed createdAt updatedAt')
@@ -195,14 +306,15 @@ async function emitRoomSummaryUpdate(
         for (const participantId of roomParticipants) {
             io.to(`user:${participantId}`).emit('room_summary_updated', summaryPayload);
         }
-    } else {
-        const memberUsers = await User.find({ joinedRooms: new mongoose.Types.ObjectId(roomId) })
-            .select('_id')
-            .lean<Array<{ _id: mongoose.Types.ObjectId }>>();
+        return;
+    }
 
-        for (const member of memberUsers) {
-            io.to(`user:${member._id.toString()}`).emit('room_summary_updated', summaryPayload);
-        }
+    const memberUsers = await User.find({ joinedRooms: new mongoose.Types.ObjectId(roomId) })
+        .select('_id')
+        .lean<Array<{ _id: mongoose.Types.ObjectId }>>();
+
+    for (const member of memberUsers) {
+        io.to(`user:${member._id.toString()}`).emit('room_summary_updated', summaryPayload);
     }
 }
 
@@ -242,19 +354,22 @@ export function setupSocketIO(server: HTTPServer) {
         const socket = rawSocket as SocketWithState;
         const user = getSocketUser(socket);
 
+        setSocketPresence(user.userId, socket.id, {});
+
         logger.info('socket.connected', { userId: user.userId, socketId: socket.id });
 
         const userRoom = `user:${user.userId}`;
         socket.join(userRoom);
 
-        socket.on('join_room', async (data: { roomId: string }) => {
+        socket.on('join_room', async (data: unknown) => {
             if (!consumeEventBudget(socket, 'join_room')) {
                 emitSocketError(socket, ErrorCode.TOO_MANY_REQUESTS, 'Too many join requests. Please slow down.');
                 return;
             }
 
             try {
-                const roomObjectId = validateObjectId(data.roomId, 'room ID');
+                const payload = parseJoinRoomPayload(data);
+                const roomObjectId = validateObjectId(payload.roomId, 'room ID');
                 const roomId = roomObjectId.toString();
 
                 const room = await Room.findById(roomObjectId).lean<LeanRoom | null>();
@@ -304,6 +419,11 @@ export function setupSocketIO(server: HTTPServer) {
 
                 socket.join(roomId);
                 user.roomId = roomId;
+                user.threadId = undefined;
+                setSocketPresence(user.userId, socket.id, {
+                    roomId,
+                    threadId: undefined,
+                });
 
                 const rawMessages = await Message.find({
                     roomId: roomObjectId,
@@ -385,6 +505,11 @@ export function setupSocketIO(server: HTTPServer) {
                 socket.to(roomId).emit('user_joined', { userId: user.userId });
                 logger.info('socket.room_joined', { userId: user.userId, roomId });
             } catch (error) {
+                if (error instanceof AppError) {
+                    emitSocketError(socket, error.code, error.message);
+                    return;
+                }
+
                 logger.error('socket.join_room.failed', {
                     userId: user.userId,
                     error: error instanceof Error ? error.message : String(error),
@@ -393,13 +518,82 @@ export function setupSocketIO(server: HTTPServer) {
             }
         });
 
-        socket.on('send_message', async (data: { text: string; parentMessageId?: string }) => {
+        socket.on('open_thread', async (data: unknown) => {
+            if (!consumeEventBudget(socket, 'open_thread')) {
+                emitSocketError(socket, ErrorCode.TOO_MANY_REQUESTS, 'Too many thread events. Please slow down.');
+                return;
+            }
+
+            try {
+                const payload = parseOpenThreadPayload(data);
+
+                if (!user.roomId) {
+                    emitSocketError(socket, ErrorCode.VALIDATION_ERROR, 'Not in a room');
+                    return;
+                }
+
+                const threadObjectId = validateObjectId(payload.threadId, 'thread ID');
+                const threadMessage = await Message.findById(threadObjectId)
+                    .select('_id roomId parentMessageId')
+                    .lean<Pick<LeanMessage, '_id' | 'roomId' | 'parentMessageId'> | null>();
+
+                if (!threadMessage) {
+                    emitSocketError(socket, ErrorCode.MESSAGE_NOT_FOUND, 'Thread not found');
+                    return;
+                }
+
+                if (threadMessage.parentMessageId) {
+                    emitSocketError(socket, ErrorCode.VALIDATION_ERROR, 'Thread must reference a top-level message');
+                    return;
+                }
+
+                if (threadMessage.roomId.toString() !== user.roomId) {
+                    emitSocketError(socket, ErrorCode.FORBIDDEN, 'Thread does not belong to the active room');
+                    return;
+                }
+
+                user.threadId = threadObjectId.toString();
+                setSocketPresence(user.userId, socket.id, {
+                    roomId: user.roomId,
+                    threadId: user.threadId,
+                });
+            } catch (error) {
+                if (error instanceof AppError) {
+                    emitSocketError(socket, error.code, error.message);
+                    return;
+                }
+
+                logger.error('socket.open_thread.failed', {
+                    userId: user.userId,
+                    roomId: user.roomId,
+                    error: error instanceof Error ? error.message : String(error),
+                });
+                emitSocketError(socket, ErrorCode.INTERNAL_ERROR, 'Failed to open thread');
+            }
+        });
+
+        socket.on('close_thread', () => {
+            if (!consumeEventBudget(socket, 'close_thread')) {
+                emitSocketError(socket, ErrorCode.TOO_MANY_REQUESTS, 'Too many thread events. Please slow down.');
+                return;
+            }
+
+            user.threadId = undefined;
+            setSocketPresence(user.userId, socket.id, {
+                roomId: user.roomId,
+                threadId: undefined,
+            });
+        });
+
+        socket.on('send_message', async (data: unknown) => {
             if (!consumeEventBudget(socket, 'send_message')) {
                 emitSocketError(socket, ErrorCode.TOO_MANY_REQUESTS, 'Too many messages. Please slow down.');
                 return;
             }
 
             try {
+                const payload = parseSendMessagePayload(data);
+
                 if (!user.roomId) {
                     emitSocketError(socket, ErrorCode.VALIDATION_ERROR, 'Not in a room');
                     return;
@@ -408,22 +602,11 @@ export function setupSocketIO(server: HTTPServer) {
                 const result = await createMessage({
                     userId: user.userId,
                     roomId: user.roomId,
-                    text: data.text,
-                    parentMessageId: data.parentMessageId,
+                    text: payload.text,
+                    parentMessageId: payload.parentMessageId,
                 });
 
                 io.to(user.roomId).emit('new_message', result.messageData);
-
-                if (result.notificationTargets.length > 0) {
-                    try {
-                        await emitReplyNotifications(io, result.notificationTargets);
-                    } catch (err) {
-                        logger.error('socket.notification.failed', {
-                            error: err instanceof Error ? err.message : String(err),
-                            messageId: result.messageData.id,
-                        });
-                    }
-                }
 
                 if (result.isTopLevel) {
                     await emitRoomSummaryUpdate(
@@ -435,10 +618,32 @@ export function setupSocketIO(server: HTTPServer) {
                     );
                 }
 
+                try {
+                    const deliveryResult = await prepareMessageDelivery(result, {
+                        isUserActiveInRoom,
+                        isUserActiveInThread,
+                    });
+
+                    if (deliveryResult.replyNotificationTargets.length > 0) {
+                        await emitReplyNotifications(io, deliveryResult.replyNotificationTargets);
+                    }
+
+                    if (deliveryResult.pushRequest) {
+                        await sendPushNotifications(deliveryResult.pushRequest);
+                    }
+                } catch (error) {
+                    logger.error('socket.push_dispatch.failed', {
+                        userId: user.userId,
+                        roomId: user.roomId,
+                        messageId: result.messageData.id,
+                        error: error instanceof Error ? error.message : String(error),
+                    });
+                }
+
                 logger.info('socket.message_sent', {
                     userId: user.userId,
                     roomId: user.roomId,
-                    parentMessageId: data.parentMessageId || null,
+                    parentMessageId: payload.parentMessageId || null,
                 });
             } catch (error) {
                 if (error instanceof AppError) {
@@ -461,6 +666,8 @@ export function setupSocketIO(server: HTTPServer) {
 
             const roomId = user.roomId;
             user.roomId = undefined;
+            user.threadId = undefined;
+            setSocketPresence(user.userId, socket.id, {});
 
             socket.to(roomId).emit('user_left', { userId: user.userId });
             socket.leave(roomId);
@@ -478,6 +685,7 @@ export function setupSocketIO(server: HTTPServer) {
                 socket.to(user.roomId).emit('user_left', { userId: user.userId });
             }
 
+            clearSocketPresence(user.userId, socket.id);
             logger.info('socket.disconnected', { userId: user.userId, socketId: socket.id });
         });
     });

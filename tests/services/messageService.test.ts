@@ -1,7 +1,6 @@
-import { describe, it, before, after, beforeEach } from 'node:test';
+import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import mongoose from 'mongoose';
-import { connectTestDb, clearTestDb, disconnectTestDb } from '../helpers/testDb.js';
 import { createMessageService } from '../../services/messageService.js';
 import type { UserRepository } from '../../repositories/userRepository.js';
 import type { RoomRepository } from '../../repositories/roomRepository.js';
@@ -23,6 +22,7 @@ function fakeUserRepo(overrides: Partial<UserRepository> = {}): UserRepository {
         removeFromJoinedRooms: async () => {},
         existsWithRoom: async () => false,
         findByIds: async () => [],
+        findJoinedUserIds: async () => [],
         ...overrides,
     };
 }
@@ -49,24 +49,12 @@ function fakeMessageRepo(overrides: Partial<MessageRepository> = {}): MessageRep
         }),
         findByIdLean: async () => null,
         incrementReplyCount: async () => {},
+        findDistinctReplyAuthorIds: async () => [],
         ...overrides,
     };
 }
 
-// We need a real DB for NotificationService which is called internally
 describe('messageService (mocked repos)', () => {
-    before(async () => {
-        await connectTestDb();
-    });
-
-    after(async () => {
-        await disconnectTestDb();
-    });
-
-    beforeEach(async () => {
-        await clearTestDb();
-    });
-
     it('creates a top-level message successfully', async () => {
         const roomId = new mongoose.Types.ObjectId();
         const userId = new mongoose.Types.ObjectId();
@@ -81,6 +69,7 @@ describe('messageService (mocked repos)', () => {
             userRepo: fakeUserRepo({
                 existsWithRoom: async () => true,
                 findByIdSelectUsername: async () => ({ _id: userId, username: 'alice' }),
+                findJoinedUserIds: async () => [userId.toString(), 'other-user-id'],
             }),
             roomRepo: fakeRoomRepo({
                 findById: async () => room,
@@ -97,7 +86,7 @@ describe('messageService (mocked repos)', () => {
         assert.equal(result.messageData.text, 'Hello world');
         assert.equal(result.messageData.username, 'alice');
         assert.equal(result.isTopLevel, true);
-        assert.equal(result.notificationTargets.length, 0);
+        assert.deepEqual(result.candidateRecipientUserIds, ['other-user-id']);
     });
 
     it('creates a reply and increments reply count', async () => {
@@ -109,7 +98,7 @@ describe('messageService (mocked repos)', () => {
         const parentMessage: LeanMessage = {
             _id: parentId,
             roomId,
-            userId: new mongoose.Types.ObjectId(),
+            userId: new mongoose.Types.ObjectId('507f1f77bcf86cd799439011'),
             text: 'Parent',
             createdAt: new Date(),
             parentMessageId: null,
@@ -120,6 +109,12 @@ describe('messageService (mocked repos)', () => {
             userRepo: fakeUserRepo({
                 existsWithRoom: async () => true,
                 findByIdSelectUsername: async () => ({ _id: userId, username: 'bob' }),
+                findJoinedUserIds: async () => [
+                    userId.toString(),
+                    '507f1f77bcf86cd799439011',
+                    '507f191e810c19729de860ea',
+                    '507f1f77bcf86cd799439099',
+                ],
             }),
             roomRepo: fakeRoomRepo({
                 findById: async () => ({
@@ -132,6 +127,11 @@ describe('messageService (mocked repos)', () => {
             messageRepo: fakeMessageRepo({
                 findByIdLean: async () => parentMessage,
                 incrementReplyCount: async () => { replyCountIncremented = true; },
+                findDistinctReplyAuthorIds: async () => [
+                    new mongoose.Types.ObjectId('507f191e810c19729de860ea'),
+                    new mongoose.Types.ObjectId('507f191e810c19729de860ea'),
+                    new mongoose.Types.ObjectId('507f1f77bcf86cd799439099'),
+                ],
             }),
         });
 
@@ -145,6 +145,11 @@ describe('messageService (mocked repos)', () => {
         assert.equal(result.messageData.text, 'Reply text');
         assert.equal(result.isTopLevel, false);
         assert.ok(replyCountIncremented);
+        assert.deepEqual(result.candidateRecipientUserIds, [
+            '507f1f77bcf86cd799439011',
+            '507f191e810c19729de860ea',
+            '507f1f77bcf86cd799439099',
+        ]);
     });
 
     it('throws when room not found', async () => {

@@ -233,6 +233,12 @@ export const config = {
     androidPackageName: process.env.ANDROID_PACKAGE_NAME?.trim() || 'com.bleyachat',
   },
 
+  push: {
+    firebaseProjectId: process.env.FIREBASE_PROJECT_ID?.trim() || '',
+    firebaseClientEmail: process.env.FIREBASE_CLIENT_EMAIL?.trim() || '',
+    firebasePrivateKey: process.env.FIREBASE_PRIVATE_KEY?.trim() || '',
+  },
+
   passkey: {
     rpId: passkeyRpId,
     rpName: passkeyRpName,
@@ -306,5 +312,18 @@ export function validateAppleAuthConfig(): { complete: boolean; errors: string[]
   return {
     complete: errors.length === 0,
     errors,
+  };
+}
+
+export function validatePushConfig(): { complete: boolean; missing: string[] } {
+  const missing: string[] = [];
+
+  if (!config.push.firebaseProjectId) missing.push('FIREBASE_PROJECT_ID');
+  if (!config.push.firebaseClientEmail) missing.push('FIREBASE_CLIENT_EMAIL');
+  if (!config.push.firebasePrivateKey) missing.push('FIREBASE_PRIVATE_KEY');
+
+  return {
+    complete: missing.length === 0,
+    missing,
   };
 }

@@ -3,7 +3,6 @@ import { UserBlock } from '../models/UserBlock.js';
 import { sanitizePlainText } from '../utils/sanitize.js';
 import { AppError, ValidationError, ErrorCode } from '../utils/errors.js';
 import { validateObjectId } from '../utils/validation.js';
-import { NotificationService, UserNotifyTarget } from './NotificationService.js';
 import { User } from '../models/User.js';
 import type { LeanRoom, LeanMessage, LeanUserBlock } from '../types/lean.js';
 import type { FormattedMessage } from '../utils/message.js';
@@ -20,10 +19,16 @@ export interface CreateMessageInput {
 
 export interface CreateMessageResult {
     messageData: FormattedMessage;
-    notificationTargets: UserNotifyTarget[];
+    pushType: 'message' | 'reply';
+    candidateRecipientUserIds: string[];
     isTopLevel: boolean;
+    roomId: string;
+    roomName: string;
     roomType: 'public' | 'private';
     roomParticipants: string[];
+    threadId: string | null;
+    senderId: string;
+    senderUsername: string;
 }
 
 export interface MessageServiceDeps {
@@ -39,7 +44,7 @@ export function createMessageService(deps: MessageServiceDeps) {
         const roomObjectId = new mongoose.Types.ObjectId(input.roomId);
         const senderObjectId = new mongoose.Types.ObjectId(input.userId);
 
-        const room = await roomRepo.findById(roomObjectId, '_id type participants');
+        const room = await roomRepo.findById(roomObjectId, '_id name type participants');
 
         if (!room) {
             throw new AppError(ErrorCode.ROOM_NOT_FOUND, 'Room not found', 404);
@@ -110,6 +115,13 @@ export function createMessageService(deps: MessageServiceDeps) {
             }
         }
 
+        let currentRoomMemberIds: string[];
+        if ((room.type || 'public') === 'private') {
+            currentRoomMemberIds = (room.participants || []).map((id) => id.toString());
+        } else {
+            currentRoomMemberIds = await userRepo.findJoinedUserIds(roomObjectId);
+        }
+
         const message = await messageRepo.create({
             roomId: roomObjectId,
             userId: senderObjectId,
@@ -130,34 +142,53 @@ export function createMessageService(deps: MessageServiceDeps) {
         }
 
         const senderUser = await userRepo.findByIdSelectUsername(input.userId);
+        const senderUsername = senderUser?.username || '';
 
         const messageData: FormattedMessage = {
             id: message._id.toString(),
             roomId: message.roomId.toString(),
             userId: message.userId.toString(),
-            username: senderUser?.username || '',
+            username: senderUsername,
             text: message.text,
             createdAt: message.createdAt.getTime(),
             parentMessageId: message.parentMessageId?.toString() || null,
             replyCount: message.replyCount || 0,
         };
 
-        let notificationTargets: UserNotifyTarget[] = [];
+        let candidateRecipientUserIds: string[] = [];
         if (parentObjectId) {
-            notificationTargets = await NotificationService.createReplyNotification({
-                senderId: message.userId.toString(),
-                roomId: message.roomId.toString(),
-                parentMessageId: parentObjectId.toString(),
-                replyMessageId: message._id.toString(),
-            });
+            const candidateSet = new Set<string>();
+            const parentMessage = await messageRepo.findByIdLean(parentObjectId.toString());
+
+            if (parentMessage?.userId) {
+                candidateSet.add(parentMessage.userId.toString());
+            }
+
+            const priorReplyAuthorIds = await messageRepo.findDistinctReplyAuthorIds(parentObjectId, senderObjectId);
+            for (const replyAuthorId of priorReplyAuthorIds) {
+                candidateSet.add(replyAuthorId.toString());
+            }
+
+            const allowedMemberIds = new Set(currentRoomMemberIds);
+            candidateRecipientUserIds = [...candidateSet].filter((userId) => (
+                userId !== input.userId && allowedMemberIds.has(userId)
+            ));
+        } else {
+            candidateRecipientUserIds = currentRoomMemberIds.filter((userId) => userId !== input.userId);
         }
 
         return {
             messageData,
-            notificationTargets,
+            pushType: parentObjectId ? 'reply' : 'message',
+            candidateRecipientUserIds,
             isTopLevel: !parentObjectId,
+            roomId: message.roomId.toString(),
+            roomName: room.name || '',
             roomType: (room.type || 'public') as 'public' | 'private',
             roomParticipants: (room.participants || []).map((id) => id.toString()),
+            threadId: parentObjectId?.toString() || null,
+            senderId: message.userId.toString(),
+            senderUsername,
         };
     }
 

@@ -52,6 +52,11 @@ Set these at minimum in `.env.local`:
 - `PASSKEY_RP_ID`
 - `PASSKEY_RP_NAME`
 - `PASSKEY_EXPECTED_ORIGINS`
+- `FIREBASE_PROJECT_ID`
+- `FIREBASE_CLIENT_EMAIL`
+- `FIREBASE_PRIVATE_KEY`
+  Push notifications stay disabled in development when these are missing.
+  Production startup validation requires all three Firebase values.
 - `HTTP_LOG_BODY_MODE`: `off`, `errors`, or `all`
 - `HTTP_LOG_BODY_REDACT`
 - `HTTP_LOG_BODY_TRUNCATE`

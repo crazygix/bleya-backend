@@ -19,6 +19,10 @@ export interface MessageRepository {
     }>;
     findByIdLean(id: string): Promise<LeanMessage | null>;
     incrementReplyCount(id: mongoose.Types.ObjectId): Promise<void>;
+    findDistinctReplyAuthorIds(
+        parentMessageId: mongoose.Types.ObjectId,
+        excludeUserId: mongoose.Types.ObjectId
+    ): Promise<mongoose.Types.ObjectId[]>;
 }
 
 export class MongoMessageRepository implements MessageRepository {
@@ -47,6 +51,16 @@ export class MongoMessageRepository implements MessageRepository {
 
     async incrementReplyCount(id: mongoose.Types.ObjectId) {
         await Message.updateOne({ _id: id }, { $inc: { replyCount: 1 } });
+    }
+
+    async findDistinctReplyAuthorIds(
+        parentMessageId: mongoose.Types.ObjectId,
+        excludeUserId: mongoose.Types.ObjectId
+    ) {
+        return Message.find({
+            parentMessageId,
+            userId: { $ne: excludeUserId },
+        }).distinct('userId') as Promise<mongoose.Types.ObjectId[]>;
     }
 }
 

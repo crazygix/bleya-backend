@@ -15,7 +15,7 @@ import { errorHandler } from '../middleware/errorHandler.js';
 import { httpRequestLogger } from '../middleware/httpRequestLogger.js';
 import { buildCorsOptions } from '../utils/cors.js';
 import logger from '../utils/logger.js';
-import { config, validateAppleAuthConfig, validateR2Config } from '../config/index.js';
+import { config, validateAppleAuthConfig, validatePushConfig, validateR2Config } from '../config/index.js';
 
 function createApiRouter(): express.Router {
     const apiV1Router = express.Router();
@@ -51,6 +51,20 @@ export function validateRuntimeConfig(): void {
             logger.warn('apple.auth.config.invalid', {
                 errors: appleValidation.errors,
                 note: 'Apple sign-in may fail until the configuration is corrected',
+            });
+        }
+    }
+
+    const pushValidation = validatePushConfig();
+    if (!pushValidation.complete) {
+        if (config.isProduction) {
+            throw new Error(`Push configuration incomplete in production. Missing: ${pushValidation.missing.join(', ')}`);
+        }
+
+        if (!config.isTest) {
+            logger.warn('push.config.incomplete', {
+                missing: pushValidation.missing,
+                note: 'Push notifications will be disabled until Firebase env vars are configured',
             });
         }
     }

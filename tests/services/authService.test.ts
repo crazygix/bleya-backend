@@ -39,6 +39,7 @@ function fakeUserRepo(overrides: Partial<UserRepository> = {}): UserRepository {
         removeFromJoinedRooms: async () => {},
         existsWithRoom: async () => false,
         findByIds: async () => [],
+        findJoinedUserIds: async () => [],
         ...overrides,
     };
 }
