@@ -1,74 +1,43 @@
-import { Request, Response, NextFunction } from 'express';
+import rateLimit, { type Options, type RateLimitRequestHandler } from 'express-rate-limit';
+import { config } from '../config/index.js';
 import { TooManyRequestsError } from '../utils/errors.js';
+import logger from '../utils/logger.js';
 
-interface RateLimitStore {
-    count: number;
-    resetTime: number;
+const FIFTEEN_MINUTES_MS = 15 * 60 * 1000;
+
+export interface RateLimiterOptions {
+    name: string;
+    limit: number;
+    windowMs?: number;
 }
 
-// In-memory store for rate limiting (use Redis in production for distributed systems)
-const rateLimitStore = new Map<string, RateLimitStore>();
-
-// Clean up expired entries every 5 minutes
-const cleanupTimer = setInterval(() => {
-    const now = Date.now();
-    for (const [key, value] of rateLimitStore.entries()) {
-        if (value.resetTime < now) {
-            rateLimitStore.delete(key);
-        }
-    }
-}, 5 * 60 * 1000);
-cleanupTimer.unref();
-
-export function resetRateLimiterStoreForTests(): void {
-    rateLimitStore.clear();
-}
-
-export function stopRateLimiterCleanupForTests(): void {
-    clearInterval(cleanupTimer);
-}
-
-/**
- * Rate limiter middleware
- * @param maxRequests Maximum number of requests allowed
- * @param windowMs Time window in milliseconds
- * @param keyGenerator Function to generate a unique key for rate limiting (default: IP address)
- */
-export const rateLimiter = (
-    maxRequests: number,
-    windowMs: number,
-    keyGenerator?: (req: Request) => string
-) => {
-    return (req: Request, res: Response, next: NextFunction) => {
-        const key = keyGenerator ? keyGenerator(req) : (req.ip || req.socket.remoteAddress || 'unknown');
-        const now = Date.now();
-
-        let store = rateLimitStore.get(key);
-
-        // Initialize or reset if window expired
-        if (!store || store.resetTime < now) {
-            store = {
-                count: 0,
-                resetTime: now + windowMs
-            };
-            rateLimitStore.set(key, store);
-        }
-
-        // Increment count
-        store.count++;
-
-        // Set rate limit headers
-        res.setHeader('X-RateLimit-Limit', maxRequests.toString());
-        res.setHeader('X-RateLimit-Remaining', Math.max(0, maxRequests - store.count).toString());
-        res.setHeader('X-RateLimit-Reset', store.resetTime.toString());
-
-        // Check if limit exceeded
-        if (store.count > maxRequests) {
-            return next(new TooManyRequestsError(
-                `Too many requests. Please try again after ${store.resetTime}`
-            ));
-        }
-
-        next();
+export function createRateLimiter({
+    name,
+    limit,
+    windowMs = FIFTEEN_MINUTES_MS,
+}: RateLimiterOptions): RateLimitRequestHandler {
+    const handler: Options['handler'] = (req, _res, next) => {
+        logger.warn('rate_limit.exceeded', {
+            limiter: name,
+            ip: req.ip,
+            path: req.originalUrl || req.path,
+            method: req.method,
+        });
+        next(new TooManyRequestsError('Too many requests. Please try again later.'));
     };
-};
+
+    return rateLimit({
+        windowMs,
+        limit,
+        standardHeaders: 'draft-7',
+        legacyHeaders: false,
+        skip: () => config.isTest,
+        handler,
+    });
+}
+
+// Kept as no-ops for test-helper backwards compatibility. The previous custom
+// limiter exposed these to scrub a shared in-memory store between tests; the
+// new implementation skips entirely in test mode, so nothing needs resetting.
+export function resetRateLimiterStoreForTests(): void {}
+export function stopRateLimiterCleanupForTests(): void {}

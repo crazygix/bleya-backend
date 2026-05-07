@@ -75,6 +75,10 @@ export function createApp(): express.Express {
 
     const app = express();
 
+    // Railway sits behind one proxy hop. Without this, req.ip resolves to the
+    // proxy's IP instead of the client's, breaking IP-based rate limiting.
+    app.set('trust proxy', 1);
+
     app.use(helmet({
         contentSecurityPolicy: {
             directives: {

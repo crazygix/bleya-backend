@@ -1,7 +1,7 @@
 import express from 'express';
 import { authenticateUser, AuthRequest } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
-import { rateLimiter } from '../middleware/rateLimiter.js';
+import { createRateLimiter } from '../middleware/rateLimiter.js';
 import { UnauthorizedError } from '../utils/errors.js';
 import { config } from '../config/index.js';
 import * as authService from '../services/authService.js';
@@ -9,7 +9,24 @@ import { getUserProfile } from '../services/userService.js';
 
 const router = express.Router();
 
-const authRateLimit = config.isProduction ? 5 : 100;
+const PROD = config.isProduction;
+
+const providerSignInLimiter = createRateLimiter({
+    name: 'auth.provider-sign-in',
+    limit: PROD ? 20 : 200,
+});
+const passkeyRegistrationLimiter = createRateLimiter({
+    name: 'auth.passkey-registration',
+    limit: PROD ? 10 : 200,
+});
+const passkeyAuthenticationLimiter = createRateLimiter({
+    name: 'auth.passkey-authentication',
+    limit: PROD ? 30 : 200,
+});
+const refreshLimiter = createRateLimiter({
+    name: 'auth.refresh',
+    limit: PROD ? 60 : 600,
+});
 
 function setRefreshCookie(res: express.Response, refreshToken: string): void {
     res.cookie('refreshToken', refreshToken, {
@@ -32,7 +49,7 @@ function buildAndroidAppleRedirect(body: Record<string, unknown>): string {
     return `intent://callback?${params.toString()}#Intent;package=${config.authProviders.androidPackageName};scheme=signinwithapple;end`;
 }
 
-router.post('/provider-sign-in', rateLimiter(authRateLimit, 15 * 60 * 1000), asyncHandler(async (req: express.Request, res: express.Response) => {
+router.post('/provider-sign-in', providerSignInLimiter, asyncHandler(async (req: express.Request, res: express.Response) => {
     const result = await authService.providerSignIn({
         provider: req.body.provider,
         idToken: req.body.idToken,
@@ -53,12 +70,12 @@ router.get('/security', authenticateUser, asyncHandler(async (req: AuthRequest, 
     res.json(result);
 }));
 
-router.post('/passkeys/registration/options', authenticateUser, rateLimiter(authRateLimit, 15 * 60 * 1000), asyncHandler(async (req: AuthRequest, res: express.Response) => {
+router.post('/passkeys/registration/options', authenticateUser, passkeyRegistrationLimiter, asyncHandler(async (req: AuthRequest, res: express.Response) => {
     const result = await authService.beginPasskeyRegistration(req.user!.userId);
     res.json(result);
 }));
 
-router.post('/passkeys/registration/verify', authenticateUser, rateLimiter(authRateLimit, 15 * 60 * 1000), asyncHandler(async (req: AuthRequest, res: express.Response) => {
+router.post('/passkeys/registration/verify', authenticateUser, passkeyRegistrationLimiter, asyncHandler(async (req: AuthRequest, res: express.Response) => {
     const result = await authService.finishPasskeyRegistration(
         req.user!.userId,
         req.body.challengeId,
@@ -67,12 +84,12 @@ router.post('/passkeys/registration/verify', authenticateUser, rateLimiter(authR
     res.json(result);
 }));
 
-router.post('/passkeys/authentication/options', rateLimiter(authRateLimit, 15 * 60 * 1000), asyncHandler(async (_req: express.Request, res: express.Response) => {
+router.post('/passkeys/authentication/options', passkeyAuthenticationLimiter, asyncHandler(async (_req: express.Request, res: express.Response) => {
     const result = await authService.beginPasskeyAuthentication();
     res.json(result);
 }));
 
-router.post('/passkeys/authentication/verify', rateLimiter(authRateLimit, 15 * 60 * 1000), asyncHandler(async (req: express.Request, res: express.Response) => {
+router.post('/passkeys/authentication/verify', passkeyAuthenticationLimiter, asyncHandler(async (req: express.Request, res: express.Response) => {
     const result = await authService.finishPasskeyAuthentication(req.body.challengeId, req.body.response);
     setRefreshCookie(res, result.refreshToken);
     res.json({
@@ -95,7 +112,7 @@ router.get('/me', authenticateUser, asyncHandler(async (req: AuthRequest, res: e
     res.json(profile);
 }));
 
-router.post('/refresh', rateLimiter(authRateLimit, 15 * 60 * 1000), asyncHandler(async (req: express.Request, res: express.Response) => {
+router.post('/refresh', refreshLimiter, asyncHandler(async (req: express.Request, res: express.Response) => {
     const { refreshToken } = req.cookies || {};
     if (!refreshToken) {
         res.clearCookie('refreshToken', { path: '/' });
