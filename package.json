@@ -6,6 +6,9 @@
   "author": "",
   "type": "module",
   "main": "dist/server/server.js",
+  "engines": {
+    "node": ">=22.0.0 <23.0.0"
+  },
   "scripts": {
     "start": "node dist/server/server.js",
     "dev": "nodemon",
