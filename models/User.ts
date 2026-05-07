@@ -70,8 +70,13 @@ const userSchema = new mongoose.Schema({
     ],
 });
 
-// Create unique sparse index on username (allows multiple empty usernames, but enforces uniqueness for non-empty)
-userSchema.index({ username: 1 }, { unique: true, sparse: true });
+// Unique on non-empty usernames only. Sparse alone doesn't work here because
+// the schema defaults `username` to '' (present-but-empty), which sparse still
+// indexes — causing duplicate-key errors for every user past the first.
+userSchema.index(
+    { username: 1 },
+    { unique: true, partialFilterExpression: { username: { $gt: '' } } },
+);
 
 // Index for efficient room member queries (finding users by joinedRooms)
 userSchema.index({ joinedRooms: 1 });
