@@ -15,7 +15,7 @@ interface CityJsonEntry {
     population: number;
 }
 
-type Action = 'clean' | 'import-cities' | 'reset' | 'quit';
+type Action = 'clean' | 'import-cities' | 'quit';
 
 interface MenuItem {
     key: string;
@@ -38,12 +38,6 @@ const MENU: MenuItem[] = [
         description: 'Imports cities from data/cities.json into the cities collection.',
     },
     {
-        key: '3',
-        action: 'reset',
-        title: 'Reset (clean + import cities)',
-        description: 'Drops everything (including cities) and re-imports cities from data/cities.json.',
-    },
-    {
         key: 'q',
         action: 'quit',
         title: 'Quit',
@@ -64,6 +58,37 @@ function ask(question: string): Promise<string> {
 async function askYesNo(question: string): Promise<boolean> {
     const answer = await ask(question);
     return answer.toLowerCase() === 'y';
+}
+
+function describeTarget(): { host: string; dbName: string; isLocal: boolean } {
+    const match = config.mongoUri.match(/^[^:]+:\/\/(?:[^@/]+@)?([^/?]+)(?:\/([^?]*))?/);
+    const host = match?.[1] ?? '(unknown)';
+    const dbName = match?.[2] || '(default)';
+    const isLocal = /^(localhost|127\.0\.0\.1)/i.test(host);
+    return { host, dbName, isLocal };
+}
+
+async function confirmTarget(actionLabel: string): Promise<boolean> {
+    const { host, dbName, isLocal } = describeTarget();
+
+    console.log('');
+    console.log(`About to ${actionLabel}:`);
+    console.log(`  host:     ${host}`);
+    console.log(`  database: ${dbName}`);
+    console.log(`  env:      ${config.nodeEnv}`);
+
+    if (!isLocal || config.isProduction) {
+        console.log('');
+        console.log('  WARNING: this does NOT look like a local database.');
+        const typed = await ask(`Type the database name to confirm ("${dbName}"): `);
+        if (typed !== dbName) {
+            console.log('Confirmation failed. Aborting.');
+            return false;
+        }
+        return true;
+    }
+
+    return askYesNo('Continue? (y/N) ');
 }
 
 async function promptMenu(): Promise<Action> {
@@ -158,15 +183,13 @@ function resolveCitiesJsonPath(): string {
 async function runAction(action: Action) {
     switch (action) {
         case 'clean': {
+            if (!(await confirmTarget('CLEAN the database'))) return;
             const alsoDropCities = await askYesNo('Also drop the cities collection? (y/N) ');
             await cleanDatabase(alsoDropCities);
             break;
         }
         case 'import-cities':
-            await importCities(resolveCitiesJsonPath());
-            break;
-        case 'reset':
-            await cleanDatabase(true);
+            if (!(await confirmTarget('IMPORT cities into the database'))) return;
             await importCities(resolveCitiesJsonPath());
             break;
         case 'quit':

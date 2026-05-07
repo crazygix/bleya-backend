@@ -31,10 +31,19 @@ function loadEnvFiles(projectRoot: string, nodeEnv: string): void {
     `.env.${nodeEnv}.local`,
   ];
 
+  // Snapshot env vars set externally (by Railway, CI, shell, etc.) before any
+  // .env file is read. These always win — .env files only fill in gaps. Files
+  // later in `candidates` still override earlier ones via process.env.
+  const externallySet = new Set(Object.keys(process.env));
+
   for (const candidate of candidates) {
     const filePath = path.join(projectRoot, candidate);
-    if (fs.existsSync(filePath)) {
-      dotenv.config({ path: filePath, override: true });
+    if (!fs.existsSync(filePath)) continue;
+
+    const parsed = dotenv.parse(fs.readFileSync(filePath));
+    for (const [key, value] of Object.entries(parsed)) {
+      if (externallySet.has(key)) continue;
+      process.env[key] = value;
     }
   }
 }
