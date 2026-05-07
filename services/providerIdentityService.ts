@@ -1,7 +1,8 @@
 import crypto from 'crypto';
-import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose';
+import { createRemoteJWKSet, errors as joseErrors, jwtVerify, type JWTPayload } from 'jose';
 import { config } from '../config/index.js';
 import { AppError, ErrorCode, UnauthorizedError } from '../utils/errors.js';
+import logger from '../utils/logger.js';
 
 export interface VerifiedIdentityProfile {
     provider: 'google' | 'apple';
@@ -86,6 +87,19 @@ function assertNonceMatches(
     }
 }
 
+function rethrowAsUnauthorized(provider: 'google' | 'apple', error: unknown): never {
+    if (error instanceof joseErrors.JOSEError) {
+        logger.warn('auth.provider.token_verification_failed', {
+            provider,
+            code: error.code,
+            name: error.name,
+            message: error.message,
+        });
+        throw new UnauthorizedError(`Unable to verify that ${provider === 'google' ? 'Google' : 'Apple'} sign-in attempt.`);
+    }
+    throw error;
+}
+
 function buildVerifiedIdentity(
     provider: 'google' | 'apple',
     claims: JWTPayload,
@@ -113,10 +127,15 @@ export class RemoteProviderIdentityService implements ProviderIdentityService {
         }
 
         const audiences = assertAudiencesConfigured('google');
-        const { payload } = await jwtVerify(idToken, googleJwks, {
-            issuer: ['https://accounts.google.com', 'accounts.google.com'],
-            audience: audiences,
-        });
+        let payload: JWTPayload;
+        try {
+            ({ payload } = await jwtVerify(idToken, googleJwks, {
+                issuer: ['https://accounts.google.com', 'accounts.google.com'],
+                audience: audiences,
+            }));
+        } catch (error) {
+            rethrowAsUnauthorized('google', error);
+        }
 
         assertNonceMatches('google', payload, rawNonce);
 
@@ -131,10 +150,15 @@ export class RemoteProviderIdentityService implements ProviderIdentityService {
         }
 
         const audiences = assertAudiencesConfigured('apple');
-        const { payload } = await jwtVerify(idToken, appleJwks, {
-            issuer: 'https://appleid.apple.com',
-            audience: audiences,
-        });
+        let payload: JWTPayload;
+        try {
+            ({ payload } = await jwtVerify(idToken, appleJwks, {
+                issuer: 'https://appleid.apple.com',
+                audience: audiences,
+            }));
+        } catch (error) {
+            rethrowAsUnauthorized('apple', error);
+        }
 
         assertNonceMatches('apple', payload, rawNonce);
 
