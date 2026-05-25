@@ -50,15 +50,16 @@ Remaining:
 
 **Reference:** `core/architecture_rules.ts` section 6.1
 
-#### 4. Testing depth
+#### 3. Testing depth
 **Status:** Mostly complete  
 **Files:** `tests/`
 
 Completed:
 - Unit, service, integration, and error-path tests exist and currently pass.
+- Direct-message lifecycle and block/unblock flows are covered (`tests/integration/directMessages.test.ts`), plus joined-room/member/read-pointer endpoints (`tests/integration/rooms.test.ts`).
 
 Remaining:
-- Add coverage for notifications, cities, profile-image upload, passkey verification endpoints, direct-message block/unblock flows, and Socket.IO behavior.
+- Add coverage for notifications, cities, profile-image upload, passkey verification endpoints, and Socket.IO behavior.
 
 **Reference:** `core/architecture_rules.ts` section 15
 
