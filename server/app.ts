@@ -11,7 +11,7 @@ import userRoutes from '../routes/users.js';
 import messageRoutes from '../routes/messages.js';
 import notificationRoutes from '../routes/notifications.js';
 import citiesRoutes from '../routes/cities.js';
-import { errorHandler } from '../middleware/errorHandler.js';
+import { errorHandler, notFoundHandler } from '../middleware/errorHandler.js';
 import { httpRequestLogger } from '../middleware/httpRequestLogger.js';
 import { buildCorsOptions } from '../utils/cors.js';
 import logger from '../utils/logger.js';
@@ -129,6 +129,7 @@ export function createApp(): express.Express {
         res.status(statusCode).json(health);
     });
 
+    app.use(notFoundHandler);
     app.use(errorHandler);
 
     return app;

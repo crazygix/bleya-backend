@@ -1,27 +1,22 @@
 import { Server as SocketIOServer, Socket } from 'socket.io';
 import { Server as HTTPServer } from 'http';
 import jwt from 'jsonwebtoken';
-import mongoose from 'mongoose';
 import { Room } from '../models/Room.js';
 import { Message } from '../models/Message.js';
-import { Notification } from '../models/Notification.js';
-import { User } from '../models/User.js';
 import {
-    PopulatedNotification,
-    PopulatedNotificationParticipant,
-    UserNotifyTarget,
+    NotificationService,
+    type UserNotifyTarget,
 } from '../services/NotificationService.js';
 import { prepareMessageDelivery } from '../services/messageDeliveryService.js';
 import { createMessage } from '../services/messageService.js';
+import { buildRoomJoinView, getRoomSummaryRecipientIds } from '../services/roomService.js';
 import { sendPushNotifications } from '../services/pushNotificationService.js';
 import { buildSocketCors } from '../utils/cors.js';
 import { ErrorCode, AppError, ValidationError } from '../utils/errors.js';
 import { validateObjectId } from '../utils/validation.js';
-import { toRoomLocation, isPrivateRoomParticipant } from '../utils/room.js';
-import { formatMessage, buildUsernameMap } from '../utils/message.js';
 import { config } from '../config/index.js';
 import logger from '../utils/logger.js';
-import type { LeanRoom, LeanMessage, LeanUser, LeanJoinedRoomsUser } from '../types/lean.js';
+import type { LeanMessage } from '../types/lean.js';
 import type { FormattedMessage } from '../utils/message.js';
 
 interface AuthenticatedSocket {
@@ -47,8 +42,6 @@ interface SocketPresence {
 
 type SocketWithState = Socket & { data: SocketDataState };
 
-const ROOM_MESSAGES_PAGE_SIZE = 50;
-const MAX_PUBLIC_ROOMS = 5;
 const userPresenceBySocketId = new Map<string, Map<string, SocketPresence>>();
 
 const EVENT_RATE_LIMITS: Record<string, { max: number; windowMs: number }> = {
@@ -214,76 +207,16 @@ function isUserActiveInThread(userId: string, threadId: string): boolean {
     return false;
 }
 
-function resolveNotificationRoomName(
-    notification: PopulatedNotification,
-    targetUserId: string
-): string {
-    const fallbackName = notification.room.name || 'Unknown Room';
-    if (notification.room.type !== 'private' || !notification.room.participants) {
-        return fallbackName;
-    }
-
-    const otherParticipant = notification.room.participants.find((participant) => {
-        if (participant instanceof mongoose.Types.ObjectId) {
-            return participant.toString() !== targetUserId;
-        }
-        return participant._id.toString() !== targetUserId;
-    });
-
-    if (!otherParticipant || otherParticipant instanceof mongoose.Types.ObjectId) {
-        return fallbackName;
-    }
-
-    return (otherParticipant as PopulatedNotificationParticipant).username || fallbackName;
-}
-
 async function emitReplyNotifications(
     io: SocketIOServer,
     targets: UserNotifyTarget[]
 ): Promise<void> {
-    const notificationIds = targets.map((target) => new mongoose.Types.ObjectId(target.notificationId));
-    if (notificationIds.length === 0) {
-        return;
-    }
+    const events = await NotificationService.buildReplyNotificationEvents(
+        targets.map((target) => target.notificationId)
+    );
 
-    const populatedNotifications = await Notification.find({ _id: { $in: notificationIds } })
-        .select('recipient sender type room message thread read isDismissed createdAt updatedAt')
-        .populate('sender', 'username profileImageUrl')
-        .populate({
-            path: 'room',
-            select: 'name type participants',
-            populate: { path: 'participants', select: 'username' },
-        })
-        .populate('message', 'text')
-        .populate('thread', 'text')
-        .lean<PopulatedNotification[]>();
-
-    for (const notification of populatedNotifications) {
-        const targetUserId = notification.recipient.toString();
-        const roomName = resolveNotificationRoomName(notification, targetUserId);
-
-        io.to(`user:${targetUserId}`).emit('new_notification', {
-            id: notification._id.toString(),
-            recipient: targetUserId,
-            sender: {
-                id: notification.sender._id.toString(),
-                username: notification.sender.username || 'Unknown',
-                profileImageUrl: notification.sender.profileImageUrl || null,
-            },
-            type: notification.type,
-            roomId: notification.room._id.toString(),
-            roomName,
-            roomType: notification.room.type || 'public',
-            messageId: notification.message._id.toString(),
-            threadId: notification.thread._id.toString(),
-            parentMessageText: notification.thread.text || null,
-            replyText: notification.message.text || '',
-            previewText: notification.message.text ? notification.message.text.substring(0, 100) : '',
-            read: notification.read,
-            isDismissed: notification.isDismissed || false,
-            createdAt: notification.createdAt.getTime(),
-            updatedAt: notification.updatedAt.getTime(),
-        });
+    for (const event of events) {
+        io.to(`user:${event.targetUserId}`).emit('new_notification', event.payload);
     }
 }
 
@@ -302,19 +235,9 @@ async function emitRoomSummaryUpdate(
         lastMessageUsername: messageData.username,
     };
 
-    if (roomType === 'private') {
-        for (const participantId of roomParticipants) {
-            io.to(`user:${participantId}`).emit('room_summary_updated', summaryPayload);
-        }
-        return;
-    }
-
-    const memberUsers = await User.find({ joinedRooms: new mongoose.Types.ObjectId(roomId) })
-        .select('_id')
-        .lean<Array<{ _id: mongoose.Types.ObjectId }>>();
-
-    for (const member of memberUsers) {
-        io.to(`user:${member._id.toString()}`).emit('room_summary_updated', summaryPayload);
+    const recipientIds = await getRoomSummaryRecipientIds(roomId, roomType, roomParticipants);
+    for (const recipientId of recipientIds) {
+        io.to(`user:${recipientId}`).emit('room_summary_updated', summaryPayload);
     }
 }
 
@@ -372,46 +295,7 @@ export function setupSocketIO(server: HTTPServer) {
                 const roomObjectId = validateObjectId(payload.roomId, 'room ID');
                 const roomId = roomObjectId.toString();
 
-                const room = await Room.findById(roomObjectId).lean<LeanRoom | null>();
-                if (!room) {
-                    emitSocketError(socket, ErrorCode.ROOM_NOT_FOUND, 'Room not found');
-                    return;
-                }
-
-                if (!isPrivateRoomParticipant(room, user.userId)) {
-                    emitSocketError(socket, ErrorCode.FORBIDDEN, 'You are not allowed to join this chat');
-                    return;
-                }
-
-                const userDoc = await User.findById(user.userId)
-                    .select('joinedRooms roomReadPointers')
-                    .lean<LeanJoinedRoomsUser | null>();
-
-                if (!userDoc) {
-                    emitSocketError(socket, ErrorCode.USER_NOT_FOUND, 'User not found');
-                    return;
-                }
-
-                const isAlreadyJoined = userDoc.joinedRooms.some((id) => id.equals(roomObjectId));
-
-                if (!isAlreadyJoined) {
-                    if ((room.type || 'public') === 'public') {
-                        const publicRoomCount = await Room.countDocuments({
-                            _id: { $in: userDoc.joinedRooms },
-                            type: 'public',
-                        });
-
-                        if (publicRoomCount >= MAX_PUBLIC_ROOMS) {
-                            emitSocketError(socket, ErrorCode.VALIDATION_ERROR, 'You can only join up to 5 group chats at a time');
-                            return;
-                        }
-                    }
-
-                    await User.updateOne(
-                        { _id: user.userId, joinedRooms: { $ne: roomObjectId } },
-                        { $addToSet: { joinedRooms: roomObjectId } }
-                    );
-                }
+                const view = await buildRoomJoinView(user.userId, roomObjectId);
 
                 if (user.roomId) {
                     socket.leave(user.roomId);
@@ -425,81 +309,11 @@ export function setupSocketIO(server: HTTPServer) {
                     threadId: undefined,
                 });
 
-                const rawMessages = await Message.find({
-                    roomId: roomObjectId,
-                    parentMessageId: null,
-                })
-                    .sort({ createdAt: -1, _id: -1 })
-                    .limit(ROOM_MESSAGES_PAGE_SIZE + 1)
-                    .lean<LeanMessage[]>();
-
-                const hasMore = rawMessages.length > ROOM_MESSAGES_PAGE_SIZE;
-                const pageMessages = hasMore
-                    ? rawMessages.slice(0, ROOM_MESSAGES_PAGE_SIZE)
-                    : rawMessages;
-
-                const userIds = [...new Set(pageMessages.map((msg) => msg.userId.toString()))]
-                    .map((id) => new mongoose.Types.ObjectId(id));
-
-                const users = userIds.length > 0
-                    ? await User.find({ _id: { $in: userIds } }).select('_id username').lean<LeanUser[]>()
-                    : [];
-
-                const usernameMap = buildUsernameMap(users);
-                const formattedMessages = pageMessages.reverse().map((msg) => formatMessage(msg, usernameMap));
-
-                const nextCursor = pageMessages.length > 0
-                    ? `${pageMessages[pageMessages.length - 1].createdAt.getTime()}_${pageMessages[pageMessages.length - 1]._id.toString()}`
-                    : null;
-
-                let lastReadAt: number | null = null;
-                for (const pointer of userDoc.roomReadPointers || []) {
-                    if (!pointer.lastReadAt || pointer.roomId.toString() !== roomId) {
-                        continue;
-                    }
-
-                    const pointerTime = pointer.lastReadAt.getTime();
-                    if (lastReadAt === null || pointerTime > lastReadAt) {
-                        lastReadAt = pointerTime;
-                    }
-                }
-
-                let roomName = room.name;
-                let otherUserId: string | null = null;
-                let imageUrl: string | null = room.imageUrl || null;
-
-                if ((room.type || 'public') === 'private' && room.participants) {
-                    const otherParticipant = room.participants.find((id) => id.toString() !== user.userId);
-                    if (otherParticipant) {
-                        const otherParticipantId = otherParticipant.toString();
-                        const otherUser = await User.findById(otherParticipantId)
-                            .select('username profileImageUrl')
-                            .lean<LeanUser | null>();
-
-                        roomName = otherUser?.username || 'Unknown User';
-                        imageUrl = otherUser?.profileImageUrl || null;
-                        otherUserId = otherParticipantId;
-                    }
-                }
-
                 socket.emit('room_joined', {
-                    room: {
-                        id: room._id.toString(),
-                        name: roomName,
-                        description: room.description,
-                        type: room.type || 'public',
-                        cityKey: room.cityKey || null,
-                        imageUrl,
-                        location: toRoomLocation(room),
-                        participants: (room.participants || []).map((participant) => participant.toString()),
-                        otherUserId,
-                    },
-                    messages: formattedMessages,
-                    pagination: {
-                        hasMore,
-                        nextCursor,
-                    },
-                    lastReadAt,
+                    room: view.room,
+                    messages: view.messages,
+                    pagination: view.pagination,
+                    lastReadAt: view.lastReadAt,
                 });
 
                 socket.to(roomId).emit('user_joined', { userId: user.userId });

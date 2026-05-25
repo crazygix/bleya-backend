@@ -18,6 +18,7 @@
     "migrate:drop-legacy-room-index": "npm run build && node dist/migrations/002_drop_legacy_room_name_index.js",
     "migrate:normalize-user-refs": "npm run build && node dist/migrations/003_normalize_user_references.js",
     "db": "npm run build && node dist/scripts/db.js",
+    "diagnose-push": "npm run build && node dist/scripts/diagnose-push.js",
     "postinstall": "npm run build"
   },
   "devDependencies": {

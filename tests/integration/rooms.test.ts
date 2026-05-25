@@ -7,6 +7,7 @@ import { createTestUser, authHeader } from '../helpers/auth.js';
 import { stopRateLimiterCleanupForTests } from '../../middleware/rateLimiter.js';
 import { Room } from '../../models/Room.js';
 import { User } from '../../models/User.js';
+import { Message } from '../../models/Message.js';
 
 async function createPublicRoom(name: string) {
     return Room.create({ name, type: 'public' });
@@ -149,6 +150,101 @@ describe('Rooms API', () => {
                 .post(`/v1/rooms/${fakeId}/join`)
                 .set(authHeader(user._id.toString()))
                 .expect(404);
+        });
+    });
+
+    describe('GET /v1/rooms/joined', () => {
+        it('returns joined rooms with last message and unread count, newest first', async () => {
+            const room = await createPublicRoom('Joined Room');
+            const roomId = room._id as mongoose.Types.ObjectId;
+            const author = await createTestUser({ username: 'author' });
+            const user = await createTestUser({ joinedRooms: [roomId] });
+
+            await Message.create({ roomId, userId: author._id, text: 'hello there', parentMessageId: null });
+
+            const agent = getTestAgent();
+            const res = await agent
+                .get('/v1/rooms/joined')
+                .set(authHeader(user._id.toString()))
+                .expect(200);
+
+            assert.equal(res.body.length, 1);
+            assert.equal(res.body[0].id, roomId.toString());
+            assert.equal(res.body[0].lastMessageText, 'hello there');
+            assert.equal(res.body[0].lastMessageUsername, 'author');
+            assert.equal(res.body[0].unreadCount, 1);
+        });
+
+        it('returns an empty array when the user has joined nothing', async () => {
+            const user = await createTestUser();
+            const agent = getTestAgent();
+            const res = await agent
+                .get('/v1/rooms/joined')
+                .set(authHeader(user._id.toString()))
+                .expect(200);
+            assert.deepEqual(res.body, []);
+        });
+    });
+
+    describe('GET /v1/rooms/:roomId/members', () => {
+        it('lists members sorted by username', async () => {
+            const room = await createPublicRoom('Members Room');
+            const roomId = room._id as mongoose.Types.ObjectId;
+            await createTestUser({ username: 'charlie', joinedRooms: [roomId] });
+            await createTestUser({ username: 'alice', joinedRooms: [roomId] });
+            const viewer = await createTestUser({ username: 'bob', joinedRooms: [roomId] });
+
+            const agent = getTestAgent();
+            const res = await agent
+                .get(`/v1/rooms/${roomId}/members`)
+                .set(authHeader(viewer._id.toString()))
+                .expect(200);
+
+            const names = res.body.map((m: { username: string }) => m.username);
+            assert.deepEqual(names, ['alice', 'bob', 'charlie']);
+        });
+
+        it('rejects a non-member', async () => {
+            const room = await createPublicRoom('Closed Room');
+            const outsider = await createTestUser({ username: 'outsider' });
+            const agent = getTestAgent();
+            await agent
+                .get(`/v1/rooms/${room._id}/members`)
+                .set(authHeader(outsider._id.toString()))
+                .expect(403);
+        });
+    });
+
+    describe('POST /v1/rooms/:roomId/read', () => {
+        it('marks a joined room as read and clears the unread count', async () => {
+            const room = await createPublicRoom('Read Room');
+            const roomId = room._id as mongoose.Types.ObjectId;
+            const author = await createTestUser({ username: 'author' });
+            const user = await createTestUser({ joinedRooms: [roomId] });
+            await Message.create({ roomId, userId: author._id, text: 'unread message', parentMessageId: null });
+
+            const agent = getTestAgent();
+            const read = await agent
+                .post(`/v1/rooms/${roomId}/read`)
+                .set(authHeader(user._id.toString()))
+                .expect(200);
+            assert.ok(typeof read.body.lastReadAt === 'number');
+
+            const joined = await agent
+                .get('/v1/rooms/joined')
+                .set(authHeader(user._id.toString()))
+                .expect(200);
+            assert.equal(joined.body[0].unreadCount, 0);
+        });
+
+        it('rejects marking a room the user has not joined', async () => {
+            const room = await createPublicRoom('Not Joined');
+            const user = await createTestUser();
+            const agent = getTestAgent();
+            await agent
+                .post(`/v1/rooms/${room._id}/read`)
+                .set(authHeader(user._id.toString()))
+                .expect(400);
         });
     });
 });

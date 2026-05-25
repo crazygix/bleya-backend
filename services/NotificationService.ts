@@ -62,6 +62,55 @@ type NotificationsQuery = {
     createdAt?: { $lt: Date };
 };
 
+export interface ReplyNotificationEvent {
+    targetUserId: string;
+    payload: {
+        id: string;
+        recipient: string;
+        sender: {
+            id: string;
+            username: string;
+            profileImageUrl: string | null;
+        };
+        type: 'reply';
+        roomId: string;
+        roomName: string;
+        roomType: 'public' | 'private';
+        messageId: string;
+        threadId: string;
+        parentMessageText: string | null;
+        replyText: string;
+        previewText: string;
+        read: boolean;
+        isDismissed: boolean;
+        createdAt: number;
+        updatedAt: number;
+    };
+}
+
+function resolveNotificationRoomName(
+    notification: PopulatedNotification,
+    targetUserId: string
+): string {
+    const fallbackName = notification.room.name || 'Unknown Room';
+    if (notification.room.type !== 'private' || !notification.room.participants) {
+        return fallbackName;
+    }
+
+    const otherParticipant = notification.room.participants.find((participant) => {
+        if (participant instanceof mongoose.Types.ObjectId) {
+            return participant.toString() !== targetUserId;
+        }
+        return participant._id.toString() !== targetUserId;
+    });
+
+    if (!otherParticipant || otherParticipant instanceof mongoose.Types.ObjectId) {
+        return fallbackName;
+    }
+
+    return (otherParticipant as PopulatedNotificationParticipant).username || fallbackName;
+}
+
 export class NotificationService {
     static async createReplyNotifications({
         replyMessageId,
@@ -93,6 +142,63 @@ export class NotificationService {
             userId: notification.recipient.toString(),
             notificationId: notification._id.toString(),
         }));
+    }
+
+    /**
+     * Loads the given notifications and builds the per-recipient
+     * `new_notification` event payloads. The caller is responsible for the
+     * actual transport (emitting to each target's user room).
+     */
+    static async buildReplyNotificationEvents(
+        notificationIds: string[]
+    ): Promise<ReplyNotificationEvent[]> {
+        const objectIds = notificationIds.map((id) => new mongoose.Types.ObjectId(id));
+        if (objectIds.length === 0) {
+            return [];
+        }
+
+        const populatedNotifications = await Notification.find({ _id: { $in: objectIds } })
+            .select('recipient sender type room message thread read isDismissed createdAt updatedAt')
+            .populate('sender', 'username profileImageUrl')
+            .populate({
+                path: 'room',
+                select: 'name type participants',
+                populate: { path: 'participants', select: 'username' },
+            })
+            .populate('message', 'text')
+            .populate('thread', 'text')
+            .lean<PopulatedNotification[]>();
+
+        return populatedNotifications.map((notification) => {
+            const targetUserId = notification.recipient.toString();
+            const roomName = resolveNotificationRoomName(notification, targetUserId);
+
+            return {
+                targetUserId,
+                payload: {
+                    id: notification._id.toString(),
+                    recipient: targetUserId,
+                    sender: {
+                        id: notification.sender._id.toString(),
+                        username: notification.sender.username || 'Unknown',
+                        profileImageUrl: notification.sender.profileImageUrl || null,
+                    },
+                    type: notification.type,
+                    roomId: notification.room._id.toString(),
+                    roomName,
+                    roomType: notification.room.type || 'public',
+                    messageId: notification.message._id.toString(),
+                    threadId: notification.thread._id.toString(),
+                    parentMessageText: notification.thread.text || null,
+                    replyText: notification.message.text || '',
+                    previewText: notification.message.text ? notification.message.text.substring(0, 100) : '',
+                    read: notification.read,
+                    isDismissed: notification.isDismissed || false,
+                    createdAt: notification.createdAt.getTime(),
+                    updatedAt: notification.updatedAt.getTime(),
+                },
+            };
+        });
     }
 
     static async getNotifications(userId: string, limit = 20, before?: Date): Promise<{

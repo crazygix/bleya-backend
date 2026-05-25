@@ -72,4 +72,16 @@ describe('Error handling', () => {
             .set(authHeader(user._id.toString()))
             .expect(400);
     });
+
+    it('returns a JSON 404 in the standard error shape for unmatched routes', async () => {
+        const agent = getTestAgent();
+
+        const res = await agent
+            .get('/v1/this-route-does-not-exist')
+            .expect(404);
+
+        assert.equal(res.body.error.code, 'NOT_FOUND');
+        assert.ok(typeof res.body.error.message === 'string');
+        assert.ok(res.body.error.message.length > 0);
+    });
 });

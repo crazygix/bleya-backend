@@ -1,6 +1,6 @@
 ## Backend Architecture Improvements TODO
 
-Last reviewed: 2026-04-14
+Last reviewed: 2026-05-25
 
 This file tracks architecture work that still remains after the refactors
 already landed. It is intended to reflect the current codebase, not the
@@ -15,26 +15,14 @@ original pre-refactor checklist.
 - [x] API versioning under `/v1/...`
 - [x] Socket.IO event rate limiting for `join_room` and `send_message` (`server/socket.ts`)
 - [x] Baseline automated test suite in `tests/`
+- [x] Service-layer extraction for rooms: `routes/rooms.ts` is now a thin controller. Room listing/detail aggregation, member listing, read pointers, the direct-message lifecycle, and block/unblock orchestration live in `services/roomService.ts` and `services/directMessageService.ts`.
+- [x] Socket.IO orchestration moved into services: `join_room` business logic (`roomService.buildRoomJoinView`), room summary fanout recipients (`roomService.getRoomSummaryRecipientIds`), and reply-notification event building (`NotificationService.buildReplyNotificationEvents`). `server/socket.ts` now only handles transport.
 
 ## Remaining
 
 ### High Priority
 
-#### 1. Finish service-layer extraction
-**Status:** Partially complete  
-**Files:** `routes/rooms.ts`, `server/socket.ts`
-
-Completed:
-- `services/authService.ts`, `services/userService.ts`, `services/roomService.ts`, and `services/messageService.ts` exist.
-- `routes/auth.ts`, `routes/users.ts`, and parts of `routes/messages.ts` are already thin controllers.
-
-Remaining:
-- Move room listing/detail aggregation, member listing, read pointers, direct-message lifecycle, and block/unblock orchestration out of `routes/rooms.ts`.
-- Move more Socket.IO orchestration into services, especially `join_room`, room summary fanout, and notification fanout.
-
-**Reference:** `core/architecture_rules.ts` section 9
-
-#### 2. Keep HTTP input handling consistent
+#### 1. Keep HTTP input handling consistent
 **Status:** Mostly complete  
 **Files:** `services/authService.ts`, `services/userService.ts`, `services/messageService.ts`, `routes/rooms.ts`
 
@@ -49,7 +37,7 @@ Remaining:
 
 ### Medium Priority
 
-#### 3. Migration workflow
+#### 2. Migration workflow
 **Status:** Partially complete  
 **Files:** `migrations/001_seed_public_rooms.ts`, `migrations/002_drop_legacy_room_name_index.ts`, `migrations/003_normalize_user_references.ts`
 

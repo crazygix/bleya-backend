@@ -291,6 +291,11 @@ export async function sendPushNotifications(input: SendPushNotificationsInput): 
             token: token.token,
             notification: presentation,
             data: buildDataPayload(input, recipient),
+            android: {
+                priority: 'high',
+                notification: { channelId: 'bleya_messages' },
+            },
+            apns: { headers: { 'apns-priority': '10' } },
         });
         tokensInSendOrder.push(token);
     }
