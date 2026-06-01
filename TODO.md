@@ -19,11 +19,12 @@ Audit all errors returned by the backend that can surface to the end user and en
 
 ### 2. Legal / policies before go-live
 Backend-side requirements to support legal compliance.
-- Data handling per Privacy Policy / GDPR (retention, export, deletion)
-- Account deletion endpoint (required by Apple App Store and Google Play)
-- Data export endpoint (GDPR right to access)
-- Audit what PII is stored and where
-- Terms acceptance tracking (if required)
+- [x] Account deletion endpoint — `DELETE /v1/users/me` (hard-delete cascade across all collections, R2 image purge, refresh cookie cleared). Required by Apple App Store and Google Play.
+- [x] Data export endpoint — `GET /v1/users/me/export` (GDPR right to access; returns JSON).
+- [x] PII audit — documented in `services/accountService.ts` (account, messages, rooms, DM participants, blocks, notifications, passkeys, identities, auth challenges, push tokens, profile image in R2).
+- [ ] Terms-acceptance tracking (if required) — not implemented.
+- [ ] Privacy Policy retention guarantees — confirm copy matches actual data lifecycles, document any backups/log retention.
+- [ ] Confirm DM "other participant" display when their counterpart deletes — currently renders as `Unknown User` (the deleted side is left orphaned in `room.participants`). Decide if a "Deleted user" label is preferable.
 
 ### 3. README cleanup
 Go through all `README.md` files in the repo and make them short and readable.

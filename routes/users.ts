@@ -13,6 +13,7 @@ import {
     updateProfile,
     updateProfileImage,
 } from '../services/userService.js';
+import { exportUserData, deleteUserAccount } from '../services/accountService.js';
 import type { LeanUser } from '../types/lean.js';
 
 const router = express.Router();
@@ -111,6 +112,19 @@ router.get('/blocked', authenticateUser, asyncHandler(async (req: AuthRequest, r
         .filter((item): item is NonNullable<typeof item> => item !== null);
 
     res.json(response);
+}));
+
+router.get('/me/export', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
+    const data = await exportUserData(req.user!.userId);
+    res.setHeader('Content-Disposition', `attachment; filename="bleya-data-export-${req.user!.userId}.json"`);
+    res.json(data);
+}));
+
+router.delete('/me', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
+    const result = await deleteUserAccount(req.user!.userId);
+    // End the session: the account no longer exists, so revoke the refresh cookie.
+    res.clearCookie('refreshToken', { path: '/' });
+    res.json(result);
 }));
 
 router.get('/:userId([0-9a-fA-F]{24})', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
