@@ -52,7 +52,7 @@ export function createMessageService(deps: MessageServiceDeps) {
 
         const senderInRoom = await userRepo.existsWithRoom(input.userId, roomObjectId);
         if (!senderInRoom) {
-            throw new AppError(ErrorCode.FORBIDDEN, 'You are not a member of this room', 403);
+            throw new AppError(ErrorCode.FORBIDDEN, 'You are not a member of this room.', 403);
         }
 
         let privateRoomOtherParticipantId: mongoose.Types.ObjectId | null = null;
@@ -61,12 +61,12 @@ export function createMessageService(deps: MessageServiceDeps) {
             const senderIsParticipant = participants.some((id) => id.equals(senderObjectId));
 
             if (!senderIsParticipant) {
-                throw new AppError(ErrorCode.FORBIDDEN, 'You are not allowed to message in this chat', 403);
+                throw new AppError(ErrorCode.FORBIDDEN, 'You are not allowed to message in this chat.', 403);
             }
 
             const otherParticipant = participants.find((id) => !id.equals(senderObjectId));
             if (!otherParticipant) {
-                throw new ValidationError('Private chat participants are invalid');
+                throw new ValidationError("We couldn't open that chat. Please try again.");
             }
 
             privateRoomOtherParticipantId = otherParticipant;
@@ -107,11 +107,11 @@ export function createMessageService(deps: MessageServiceDeps) {
 
             const parentMessage = await messageRepo.findByIdLean(input.parentMessageId);
             if (!parentMessage) {
-                throw new AppError(ErrorCode.NOT_FOUND, 'Parent message not found', 404);
+                throw new AppError(ErrorCode.NOT_FOUND, "We couldn't find the message you're replying to.", 404);
             }
 
             if (parentMessage.roomId.toString() !== input.roomId) {
-                throw new ValidationError('Parent message not in this room');
+                throw new ValidationError('You can only reply to messages in this chat.');
             }
         }
 

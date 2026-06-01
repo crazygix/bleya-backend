@@ -5,7 +5,7 @@ const OBJECT_ID_REGEX = /^[0-9a-fA-F]{24}$/;
 
 export function validateObjectId(id: string, fieldName: string): mongoose.Types.ObjectId {
     if (!OBJECT_ID_REGEX.test(id)) {
-        throw new ValidationError(`Invalid ${fieldName} format`);
+        throw new ValidationError(`That ${fieldName} isn't valid.`);
     }
     return new mongoose.Types.ObjectId(id);
 }

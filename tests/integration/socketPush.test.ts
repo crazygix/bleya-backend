@@ -282,9 +282,11 @@ describe('Socket push integration', () => {
                 'VALIDATION_ERROR',
                 'VALIDATION_ERROR',
             ]);
+            // Friendly, generic copy that doesn't leak the internal event name.
+            const expectedMessage = "We couldn't process that request. Please try again.";
             assert.deepEqual(errors.map((payload) => payload.error?.message), [
-                'open_thread payload must be an object',
-                'send_message payload must be an object',
+                expectedMessage,
+                expectedMessage,
             ]);
         } finally {
             socket.disconnect();

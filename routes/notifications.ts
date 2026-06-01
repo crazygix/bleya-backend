@@ -50,7 +50,7 @@ function resolveDirectRoomName(
 
 function parsePushToken(value: unknown): string {
     if (typeof value !== 'string' || value.trim().length === 0) {
-        throw new ValidationError('Push token is required');
+        throw new ValidationError("We couldn't set up notifications for this device. Please try again.");
     }
 
     return value.trim();
@@ -58,7 +58,7 @@ function parsePushToken(value: unknown): string {
 
 function parsePushPlatform(value: unknown): 'ios' | 'android' {
     if (typeof value !== 'string' || !PUSH_PLATFORMS.has(value)) {
-        throw new ValidationError('Push platform must be "ios" or "android"');
+        throw new ValidationError("We couldn't set up notifications for this device. Please try again.");
     }
 
     return value as 'ios' | 'android';
@@ -148,7 +148,7 @@ router.post('/:id/read', authenticateUser, asyncHandler(async (req: AuthRequest,
     const { id } = req.params;
 
     if (!OBJECT_ID_REGEX.test(id)) {
-        throw new ValidationError('Invalid notification ID format');
+        throw new ValidationError("That notification isn't valid.");
     }
 
     await NotificationService.markAsRead(id, userId);
@@ -166,7 +166,7 @@ router.post('/:id/dismiss', authenticateUser, asyncHandler(async (req: AuthReque
     const { id } = req.params;
 
     if (!OBJECT_ID_REGEX.test(id)) {
-        throw new ValidationError('Invalid notification ID format');
+        throw new ValidationError("That notification isn't valid.");
     }
 
     await NotificationService.dismissNotification(id, userId);

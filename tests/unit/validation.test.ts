@@ -26,6 +26,6 @@ test('validateObjectId returns an ObjectId for valid input', () => {
 test('validateObjectId throws ValidationError for invalid input', () => {
     assert.throws(
         () => validateObjectId('not-valid', 'user ID'),
-        (err: Error) => err.message.includes('Invalid user ID format')
+        (err: Error) => err.message.includes("That user ID isn't valid.")
     );
 });

@@ -583,7 +583,7 @@ export async function markRoomReadForUser(
 
     const isJoined = user.joinedRooms.some((id) => id.equals(roomObjectId));
     if (!isJoined) {
-        throw new ValidationError('You are not a member of this room.');
+        throw new AppError(ErrorCode.FORBIDDEN, 'You are not a member of this room.', 403);
     }
 
     const now = new Date();
@@ -705,7 +705,7 @@ export async function buildRoomJoinView(
     }
 
     if (!isPrivateRoomParticipant(room, userId)) {
-        throw new AppError(ErrorCode.FORBIDDEN, 'You are not allowed to join this chat', 403);
+        throw new AppError(ErrorCode.FORBIDDEN, 'You are not allowed to join this chat.', 403);
     }
 
     const userDoc = await User.findById(userId)
@@ -726,7 +726,7 @@ export async function buildRoomJoinView(
             });
 
             if (publicRoomCount >= MAX_PUBLIC_ROOMS) {
-                throw new ValidationError('You can only join up to 5 group chats at a time');
+                throw new ValidationError('You can only join up to 5 group chats at a time.');
             }
         }
 

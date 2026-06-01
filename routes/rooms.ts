@@ -30,7 +30,7 @@ function parseSearchQuery(value: unknown): string | undefined {
     }
 
     if (typeof value !== 'string') {
-        throw new ValidationError('search must be a string.');
+        throw new ValidationError('Search needs to be text.');
     }
 
     const sanitized = sanitizePlainText(value, {

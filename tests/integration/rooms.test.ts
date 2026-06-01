@@ -244,7 +244,7 @@ describe('Rooms API', () => {
             await agent
                 .post(`/v1/rooms/${room._id}/read`)
                 .set(authHeader(user._id.toString()))
-                .expect(400);
+                .expect(403);
         });
     });
 });

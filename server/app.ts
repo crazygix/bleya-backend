@@ -107,26 +107,15 @@ export function createApp(): express.Express {
         res.json({ message: 'Gde si bre zverino?' });
     });
 
+    // Keep the public payload minimal: it only needs to signal liveness to the
+    // load balancer. Internal detail (env, port, memory, uptime, DB internals)
+    // stays out of an unauthenticated endpoint.
     app.get('/health', (_req: Request, res: Response) => {
-        const health = {
-            status: 'ok',
+        const isDbConnected = mongoose.connection.readyState === 1;
+        res.status(isDbConnected ? 200 : 503).json({
+            status: isDbConnected ? 'ok' : 'degraded',
             timestamp: Date.now(),
-            environment: config.nodeEnv,
-            port: config.port,
-            mongodb: {
-                status: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
-                readyState: mongoose.connection.readyState,
-            },
-            memory: {
-                used: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
-                total: Math.round(process.memoryUsage().heapTotal / 1024 / 1024),
-                rss: Math.round(process.memoryUsage().rss / 1024 / 1024),
-            },
-            uptime: Math.round(process.uptime()),
-        };
-
-        const statusCode = mongoose.connection.readyState === 1 ? 200 : 503;
-        res.status(statusCode).json(health);
+        });
     });
 
     app.use(notFoundHandler);

@@ -39,7 +39,7 @@ router.get('/:messageId/thread', authenticateUser, asyncHandler(async (req: Auth
     const { messageId } = req.params;
 
     if (!isValidObjectId(messageId)) {
-        throw new ValidationError('Invalid message ID format');
+        throw new ValidationError("That message isn't valid.");
     }
 
     const parentMessage = await Message.findById(messageId).lean<LeanMessage | null>();
@@ -73,7 +73,7 @@ router.get('/:messageId', authenticateUser, asyncHandler(async (req: AuthRequest
     const { messageId } = req.params;
 
     if (!isValidObjectId(messageId)) {
-        throw new ValidationError('Invalid message ID format');
+        throw new ValidationError("That message isn't valid.");
     }
 
     const message = await Message.findById(messageId).lean<LeanMessage | null>();

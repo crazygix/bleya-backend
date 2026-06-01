@@ -22,7 +22,7 @@ router.get(
         const lng = typeof lngParam === 'string' ? parseFloat(lngParam) : NaN;
 
         if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
-            throw new ValidationError('Invalid lat/lng coordinates');
+            throw new ValidationError("We couldn't read your location. Please try again.");
         }
 
         // Backend-controlled parameters

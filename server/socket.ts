@@ -123,7 +123,7 @@ function parseOptionalSocketString(value: unknown, fieldName: string): string | 
     }
 
     if (typeof value !== 'string' || value.trim().length === 0) {
-        throw new ValidationError(`${fieldName} must be a non-empty string`);
+        throw new ValidationError(`${fieldName} isn't valid.`);
     }
 
     return value.trim();
@@ -131,7 +131,7 @@ function parseOptionalSocketString(value: unknown, fieldName: string): string | 
 
 function parseSocketObjectPayload(value: unknown, eventName: string): Record<string, unknown> {
     if (!value || typeof value !== 'object' || Array.isArray(value)) {
-        throw new ValidationError(`${eventName} payload must be an object`);
+        throw new ValidationError("We couldn't process that request. Please try again.");
     }
 
     return value as Record<string, unknown>;
@@ -328,7 +328,7 @@ export function setupSocketIO(server: HTTPServer) {
                     userId: user.userId,
                     error: error instanceof Error ? error.message : String(error),
                 });
-                emitSocketError(socket, ErrorCode.INTERNAL_ERROR, 'Failed to join room');
+                emitSocketError(socket, ErrorCode.INTERNAL_ERROR, "We couldn't open that chat. Please try again.");
             }
         });
 
@@ -342,7 +342,7 @@ export function setupSocketIO(server: HTTPServer) {
                 const payload = parseOpenThreadPayload(data);
 
                 if (!user.roomId) {
-                    emitSocketError(socket, ErrorCode.VALIDATION_ERROR, 'Not in a room');
+                    emitSocketError(socket, ErrorCode.VALIDATION_ERROR, 'Open a chat first.');
                     return;
                 }
 
@@ -357,12 +357,12 @@ export function setupSocketIO(server: HTTPServer) {
                 }
 
                 if (threadMessage.parentMessageId) {
-                    emitSocketError(socket, ErrorCode.VALIDATION_ERROR, 'Thread must reference a top-level message');
+                    emitSocketError(socket, ErrorCode.VALIDATION_ERROR, 'You can only open a thread on a main message.');
                     return;
                 }
 
                 if (threadMessage.roomId.toString() !== user.roomId) {
-                    emitSocketError(socket, ErrorCode.FORBIDDEN, 'Thread does not belong to the active room');
+                    emitSocketError(socket, ErrorCode.FORBIDDEN, 'That reply belongs to a different chat.');
                     return;
                 }
 
@@ -382,7 +382,7 @@ export function setupSocketIO(server: HTTPServer) {
                     roomId: user.roomId,
                     error: error instanceof Error ? error.message : String(error),
                 });
-                emitSocketError(socket, ErrorCode.INTERNAL_ERROR, 'Failed to open thread');
+                emitSocketError(socket, ErrorCode.INTERNAL_ERROR, "We couldn't open that thread. Please try again.");
             }
         });
 
@@ -409,7 +409,7 @@ export function setupSocketIO(server: HTTPServer) {
                 const payload = parseSendMessagePayload(data);
 
                 if (!user.roomId) {
-                    emitSocketError(socket, ErrorCode.VALIDATION_ERROR, 'Not in a room');
+                    emitSocketError(socket, ErrorCode.VALIDATION_ERROR, 'Open a chat first.');
                     return;
                 }
 
@@ -469,7 +469,7 @@ export function setupSocketIO(server: HTTPServer) {
                     roomId: user.roomId,
                     error: error instanceof Error ? error.message : String(error),
                 });
-                emitSocketError(socket, ErrorCode.INTERNAL_ERROR, 'Failed to send message');
+                emitSocketError(socket, ErrorCode.INTERNAL_ERROR, "We couldn't send that message. Please try again.");
             }
         });
 
