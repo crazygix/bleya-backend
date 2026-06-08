@@ -86,6 +86,60 @@ describe('Account API', () => {
             assert.match(res.headers['content-disposition'] || '', /attachment/);
         });
 
+        it('includes notifications, blocks-by-others, inactive blocks, hidden rooms and read pointers', async () => {
+            const room = await createPublicRoom('Full Export');
+            const roomId = room._id as mongoose.Types.ObjectId;
+            const me = await createTestUser({ username: 'alice', joinedRooms: [roomId] });
+            const other = await createTestUser({ username: 'bob' });
+
+            const root = await Message.create({ roomId, userId: me._id, text: 'root', parentMessageId: null });
+            const reply = await Message.create({ roomId, userId: other._id, text: 'reply', parentMessageId: root._id });
+            await Notification.create({
+                recipient: me._id,
+                sender: other._id,
+                type: 'reply',
+                room: roomId,
+                message: reply._id,
+                thread: root._id,
+            });
+
+            // Another user blocked me (data about me, created by them).
+            await UserBlock.create({ blockerUserId: other._id, blockedUserId: me._id, roomId, isActive: true });
+            // A block I created, then lifted (inactive) — must still appear.
+            await UserBlock.create({ blockerUserId: me._id, blockedUserId: other._id, roomId, isActive: false });
+
+            const dm = await createDirectRoom(me._id.toString(), other._id.toString());
+            await User.updateOne({ _id: me._id }, {
+                $addToSet: { hiddenDirectRooms: dm._id },
+                $push: { roomReadPointers: { roomId, lastReadAt: new Date() } },
+            });
+
+            const agent = getTestAgent();
+            const res = await agent
+                .get('/v1/users/me/export')
+                .set(authHeader(me._id.toString()))
+                .expect(200);
+
+            assert.equal(res.body.notifications.length, 1);
+            assert.equal(res.body.notifications[0].role, 'recipient');
+            assert.equal(res.body.notifications[0].roomId, roomId.toString());
+
+            assert.equal(res.body.blockedByOthers.length, 1);
+            assert.equal(res.body.blockedByOthers[0].active, true);
+            // Art. 15(4): the blocker's identity must NOT be disclosed.
+            assert.ok(!('blockerUserId' in res.body.blockedByOthers[0]));
+            assert.ok(!('blockedUserId' in res.body.blockedByOthers[0]));
+
+            // Inactive block I created is still included, flagged active:false.
+            assert.equal(res.body.blockedUsers.length, 1);
+            assert.equal(res.body.blockedUsers[0].active, false);
+
+            assert.equal(res.body.account.hiddenDirectRoomIds.length, 1);
+            assert.equal(res.body.account.hiddenDirectRoomIds[0], (dm._id as mongoose.Types.ObjectId).toString());
+            assert.equal(res.body.account.roomReadPointers.length, 1);
+            assert.equal(res.body.account.roomReadPointers[0].roomId, roomId.toString());
+        });
+
         it('returns 401 without auth', async () => {
             const agent = getTestAgent();
             await agent.get('/v1/users/me/export').expect(401);

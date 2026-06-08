@@ -35,6 +35,8 @@ export interface UserDataExport {
         createdAt: number;
         updatedAt: number;
         lastLogin: number;
+        hiddenDirectRoomIds: string[];
+        roomReadPointers: Array<{ roomId: string; lastReadAt: number | null }>;
     };
     linkedProviders: Array<{
         provider: string;
@@ -67,6 +69,21 @@ export interface UserDataExport {
     blockedUsers: Array<{
         blockedUserId: string;
         blockedAt: number | null;
+        active: boolean;
+    }>;
+    // Art. 15(4): the fact/time that others blocked this user is the subject's
+    // personal data, but the blocker's identity is a third party's data and is
+    // intentionally withheld.
+    blockedByOthers: Array<{
+        blockedAt: number | null;
+        active: boolean;
+    }>;
+    notifications: Array<{
+        type: string;
+        role: 'recipient' | 'sender';
+        roomId: string;
+        read: boolean;
+        createdAt: number | null;
     }>;
 }
 
@@ -75,6 +92,8 @@ export async function exportUserData(userId: string): Promise<UserDataExport> {
 
     const user = await User.findById(userId).lean<LeanFullUser & {
         joinedRooms?: mongoose.Types.ObjectId[];
+        hiddenDirectRooms?: mongoose.Types.ObjectId[];
+        roomReadPointers?: Array<{ roomId: mongoose.Types.ObjectId; lastReadAt?: Date | null }>;
     } | null>();
 
     if (!user) {
@@ -83,7 +102,7 @@ export async function exportUserData(userId: string): Promise<UserDataExport> {
 
     const joinedRoomIds = user.joinedRooms || [];
 
-    const [identities, passkeys, pushTokens, rooms, messages, blocks] = await Promise.all([
+    const [identities, passkeys, pushTokens, rooms, messages, blocks, blockedByOthers, notifications] = await Promise.all([
         UserIdentity.find({ userId: userObjectId })
             .select('provider email emailVerified isPrivateRelay linkedAt lastUsedAt')
             .lean<Array<{
@@ -116,10 +135,30 @@ export async function exportUserData(userId: string): Promise<UserDataExport> {
             .select('_id roomId text parentMessageId createdAt')
             .sort({ createdAt: 1 })
             .lean<LeanMessage[]>(),
-        UserBlock.find({ blockerUserId: userObjectId, isActive: true })
-            .select('blockedUserId blockedAt')
-            .lean<Array<{ blockedUserId: mongoose.Types.ObjectId; blockedAt?: Date }>>(),
+        UserBlock.find({ blockerUserId: userObjectId })
+            .select('blockedUserId blockedAt isActive')
+            .lean<Array<{ blockedUserId: mongoose.Types.ObjectId; blockedAt?: Date; isActive?: boolean }>>(),
+        UserBlock.find({ blockedUserId: userObjectId })
+            .select('blockedAt isActive')
+            .lean<Array<{ blockedAt?: Date; isActive?: boolean }>>(),
+        Notification.find({ $or: [{ recipient: userObjectId }, { sender: userObjectId }] })
+            .select('type room recipient sender read createdAt')
+            .sort({ createdAt: 1 })
+            .lean<Array<{
+                type: string;
+                room: mongoose.Types.ObjectId;
+                recipient: mongoose.Types.ObjectId;
+                sender: mongoose.Types.ObjectId;
+                read?: boolean;
+                createdAt?: Date;
+            }>>(),
     ]);
+
+    logger.info('account.data_exported', {
+        userId,
+        messageCount: messages.length,
+        notificationCount: notifications.length,
+    });
 
     return {
         exportedAt: Date.now(),
@@ -131,6 +170,11 @@ export async function exportUserData(userId: string): Promise<UserDataExport> {
             createdAt: user.createdAt.getTime(),
             updatedAt: user.updatedAt.getTime(),
             lastLogin: user.lastLogin.getTime(),
+            hiddenDirectRoomIds: (user.hiddenDirectRooms || []).map((roomId) => roomId.toString()),
+            roomReadPointers: (user.roomReadPointers || []).map((pointer) => ({
+                roomId: pointer.roomId.toString(),
+                lastReadAt: pointer.lastReadAt ? pointer.lastReadAt.getTime() : null,
+            })),
         },
         linkedProviders: identities.map((identity) => ({
             provider: identity.provider,
@@ -171,6 +215,18 @@ export async function exportUserData(userId: string): Promise<UserDataExport> {
         blockedUsers: blocks.map((block) => ({
             blockedUserId: block.blockedUserId.toString(),
             blockedAt: block.blockedAt ? block.blockedAt.getTime() : null,
+            active: block.isActive ?? false,
+        })),
+        blockedByOthers: blockedByOthers.map((block) => ({
+            blockedAt: block.blockedAt ? block.blockedAt.getTime() : null,
+            active: block.isActive ?? false,
+        })),
+        notifications: notifications.map((notification) => ({
+            type: notification.type,
+            role: notification.recipient.toString() === userId ? 'recipient' as const : 'sender' as const,
+            roomId: notification.room.toString(),
+            read: notification.read ?? false,
+            createdAt: notification.createdAt ? notification.createdAt.getTime() : null,
         })),
     };
 }

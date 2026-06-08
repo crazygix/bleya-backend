@@ -4,9 +4,13 @@ import { isValidUsername } from '../utils/username.js';
 const userSchema = new mongoose.Schema({
     refreshTokenHash: {
         type: String,
+        // Excluded from queries by default so it can never leak through a raw
+        // user response; the refresh flow selects it explicitly where needed.
+        select: false,
     },
     refreshTokenExpiresAt: {
         type: Date,
+        select: false,
     },
     username: {
         type: String,
