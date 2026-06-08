@@ -75,6 +75,18 @@ const DEFAULT_REDACT_FIELDS = [
   'secret',
   'api_key',
   'apikey',
+  // User-generated content / profile PII — redacted so message text, bios and
+  // handles never persist in request/response logs (keeps logs consistent with
+  // the Art. 17 hard-delete; otherwise erased content lingers in the log sink).
+  // 'message' is intentionally NOT redacted: it carries status/error strings,
+  // not message content (message content lives under 'text').
+  'text',
+  'bio',
+  'username',
+  'replyText',
+  'previewText',
+  'parentMessageText',
+  'lastMessageText',
 ];
 
 function requiredEnv(name: string, options?: { defaultInTest?: string }): string {

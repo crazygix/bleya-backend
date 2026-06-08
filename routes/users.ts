@@ -13,9 +13,20 @@ import {
     updateProfile,
     updateProfileImage,
 } from '../services/userService.js';
+import { exportUserData, deleteUserAccount } from '../services/accountService.js';
+import { createRateLimiter } from '../middleware/rateLimiter.js';
+import { config } from '../config/index.js';
 import type { LeanUser } from '../types/lean.js';
 
 const router = express.Router();
+
+const PROD = config.isProduction;
+
+// The data export is expensive and returns the user's entire dataset — throttle
+// it tightly to blunt scraping/exfiltration via a stolen token.
+const exportLimiter = createRateLimiter({ name: 'users.export', limit: PROD ? 5 : 100 });
+// Public-profile lookups are enumerable; cap them to limit bulk harvesting.
+const publicProfileLimiter = createRateLimiter({ name: 'users.public-profile', limit: PROD ? 120 : 1000 });
 
 interface LeanActiveUserBlock {
     _id: mongoose.Types.ObjectId;
@@ -113,7 +124,20 @@ router.get('/blocked', authenticateUser, asyncHandler(async (req: AuthRequest, r
     res.json(response);
 }));
 
-router.get('/:userId([0-9a-fA-F]{24})', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
+router.get('/me/export', authenticateUser, exportLimiter, asyncHandler(async (req: AuthRequest, res: express.Response) => {
+    const data = await exportUserData(req.user!.userId);
+    res.setHeader('Content-Disposition', `attachment; filename="bleya-data-export-${req.user!.userId}.json"`);
+    res.json(data);
+}));
+
+router.delete('/me', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
+    const result = await deleteUserAccount(req.user!.userId);
+    // End the session: the account no longer exists, so revoke the refresh cookie.
+    res.clearCookie('refreshToken', { path: '/' });
+    res.json(result);
+}));
+
+router.get('/:userId([0-9a-fA-F]{24})', authenticateUser, publicProfileLimiter, asyncHandler(async (req: AuthRequest, res: express.Response) => {
     const profile = await getPublicProfile(req.params.userId);
     res.json(profile);
 }));

@@ -11,6 +11,7 @@ import userRoutes from '../routes/users.js';
 import messageRoutes from '../routes/messages.js';
 import notificationRoutes from '../routes/notifications.js';
 import citiesRoutes from '../routes/cities.js';
+import reportRoutes from '../routes/reports.js';
 import { errorHandler, notFoundHandler } from '../middleware/errorHandler.js';
 import { httpRequestLogger } from '../middleware/httpRequestLogger.js';
 import { buildCorsOptions } from '../utils/cors.js';
@@ -25,6 +26,7 @@ function createApiRouter(): express.Router {
     apiV1Router.use('/messages', messageRoutes);
     apiV1Router.use('/notifications', notificationRoutes);
     apiV1Router.use('/cities', citiesRoutes);
+    apiV1Router.use('/reports', reportRoutes);
     return apiV1Router;
 }
 
