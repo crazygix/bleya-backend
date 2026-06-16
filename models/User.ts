@@ -72,6 +72,21 @@ const userSchema = new mongoose.Schema({
             },
         },
     ],
+    // Moderation enforcement (admin API). 'banned' blocks connect + send
+    // indefinitely; 'suspended' blocks until suspendedUntil (null = indefinite).
+    status: {
+        type: String,
+        enum: ['active', 'suspended', 'banned'],
+        default: 'active',
+    },
+    suspendedUntil: {
+        type: Date,
+        default: null,
+    },
+    enforcementReason: {
+        type: String,
+        default: '',
+    },
 });
 
 // Unique on non-empty usernames only. Sparse alone doesn't work here because

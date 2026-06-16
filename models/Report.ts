@@ -45,6 +45,24 @@ const reportSchema = new mongoose.Schema({
         enum: REPORT_STATUSES,
         default: 'open',
     },
+    // Set when a moderator handles the report via the admin API. reviewedBy holds
+    // the actor label (env-key actor today; a moderator user id later).
+    reviewedBy: {
+        type: String,
+        default: '',
+    },
+    reviewedAt: {
+        type: Date,
+    },
+    resolutionNote: {
+        type: String,
+        default: '',
+    },
+    // When the report's personal data (reporter/reported ids) may be purged after
+    // a referenced account is deleted. Set by the account-deletion anonymization.
+    retainUntil: {
+        type: Date,
+    },
 }, {
     timestamps: true,
 });

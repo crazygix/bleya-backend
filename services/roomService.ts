@@ -287,7 +287,7 @@ export async function getJoinedRoomsForUser(userId: string): Promise<JoinedRoomD
     const joinedRoomIds = rooms.map((room) => room._id);
 
     const lastMessagesRaw = await Message.aggregate([
-        { $match: { roomId: { $in: joinedRoomIds }, parentMessageId: null } },
+        { $match: { roomId: { $in: joinedRoomIds }, parentMessageId: null, deletedAt: null } },
         { $sort: { createdAt: -1 } },
         {
             $group: {
@@ -322,6 +322,7 @@ export async function getJoinedRoomsForUser(userId: string): Promise<JoinedRoomD
             roomId,
             parentMessageId: null,
             userId: { $ne: currentUserObjectId },
+            deletedAt: null,
         };
         if (lastReadAt) {
             condition.createdAt = { $gt: lastReadAt };
@@ -470,7 +471,7 @@ export async function getRoomMessagesForUser(
         }
     }
 
-    const rawMessages = await Message.find(filter)
+    const rawMessages = await Message.find({ ...filter, deletedAt: null })
         .sort({ createdAt: -1, _id: -1 })
         .limit(pageSize + 1)
         .lean<LeanMessage[]>();
@@ -739,6 +740,7 @@ export async function buildRoomJoinView(
     const rawMessages = await Message.find({
         roomId: roomObjectId,
         parentMessageId: null,
+        deletedAt: null,
     })
         .sort({ createdAt: -1, _id: -1 })
         .limit(ROOM_MESSAGES_PAGE_SIZE + 1)

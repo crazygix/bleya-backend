@@ -55,6 +55,7 @@ router.post('/provider-sign-in', providerSignInLimiter, asyncHandler(async (req:
         idToken: req.body.idToken,
         rawNonce: req.body.rawNonce,
         platform: req.body.platform,
+        authorizationCode: req.body.authorizationCode,
     });
 
     setRefreshCookie(res, result.refreshToken);

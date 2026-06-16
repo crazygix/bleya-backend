@@ -4,6 +4,7 @@ import mongoose from 'mongoose';
 import { ValidationError, UnauthorizedError, NotFoundError, ErrorCode } from '../utils/errors.js';
 import { isValidUsername, normalizeUsernameInput } from '../utils/username.js';
 import { config } from '../config/index.js';
+import { captureAppleRefreshToken } from './appleAuthService.js';
 import { type UserProfileResponse, toUserProfileResponse } from './userService.js';
 import { type UserRepository, userRepository as defaultUserRepo } from '../repositories/userRepository.js';
 import {
@@ -229,9 +230,20 @@ export function createAuthService(deps: AuthServiceDeps) {
         idToken: unknown;
         rawNonce?: unknown;
         platform?: unknown;
+        authorizationCode?: unknown;
     }): Promise<AuthSessionResult & { refreshToken: string }> {
         const identity = await verifyProviderIdentity(input);
         const user = await resolveUserForVerifiedIdentity(identity);
+
+        // Capture the Apple refresh token (if the client sent an authorization
+        // code) so it can be revoked on account deletion. Best-effort no-op
+        // otherwise.
+        await captureAppleRefreshToken(
+            identity.provider,
+            identity.providerUserId,
+            normalizeOptionalString(input.authorizationCode)
+        );
+
         return issueSessionForUser(user);
     }
 

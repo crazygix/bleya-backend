@@ -6,6 +6,7 @@ import { UserBlock } from '../models/UserBlock.js';
 import { Notification } from '../models/Notification.js';
 import { PasskeyCredential } from '../models/PasskeyCredential.js';
 import { UserIdentity } from '../models/UserIdentity.js';
+import { revokeRefreshToken } from './appleAuthService.js';
 import { AuthChallenge } from '../models/AuthChallenge.js';
 import { PushToken } from '../models/PushToken.js';
 import { deleteFromR2, extractKeyFromUrl } from './r2Service.js';
@@ -318,6 +319,24 @@ export async function deleteUserAccount(userId: string): Promise<DeleteAccountRe
         $or: [{ blockerUserId: userObjectId }, { blockedUserId: userObjectId }],
     });
     const passkeysResult = await PasskeyCredential.deleteMany({ userId: userObjectId });
+
+    // Sign in with Apple: revoke the user's Apple tokens before erasing the
+    // identities (Apple Guideline 5.1.1(v)). Best-effort and never blocks
+    // deletion; no-op until Apple revocation is configured and a refresh token
+    // was captured at sign-in. revokeRefreshToken swallows its own errors.
+    try {
+        const appleIdentities = await UserIdentity.find({ userId: userObjectId, provider: 'apple' })
+            .select('+appleRefreshToken')
+            .lean<{ appleRefreshToken?: string }[]>();
+        for (const appleIdentity of appleIdentities) {
+            if (appleIdentity.appleRefreshToken) {
+                await revokeRefreshToken(appleIdentity.appleRefreshToken);
+            }
+        }
+    } catch {
+        // Best-effort: deletion proceeds regardless of revocation outcome.
+    }
+
     const identitiesResult = await UserIdentity.deleteMany({ userId: userObjectId });
     const challengesResult = await AuthChallenge.deleteMany({ userId: userObjectId });
     const pushTokensResult = await PushToken.deleteMany({ userId: userObjectId });

@@ -30,6 +30,14 @@ const userIdentitySchema = new mongoose.Schema({
         type: Boolean,
         default: false,
     },
+    // Apple refresh token (server-to-server), captured at sign-in when the client
+    // sends the authorization code. Used to revoke on account deletion (5.1.1(v)).
+    // select:false so it never leaks through a normal identity read.
+    appleRefreshToken: {
+        type: String,
+        default: '',
+        select: false,
+    },
     linkedAt: {
         type: Date,
         default: Date.now,

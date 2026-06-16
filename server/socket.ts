@@ -3,6 +3,7 @@ import { Server as HTTPServer } from 'http';
 import jwt from 'jsonwebtoken';
 import { Room } from '../models/Room.js';
 import { Message } from '../models/Message.js';
+import { User } from '../models/User.js';
 import {
     NotificationService,
     type UserNotifyTarget,
@@ -14,6 +15,7 @@ import { sendPushNotifications } from '../services/pushNotificationService.js';
 import { buildSocketCors } from '../utils/cors.js';
 import { ErrorCode, AppError, ValidationError } from '../utils/errors.js';
 import { validateObjectId } from '../utils/validation.js';
+import { isUserBlockedFromActing, type EnforcementState } from '../utils/enforcement.js';
 import { config } from '../config/index.js';
 import logger from '../utils/logger.js';
 import type { LeanMessage } from '../types/lean.js';
@@ -241,12 +243,28 @@ async function emitRoomSummaryUpdate(
     }
 }
 
+// Module-level reference to the live Socket.IO server so HTTP-triggered actions
+// (admin moderation, bans) can push real-time events. Null until setupSocketIO runs
+// (e.g. in tests), so all helpers below are no-ops until then.
+let ioRef: SocketIOServer | null = null;
+
+// Push a removal so connected clients drop a moderated message immediately.
+export function emitMessageRemoved(roomId: string, payload: { messageId: string; roomId: string }): void {
+    ioRef?.to(roomId).emit('message_removed', payload);
+}
+
+// Force-disconnect all of a user's live sockets (used when banning/suspending).
+export function disconnectUser(userId: string): void {
+    ioRef?.in(`user:${userId}`).disconnectSockets(true);
+}
+
 export function setupSocketIO(server: HTTPServer) {
     const io = new SocketIOServer(server, {
         cors: buildSocketCors(),
     });
+    ioRef = io;
 
-    io.use((rawSocket, next) => {
+    io.use(async (rawSocket, next) => {
         const socket = rawSocket as SocketWithState;
         const token = parseSocketToken(socket);
 
@@ -254,6 +272,7 @@ export function setupSocketIO(server: HTTPServer) {
             return next(new Error('Authentication error: No token provided'));
         }
 
+        let userId: string;
         try {
             const decoded = jwt.verify(token, config.jwtSecret);
             if (typeof decoded !== 'object' || decoded === null) {
@@ -264,13 +283,32 @@ export function setupSocketIO(server: HTTPServer) {
             if (typeof payload.userId !== 'string') {
                 return next(new Error('Authentication error: Invalid user ID payload'));
             }
-
-            socket.data.user = { userId: payload.userId };
-            socket.data.eventRateLimits = new Map();
-            next();
+            userId = payload.userId;
         } catch {
-            next(new Error('Authentication error: Invalid token'));
+            return next(new Error('Authentication error: Invalid token'));
         }
+
+        // Block banned/suspended users from connecting. This message is
+        // deliberately NOT prefixed with "Authentication error" so the mobile
+        // client treats it as a hard rejection rather than looping on token
+        // refresh (the refresh would succeed and reconnect into the same ban).
+        try {
+            const enforcementDoc = await User.findById(userId)
+                .select('status suspendedUntil enforcementReason')
+                .lean();
+            if (enforcementDoc) {
+                const enforcement = isUserBlockedFromActing(enforcementDoc as EnforcementState);
+                if (enforcement.blocked) {
+                    return next(new Error(enforcement.reason || 'Your account is not allowed to connect.'));
+                }
+            }
+        } catch {
+            return next(new Error('Authentication error: Invalid token'));
+        }
+
+        socket.data.user = { userId };
+        socket.data.eventRateLimits = new Map();
+        next();
     });
 
     io.on('connection', (rawSocket) => {

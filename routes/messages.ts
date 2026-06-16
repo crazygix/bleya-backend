@@ -42,13 +42,13 @@ router.get('/:messageId/thread', authenticateUser, asyncHandler(async (req: Auth
         throw new ValidationError("That message isn't valid.");
     }
 
-    const parentMessage = await Message.findById(messageId).lean<LeanMessage | null>();
+    const parentMessage = await Message.findOne({ _id: messageId, deletedAt: null }).lean<LeanMessage | null>();
     if (!parentMessage) {
         throw new NotFoundError('Message not found', ErrorCode.MESSAGE_NOT_FOUND);
     }
     await assertCanAccessMessageRoom(userId, parentMessage.roomId);
 
-    const replies = await Message.find({ parentMessageId: messageId })
+    const replies = await Message.find({ parentMessageId: messageId, deletedAt: null })
         .sort({ createdAt: 1 })
         .lean<LeanMessage[]>();
 
@@ -76,7 +76,7 @@ router.get('/:messageId', authenticateUser, asyncHandler(async (req: AuthRequest
         throw new ValidationError("That message isn't valid.");
     }
 
-    const message = await Message.findById(messageId).lean<LeanMessage | null>();
+    const message = await Message.findOne({ _id: messageId, deletedAt: null }).lean<LeanMessage | null>();
     if (!message) {
         throw new NotFoundError('Message not found', ErrorCode.MESSAGE_NOT_FOUND);
     }

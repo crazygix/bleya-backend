@@ -202,8 +202,10 @@ const isTest = nodeEnv === 'test';
 
 const port = parseNumberEnv('PORT', 8080);
 const publicOrigin = isProduction ? 'https://api.bleyachat.com' : `http://localhost:${port}`;
+const adminApiKey = process.env.ADMIN_API_KEY?.trim() || '';
+const adminDashboardOrigin = normalizeUrl(process.env.ADMIN_DASHBOARD_ORIGIN || '');
 const corsOrigins = isProduction
-  ? ['https://bleyachat.com', 'https://www.bleyachat.com']
+  ? ['https://bleyachat.com', 'https://www.bleyachat.com', ...(adminDashboardOrigin ? [adminDashboardOrigin] : [])]
   : [];
 const r2PublicBaseUrl = normalizeUrl(process.env.R2_PUBLIC_BASE_URL || '');
 const accessTokenTtl = '1h';
@@ -263,6 +265,15 @@ export const config = {
     firebasePrivateKey: process.env.FIREBASE_PRIVATE_KEY?.trim() || '',
   },
 
+  // Sign in with Apple server-to-server (token revocation on account deletion,
+  // Apple Guideline 5.1.1(v)). All four are required to enable it; empty disables.
+  apple: {
+    revokeClientId: process.env.APPLE_REVOKE_CLIENT_ID?.trim() || '',
+    teamId: process.env.APPLE_TEAM_ID?.trim() || '',
+    keyId: process.env.APPLE_KEY_ID?.trim() || '',
+    privateKey: (process.env.APPLE_PRIVATE_KEY || '').trim(),
+  },
+
   passkey: {
     rpId: passkeyRpId,
     rpName: passkeyRpName,
@@ -299,6 +310,26 @@ export const config = {
 
   imageService: {
     provider: (process.env.IMAGE_SERVICE_PROVIDER || 'pexels') as 'wikidata' | 'pexels',
+  },
+
+  // Moderation / admin API. `apiKey` gates /v1/admin (fail-closed: empty = admin
+  // disabled). `dashboardOrigin` is added to the CORS allowlist so a separate web
+  // admin panel can call the API from the browser.
+  admin: {
+    apiKey: adminApiKey,
+    dashboardOrigin: adminDashboardOrigin,
+  },
+
+  // Proactive content filtering at post time. blockedTerms extends the built-in
+  // text blocklist (comma-separated CONTENT_BLOCKLIST). imageModeration plugs in
+  // an image-safety provider; empty = disabled (uploads allowed).
+  contentFilter: {
+    blockedTerms: parseList(process.env.CONTENT_BLOCKLIST),
+    imageModeration: {
+      provider: process.env.IMAGE_MODERATION_PROVIDER?.trim() || '',
+      apiKey: process.env.IMAGE_MODERATION_API_KEY?.trim() || '',
+      apiSecret: process.env.IMAGE_MODERATION_API_SECRET?.trim() || '',
+    },
   },
 };
 

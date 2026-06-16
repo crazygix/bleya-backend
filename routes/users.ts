@@ -14,6 +14,7 @@ import {
     updateProfileImage,
 } from '../services/userService.js';
 import { exportUserData, deleteUserAccount } from '../services/accountService.js';
+import { moderateImage } from '../services/imageModerationService.js';
 import { createRateLimiter } from '../middleware/rateLimiter.js';
 import { config } from '../config/index.js';
 import type { LeanUser } from '../types/lean.js';
@@ -73,6 +74,12 @@ router.post('/profile-image', authenticateUser, upload.single('image'), asyncHan
     if (!req.file) {
         throw new ValidationError('No image selected. Pick one?');
     }
+
+    const imageCheck = await moderateImage(req.file.buffer, req.file.mimetype);
+    if (!imageCheck.allowed) {
+        throw new ValidationError(imageCheck.reason || "That image isn't allowed.");
+    }
+
     const profile = await updateProfileImage(req.user!.userId, {
         buffer: req.file.buffer,
         originalname: req.file.originalname,

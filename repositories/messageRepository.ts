@@ -46,7 +46,7 @@ export class MongoMessageRepository implements MessageRepository {
     }
 
     async findByIdLean(id: string) {
-        return Message.findById(id).lean<LeanMessage | null>();
+        return Message.findOne({ _id: id, deletedAt: null }).lean<LeanMessage | null>();
     }
 
     async incrementReplyCount(id: mongoose.Types.ObjectId) {
@@ -60,6 +60,7 @@ export class MongoMessageRepository implements MessageRepository {
         return Message.find({
             parentMessageId,
             userId: { $ne: excludeUserId },
+            deletedAt: null,
         }).distinct('userId') as Promise<mongoose.Types.ObjectId[]>;
     }
 }

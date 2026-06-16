@@ -1,8 +1,10 @@
 import mongoose from 'mongoose';
 import { UserBlock } from '../models/UserBlock.js';
 import { sanitizePlainText } from '../utils/sanitize.js';
+import { assertCleanText } from '../utils/contentFilter.js';
 import { AppError, ValidationError, ErrorCode } from '../utils/errors.js';
 import { validateObjectId } from '../utils/validation.js';
+import { isUserBlockedFromActing, type EnforcementState } from '../utils/enforcement.js';
 import { User } from '../models/User.js';
 import type { LeanRoom, LeanMessage, LeanUserBlock } from '../types/lean.js';
 import type { FormattedMessage } from '../utils/message.js';
@@ -55,6 +57,18 @@ export function createMessageService(deps: MessageServiceDeps) {
             throw new AppError(ErrorCode.FORBIDDEN, 'You are not a member of this room.', 403);
         }
 
+        // Defense-in-depth: banned/suspended users are blocked at the socket
+        // handshake, but re-check here so no send path can bypass enforcement.
+        const senderStatus = await User.findById(input.userId)
+            .select('status suspendedUntil enforcementReason')
+            .lean();
+        if (senderStatus) {
+            const enforcement = isUserBlockedFromActing(senderStatus as EnforcementState);
+            if (enforcement.blocked) {
+                throw new AppError(ErrorCode.FORBIDDEN, enforcement.reason, 403);
+            }
+        }
+
         let privateRoomOtherParticipantId: mongoose.Types.ObjectId | null = null;
         if ((room.type || 'public') === 'private') {
             const participants = room.participants || [];
@@ -100,6 +114,8 @@ export function createMessageService(deps: MessageServiceDeps) {
         if (!sanitizedText || sanitizedText.trim().length === 0) {
             throw new ValidationError('Message cannot be empty');
         }
+
+        assertCleanText(sanitizedText, 'message');
 
         let parentObjectId: mongoose.Types.ObjectId | null = null;
         if (input.parentMessageId) {

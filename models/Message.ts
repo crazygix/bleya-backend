@@ -24,6 +24,21 @@ const messageSchema = new mongoose.Schema({
         type: Number,
         default: 0, // Number of direct replies to this message
     },
+    // Moderation soft-delete. When deletedAt is set the message is hidden from
+    // every user-facing read path (filtered in each query) but kept for audit and
+    // possible restore. Admin views and the moderation queue still see it.
+    deletedAt: {
+        type: Date,
+        default: null,
+    },
+    deletedBy: {
+        type: String,
+        default: '',
+    },
+    deleteReason: {
+        type: String,
+        default: '',
+    },
 }, {
     timestamps: true, // Automatically adds createdAt and updatedAt fields
 });
