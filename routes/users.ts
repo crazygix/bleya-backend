@@ -15,6 +15,7 @@ import {
 } from '../services/userService.js';
 import { exportUserData, deleteUserAccount } from '../services/accountService.js';
 import { moderateImage } from '../services/imageModerationService.js';
+import { blockUser, unblockUser } from '../services/blockService.js';
 import { createRateLimiter } from '../middleware/rateLimiter.js';
 import { config } from '../config/index.js';
 import type { LeanUser } from '../types/lean.js';
@@ -147,6 +148,18 @@ router.delete('/me', authenticateUser, asyncHandler(async (req: AuthRequest, res
 router.get('/:userId([0-9a-fA-F]{24})', authenticateUser, publicProfileLimiter, asyncHandler(async (req: AuthRequest, res: express.Response) => {
     const profile = await getPublicProfile(req.params.userId);
     res.json(profile);
+}));
+
+// User-level block/unblock (works without an existing DM — reachable from a
+// public room, profile, or message).
+router.post('/:userId([0-9a-fA-F]{24})/block', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
+    const result = await blockUser(req.user!.userId, req.params.userId);
+    res.json(result);
+}));
+
+router.post('/:userId([0-9a-fA-F]{24})/unblock', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
+    const result = await unblockUser(req.user!.userId, req.params.userId);
+    res.json(result);
 }));
 
 export default router;

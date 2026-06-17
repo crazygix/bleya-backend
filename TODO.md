@@ -27,13 +27,13 @@ Backend-side requirements to support legal compliance.
 - [ ] Confirm DM "other participant" display when their counterpart deletes — currently renders as `Unknown User` (the deleted side is left orphaned in `room.participants`). Decide if a "Deleted user" label is preferable.
 
 #### Age assurance — DECISION (no DOB screen)
-Posture: minimum age 13, NO in-app age/DOB screen, no DOB stored.
+Posture: minimum age 15, NO in-app age/DOB screen, no DOB stored.
 - Baseline signal: Apple/Google account minimum age (13–16 by region).
 - Store rating: 17+ on both stores (stranger DMs + location = mature).
-- State 13+ minimum in Terms/Privacy Policy.
+- State 15+ minimum in Terms/Privacy Policy.
 - Under-age handled reactively: reporting (`POST /v1/reports`) + deletion (`DELETE /v1/users/me`) — both built.
 - Future strengthening (still no DOB screen): adopt OS age-range APIs (Apple Declared Age Range / Android age signals).
-- [ ] Open (non-code): set 17+ rating in consoles; add 13+ clause to privacy policy; legal/DPO sign-off (esp. UK Online Safety Act).
+- [ ] Open (non-code): set 17+ rating in consoles; add 15+ clause to privacy policy; legal/DPO sign-off (esp. UK Online Safety Act).
 - Residual risk: weakest assurance tier — accepted for launch per current risk appetite.
 
 #### UGC safety — built

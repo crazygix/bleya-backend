@@ -299,7 +299,10 @@ export function setupSocketIO(server: HTTPServer) {
             if (enforcementDoc) {
                 const enforcement = isUserBlockedFromActing(enforcementDoc as EnforcementState);
                 if (enforcement.blocked) {
-                    return next(new Error(enforcement.reason || 'Your account is not allowed to connect.'));
+                    // Stable "Account blocked:" prefix so the mobile client treats
+                    // this as a hard ban (show + log out), distinct from the
+                    // "Authentication error" prefix it uses to trigger token refresh.
+                    return next(new Error(`Account blocked: ${enforcement.reason || 'Your account is not allowed to connect.'}`));
                 }
             }
         } catch {

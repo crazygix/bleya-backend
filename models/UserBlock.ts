@@ -11,10 +11,12 @@ const userBlockSchema = new mongoose.Schema({
         ref: 'User',
         required: true,
     },
+    // Optional: set for DM-context blocks (also hides the direct room). A
+    // user-level block (from a public room / profile, no DM) leaves this null.
     roomId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Room',
-        required: true,
+        default: null,
     },
     isActive: {
         type: Boolean,
