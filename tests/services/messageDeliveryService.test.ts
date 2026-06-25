@@ -25,6 +25,7 @@ function buildMessageResult(overrides: Partial<CreateMessageResult> = {}): Creat
         threadId: null,
         senderId: 'sender-1',
         senderUsername: 'sender',
+        blockedPairUserIds: [],
         ...overrides,
     };
 }

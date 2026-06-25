@@ -4,6 +4,7 @@ import { User } from '../models/User.js';
 import { ValidationError, NotFoundError, ErrorCode } from '../utils/errors.js';
 import { validateObjectId } from '../utils/validation.js';
 import logger from '../utils/logger.js';
+import type { LeanUserBlock } from '../types/lean.js';
 
 // User-level block (not tied to a DM room) so a user can be blocked from a public
 // room, a message, or a profile where no direct chat exists. Enforcement is
@@ -74,4 +75,29 @@ export async function unblockUser(currentUserId: string, targetUserId: string): 
     });
 
     return { blocked: false, alreadyBlocked: false };
+}
+
+// Returns the userIds the given user is in an active block-pair with, in either
+// direction (they blocked someone, or someone blocked them). Blocking is mutual:
+// neither party sees the other's messages, members entry, or notifications, so
+// every visibility surface excludes this set rather than just the blocker's own.
+export async function getActiveBlockPairUserIds(userId: string): Promise<string[]> {
+    const userObjectId = new mongoose.Types.ObjectId(userId);
+
+    const blocks = await UserBlock.find({
+        isActive: true,
+        $or: [
+            { blockerUserId: userObjectId },
+            { blockedUserId: userObjectId },
+        ],
+    }).select('blockerUserId blockedUserId').lean<LeanUserBlock[]>();
+
+    const otherUserIds = new Set<string>();
+    for (const block of blocks) {
+        const blockerId = block.blockerUserId.toString();
+        const blockedId = block.blockedUserId.toString();
+        otherUserIds.add(blockerId === userId ? blockedId : blockerId);
+    }
+
+    return [...otherUserIds];
 }

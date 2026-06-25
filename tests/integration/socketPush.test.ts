@@ -11,6 +11,7 @@ import { Room } from '../../models/Room.js';
 import { Message } from '../../models/Message.js';
 import { Notification } from '../../models/Notification.js';
 import { PushToken } from '../../models/PushToken.js';
+import { UserBlock } from '../../models/UserBlock.js';
 import {
     resetPushMessagingForTests,
     setPushMessagingForTests,
@@ -251,6 +252,57 @@ describe('Socket push integration', () => {
             senderSocket.disconnect();
             activeThreadSocket.disconnect();
             roomOnlySocket.disconnect();
+            await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+        }
+    });
+
+    it('excludes a blocked-pair user from the live new_message broadcast', async () => {
+        const room = await Room.create({ name: 'Block Broadcast', type: 'public' });
+        const roomId = room._id as mongoose.Types.ObjectId;
+        const sender = await createTestUser({ username: 'broadcaster', joinedRooms: [roomId] });
+        const blocker = await createTestUser({ username: 'blocker', joinedRooms: [roomId] });
+        const bystander = await createTestUser({ username: 'bystander', joinedRooms: [roomId] });
+
+        // blocker blocked the sender -> blocker must not receive the sender's messages.
+        await UserBlock.create({
+            blockerUserId: blocker._id,
+            blockedUserId: sender._id,
+            isActive: true,
+            source: 'user_action',
+        });
+
+        const { server } = createHttpServer({ withSocketIO: true });
+        await new Promise<void>((resolve) => server.listen(0, resolve));
+        const address = server.address() as AddressInfo;
+        const baseUrl = `http://127.0.0.1:${address.port}`;
+
+        const senderSocket = await connectSocket(baseUrl, sender._id.toString());
+        const blockerSocket = await connectSocket(baseUrl, blocker._id.toString());
+        const bystanderSocket = await connectSocket(baseUrl, bystander._id.toString());
+
+        let blockerReceived = 0;
+        let bystanderReceived = 0;
+        blockerSocket.on('new_message', () => { blockerReceived += 1; });
+        bystanderSocket.on('new_message', () => { bystanderReceived += 1; });
+
+        try {
+            await emitAndWait(senderSocket, 'join_room', { roomId: roomId.toString() });
+            await emitAndWait(blockerSocket, 'join_room', { roomId: roomId.toString() });
+            await emitAndWait(bystanderSocket, 'join_room', { roomId: roomId.toString() });
+
+            senderSocket.emit('send_message', { text: 'Hello room' });
+
+            // The non-blocked bystander receives it; give the blocker the same window
+            // to (not) receive it.
+            await waitFor(() => bystanderReceived === 1);
+            await new Promise((resolve) => setTimeout(resolve, 150));
+
+            assert.equal(bystanderReceived, 1);
+            assert.equal(blockerReceived, 0);
+        } finally {
+            senderSocket.disconnect();
+            blockerSocket.disconnect();
+            bystanderSocket.disconnect();
             await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
         }
     });

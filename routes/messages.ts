@@ -8,6 +8,7 @@ import { asyncHandler } from '../middleware/errorHandler.js';
 import { AppError, NotFoundError, ValidationError, ErrorCode } from '../utils/errors.js';
 import { isValidObjectId } from '../utils/validation.js';
 import { formatMessage, buildUsernameMap } from '../utils/message.js';
+import { getActiveBlockPairUserIds } from '../services/blockService.js';
 import type { LeanRoom, LeanMessage, LeanUser } from '../types/lean.js';
 
 const router = express.Router();
@@ -48,7 +49,24 @@ router.get('/:messageId/thread', authenticateUser, asyncHandler(async (req: Auth
     }
     await assertCanAccessMessageRoom(userId, parentMessage.roomId);
 
-    const replies = await Message.find({ parentMessageId: messageId, deletedAt: null })
+    // Mutual block: a blocked-pair user's thread is hidden as if it doesn't exist,
+    // and their replies are filtered out of everyone else's thread view.
+    const blockedUserIds = await getActiveBlockPairUserIds(userId);
+    const blockedSet = new Set(blockedUserIds);
+    if (blockedSet.has(parentMessage.userId.toString())) {
+        throw new NotFoundError('Message not found', ErrorCode.MESSAGE_NOT_FOUND);
+    }
+
+    const repliesFilter: {
+        parentMessageId: string;
+        deletedAt: null;
+        userId?: { $nin: mongoose.Types.ObjectId[] };
+    } = { parentMessageId: messageId, deletedAt: null };
+    if (blockedUserIds.length > 0) {
+        repliesFilter.userId = { $nin: blockedUserIds.map((id) => new mongoose.Types.ObjectId(id)) };
+    }
+
+    const replies = await Message.find(repliesFilter)
         .sort({ createdAt: 1 })
         .lean<LeanMessage[]>();
 
@@ -81,6 +99,12 @@ router.get('/:messageId', authenticateUser, asyncHandler(async (req: AuthRequest
         throw new NotFoundError('Message not found', ErrorCode.MESSAGE_NOT_FOUND);
     }
     await assertCanAccessMessageRoom(userId, message.roomId);
+
+    // Mutual block: a blocked-pair user's message is hidden as if it doesn't exist.
+    const blockedUserIds = await getActiveBlockPairUserIds(userId);
+    if (blockedUserIds.includes(message.userId.toString())) {
+        throw new NotFoundError('Message not found', ErrorCode.MESSAGE_NOT_FOUND);
+    }
 
     const user = await User.findById(message.userId).select('_id username').lean<LeanUser | null>();
     const usernameMap = new Map([[message.userId.toString(), user?.username || '']]);

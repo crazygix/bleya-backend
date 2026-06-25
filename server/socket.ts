@@ -227,7 +227,8 @@ async function emitRoomSummaryUpdate(
     roomId: string,
     messageData: FormattedMessage,
     roomType: 'public' | 'private',
-    roomParticipants: string[]
+    roomParticipants: string[],
+    excludedUserIds: string[] = []
 ): Promise<void> {
     const summaryPayload = {
         roomId: messageData.roomId,
@@ -238,7 +239,12 @@ async function emitRoomSummaryUpdate(
     };
 
     const recipientIds = await getRoomSummaryRecipientIds(roomId, roomType, roomParticipants);
+    const excluded = new Set(excludedUserIds);
     for (const recipientId of recipientIds) {
+        // Don't surface a blocked-pair user's message as the room-list preview.
+        if (excluded.has(recipientId)) {
+            continue;
+        }
         io.to(`user:${recipientId}`).emit('room_summary_updated', summaryPayload);
     }
 }
@@ -461,7 +467,12 @@ export function setupSocketIO(server: HTTPServer) {
                     parentMessageId: payload.parentMessageId,
                 });
 
-                io.to(user.roomId).emit('new_message', result.messageData);
+                // Mutual block: exclude blocked-pair users from the live broadcast
+                // (.except on their personal `user:<id>` room). An empty list
+                // excludes no one.
+                io.to(user.roomId)
+                    .except(result.blockedPairUserIds.map((id) => `user:${id}`))
+                    .emit('new_message', result.messageData);
 
                 if (result.isTopLevel) {
                     await emitRoomSummaryUpdate(
@@ -469,7 +480,8 @@ export function setupSocketIO(server: HTTPServer) {
                         user.roomId,
                         result.messageData,
                         result.roomType,
-                        result.roomParticipants
+                        result.roomParticipants,
+                        result.blockedPairUserIds
                     );
                 }
 

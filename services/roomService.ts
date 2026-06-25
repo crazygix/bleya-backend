@@ -8,6 +8,7 @@ import { formatMessage, buildUsernameMap, type FormattedMessage } from '../utils
 import type { LeanRoom, LeanMessage, LeanUser, LeanJoinedRoomsUser, LastMessageAgg } from '../types/lean.js';
 import { type UserRepository, userRepository as defaultUserRepo } from '../repositories/userRepository.js';
 import { type RoomRepository, roomRepository as defaultRoomRepo } from '../repositories/roomRepository.js';
+import { getActiveBlockPairUserIds } from './blockService.js';
 
 const MAX_PUBLIC_ROOMS = 5;
 const DEFAULT_PAGE_SIZE = 50;
@@ -445,12 +446,20 @@ export async function getRoomMessagesForUser(
     const filter: {
         roomId: mongoose.Types.ObjectId;
         parentMessageId: null;
+        userId?: { $nin: mongoose.Types.ObjectId[] };
         $or?: Array<{ createdAt: { $lt: Date } } | { createdAt: Date; _id: { $lt: mongoose.Types.ObjectId } }>;
         createdAt?: { $lt: Date };
     } = {
         roomId: roomObjectId,
         parentMessageId: null,
     };
+
+    // Mutually hide messages authored by anyone in an active block-pair. Applied
+    // in the query (not in-memory) so pagination/hasMore stay accurate.
+    const blockedUserIds = await getActiveBlockPairUserIds(userId);
+    if (blockedUserIds.length > 0) {
+        filter.userId = { $nin: blockedUserIds.map((id) => new mongoose.Types.ObjectId(id)) };
+    }
 
     if (typeof before === 'string') {
         const [timestampStr, idStr] = before.split('_');
@@ -521,7 +530,18 @@ export async function getRoomMembersForUser(
     }
     assertUserHasRoomAccess(room, roomObjectId, user, userId);
 
-    const users = await User.find({ joinedRooms: roomObjectId })
+    // Hide blocked-pair users from the member list (mutual: applies to both
+    // the blocker and the blocked).
+    const blockedUserIds = await getActiveBlockPairUserIds(userId);
+    const memberFilter: {
+        joinedRooms: mongoose.Types.ObjectId;
+        _id?: { $nin: mongoose.Types.ObjectId[] };
+    } = { joinedRooms: roomObjectId };
+    if (blockedUserIds.length > 0) {
+        memberFilter._id = { $nin: blockedUserIds.map((id) => new mongoose.Types.ObjectId(id)) };
+    }
+
+    const users = await User.find(memberFilter)
         .select('_id username bio profileImageUrl')
         .lean<LeanUser[]>();
 

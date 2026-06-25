@@ -66,10 +66,39 @@ OFF and not yet smoke-tested. Code: `routes/admin.ts`, `services/moderationServi
   ban/suspend/unban `/v1/admin/users/:id/*`; `GET /v1/admin/audit`.
 - [ ] Populate `CONTENT_BLOCKLIST` (slurs etc.) before launch — the built-in list is only a starter.
 - [ ] Apple revocation: set `APPLE_REVOKE_CLIENT_ID` / `APPLE_TEAM_ID` / `APPLE_KEY_ID` /
-  `APPLE_PRIVATE_KEY`, AND make the mobile send `authorizationCode` at sign-in (mobile TODO). No-ops until both.
+  `APPLE_PRIVATE_KEY` in Railway. (Mobile already sends `authorizationCode` — done.) No-ops until set.
 - [ ] Image moderation: choose a provider (Sightengine / WebPurify / Hive), implement the TODO in
   `moderateImage()`, set `IMAGE_MODERATION_PROVIDER` / `IMAGE_MODERATION_API_KEY` (+ secret).
-- [ ] Mobile: handle the `message_removed` socket event; treat the ban rejection (not prefixed
-  "Authentication error") as a hard stop so the client doesn't loop on token refresh.
 - [ ] Commit the backend changes (currently uncommitted on disk).
 - Deferred: the admin web GUI itself (see `docs/admin-moderation-plan.md`).
+
+### 6. Release — remaining to submit
+Code is essentially done across web/backend/mobile (`dart analyze` + `tsc` clean). What's left is
+verification, store-console paperwork, and turning things on. See section 5 for the moderation config
+(`ADMIN_API_KEY`, `CONTENT_BLOCKLIST`, `APPLE_*`).
+
+Verify & commit:
+- [ ] Commit the **backend** + **mobile** changes (website already pushed).
+- [ ] Device smoke test: report (user/message/room), block from profile/message, ban kick-out (shows
+  reason, no reconnect loop), live message removal, delete-account + export, tappable Terms/Privacy,
+  passkey sign-in.
+- [ ] Cut a TestFlight + Play internal build.
+
+Store consoles (mostly non-code):
+- [ ] Create the apps in App Store Connect + Google Play Console.
+- [ ] Apple: App Privacy "nutrition" labels; age rating (17+); screenshots; description; support URL.
+- [ ] Play: Data Safety form; content-rating questionnaire; target audience; screenshots; description;
+  web account-deletion URL = https://bleyachat.com/delete-account.
+- [ ] Play App Signing: after the Play app exists, copy its App Signing SHA-256 and confirm/replace the
+  `C6:40…` fingerprint in the website's `assetlinks.json`.
+- [ ] Review notes (both stores): persistent-identity city rooms (not anonymous random chat) + we act
+  on reports within ~24h.
+
+Polish (not rejections):
+- [ ] iOS launch screen is still default — brand it if desired.
+- [ ] App icon is an on-brand "B" placeholder — swap for final art (replace `mobile/assets/icon/app_icon.png`,
+  re-run `dart run flutter_launcher_icons`).
+
+Should-do (worldwide / legal):
+- [ ] Appoint the GDPR Art. 27 EU/EEA representative and fill the Privacy Policy section.
+- [ ] One paid Serbian advokat review of the legal docs.

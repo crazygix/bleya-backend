@@ -8,12 +8,20 @@ import { stopRateLimiterCleanupForTests } from '../../middleware/rateLimiter.js'
 import { Room } from '../../models/Room.js';
 import { Message } from '../../models/Message.js';
 import { User } from '../../models/User.js';
+import { UserBlock } from '../../models/UserBlock.js';
 
 async function createRoomWithMember() {
     const room = await Room.create({ name: `Room-${Date.now()}`, type: 'public' });
     const roomId = room._id as mongoose.Types.ObjectId;
     const user = await createTestUser({ joinedRooms: [roomId] });
     return { room, user };
+}
+
+async function createActiveBlock(
+    blockerUserId: mongoose.Types.ObjectId,
+    blockedUserId: mongoose.Types.ObjectId
+) {
+    await UserBlock.create({ blockerUserId, blockedUserId, isActive: true, source: 'user_action' });
 }
 
 describe('Messages API', () => {
@@ -82,6 +90,49 @@ describe('Messages API', () => {
                 .set(authHeader(user._id.toString()))
                 .expect(403);
         });
+
+        it('hides messages from a user I blocked, keeps my own', async () => {
+            const { room, user } = await createRoomWithMember();
+            const roomId = room._id as mongoose.Types.ObjectId;
+            const other = await createTestUser({ joinedRooms: [roomId] });
+            await createActiveBlock(user._id, other._id);
+
+            await Message.create([
+                { roomId, userId: user._id, text: 'mine' },
+                { roomId, userId: other._id, text: 'theirs' },
+            ]);
+
+            const agent = getTestAgent();
+            const res = await agent
+                .get(`/v1/rooms/${roomId}/messages`)
+                .set(authHeader(user._id.toString()))
+                .expect(200);
+
+            assert.equal(res.body.messages.length, 1);
+            assert.equal(res.body.messages[0].text, 'mine');
+        });
+
+        it('hides messages from a user who blocked me (mutual)', async () => {
+            const { room, user } = await createRoomWithMember();
+            const roomId = room._id as mongoose.Types.ObjectId;
+            const other = await createTestUser({ joinedRooms: [roomId] });
+            // other blocked me; I should not see other's messages either.
+            await createActiveBlock(other._id, user._id);
+
+            await Message.create([
+                { roomId, userId: user._id, text: 'mine' },
+                { roomId, userId: other._id, text: 'theirs' },
+            ]);
+
+            const agent = getTestAgent();
+            const res = await agent
+                .get(`/v1/rooms/${roomId}/messages`)
+                .set(authHeader(user._id.toString()))
+                .expect(200);
+
+            assert.equal(res.body.messages.length, 1);
+            assert.equal(res.body.messages[0].text, 'mine');
+        });
     });
 
     describe('GET /v1/messages/:messageId', () => {
@@ -110,6 +161,20 @@ describe('Messages API', () => {
                 .set(authHeader(user._id.toString()))
                 .expect(404);
         });
+
+        it('returns 404 for a message authored by a blocked-pair user', async () => {
+            const { room, user } = await createRoomWithMember();
+            const roomId = room._id as mongoose.Types.ObjectId;
+            const other = await createTestUser({ joinedRooms: [roomId] });
+            await createActiveBlock(user._id, other._id);
+            const message = await Message.create({ roomId, userId: other._id, text: 'hidden' });
+
+            const agent = getTestAgent();
+            await agent
+                .get(`/v1/messages/${message._id}`)
+                .set(authHeader(user._id.toString()))
+                .expect(404);
+        });
     });
 
     describe('GET /v1/messages/:messageId/thread', () => {
@@ -128,6 +193,40 @@ describe('Messages API', () => {
 
             assert.equal(res.body.parentMessage.text, 'Parent');
             assert.equal(res.body.replies.length, 2);
+        });
+
+        it('filters out replies authored by a blocked-pair user', async () => {
+            const { room, user } = await createRoomWithMember();
+            const roomId = room._id as mongoose.Types.ObjectId;
+            const other = await createTestUser({ joinedRooms: [roomId] });
+            await createActiveBlock(user._id, other._id);
+
+            const parent = await Message.create({ roomId, userId: user._id, text: 'Parent' });
+            await Message.create({ roomId, userId: user._id, text: 'mine', parentMessageId: parent._id });
+            await Message.create({ roomId, userId: other._id, text: 'theirs', parentMessageId: parent._id });
+
+            const agent = getTestAgent();
+            const res = await agent
+                .get(`/v1/messages/${parent._id}/thread`)
+                .set(authHeader(user._id.toString()))
+                .expect(200);
+
+            assert.equal(res.body.replies.length, 1);
+            assert.equal(res.body.replies[0].text, 'mine');
+        });
+
+        it('returns 404 for a thread whose parent is from a blocked-pair user', async () => {
+            const { room, user } = await createRoomWithMember();
+            const roomId = room._id as mongoose.Types.ObjectId;
+            const other = await createTestUser({ joinedRooms: [roomId] });
+            await createActiveBlock(user._id, other._id);
+            const parent = await Message.create({ roomId, userId: other._id, text: 'hidden parent' });
+
+            const agent = getTestAgent();
+            await agent
+                .get(`/v1/messages/${parent._id}/thread`)
+                .set(authHeader(user._id.toString()))
+                .expect(404);
         });
     });
 });

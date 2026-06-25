@@ -5,6 +5,7 @@ import { assertCleanText } from '../utils/contentFilter.js';
 import { AppError, ValidationError, ErrorCode } from '../utils/errors.js';
 import { validateObjectId } from '../utils/validation.js';
 import { isUserBlockedFromActing, type EnforcementState } from '../utils/enforcement.js';
+import { getActiveBlockPairUserIds } from './blockService.js';
 import { User } from '../models/User.js';
 import type { LeanRoom, LeanMessage, LeanUserBlock } from '../types/lean.js';
 import type { FormattedMessage } from '../utils/message.js';
@@ -31,6 +32,7 @@ export interface CreateMessageResult {
     threadId: string | null;
     senderId: string;
     senderUsername: string;
+    blockedPairUserIds: string[];
 }
 
 export interface MessageServiceDeps {
@@ -193,6 +195,16 @@ export function createMessageService(deps: MessageServiceDeps) {
             candidateRecipientUserIds = currentRoomMemberIds.filter((userId) => userId !== input.userId);
         }
 
+        // Mutual block: hide this message from blocked-pair users on every surface.
+        // Drop them from notification recipients here; the socket layer uses the
+        // returned list to exclude them from the real-time broadcast and room-list
+        // preview as well.
+        const blockedPairUserIds = await getActiveBlockPairUserIds(input.userId);
+        if (blockedPairUserIds.length > 0) {
+            const blockedSet = new Set(blockedPairUserIds);
+            candidateRecipientUserIds = candidateRecipientUserIds.filter((userId) => !blockedSet.has(userId));
+        }
+
         return {
             messageData,
             pushType: parentObjectId ? 'reply' : 'message',
@@ -205,6 +217,7 @@ export function createMessageService(deps: MessageServiceDeps) {
             threadId: parentObjectId?.toString() || null,
             senderId: message.userId.toString(),
             senderUsername,
+            blockedPairUserIds,
         };
     }
 

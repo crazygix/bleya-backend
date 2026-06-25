@@ -27,37 +27,38 @@ export interface ExportedRoom {
 }
 
 export interface UserDataExport {
-    exportedAt: number;
+    // All timestamps are ISO 8601 strings (e.g. "2026-04-03T20:30:34.503Z").
+    exportedAt: string;
     account: {
         id: string;
         username: string;
         bio: string;
         profileImageUrl: string;
-        createdAt: number;
-        updatedAt: number;
-        lastLogin: number;
+        createdAt: string | null;
+        updatedAt: string | null;
+        lastLogin: string | null;
         hiddenDirectRoomIds: string[];
-        roomReadPointers: Array<{ roomId: string; lastReadAt: number | null }>;
+        roomReadPointers: Array<{ roomId: string; lastReadAt: string | null }>;
     };
     linkedProviders: Array<{
         provider: string;
         email: string;
         emailVerified: boolean;
         isPrivateRelay: boolean;
-        linkedAt: number | null;
-        lastUsedAt: number | null;
+        linkedAt: string | null;
+        lastUsedAt: string | null;
     }>;
     passkeys: Array<{
         deviceType: string;
         transports: string[];
         backedUp: boolean;
-        createdAt: number | null;
-        lastUsedAt: number | null;
+        createdAt: string | null;
+        lastUsedAt: string | null;
     }>;
     pushDevices: Array<{
         platform: string;
-        createdAt: number | null;
-        lastSeenAt: number | null;
+        createdAt: string | null;
+        lastSeenAt: string | null;
     }>;
     rooms: ExportedRoom[];
     messages: Array<{
@@ -65,18 +66,18 @@ export interface UserDataExport {
         roomId: string;
         text: string;
         parentMessageId: string | null;
-        createdAt: number;
+        createdAt: string | null;
     }>;
     blockedUsers: Array<{
         blockedUserId: string;
-        blockedAt: number | null;
+        blockedAt: string | null;
         active: boolean;
     }>;
     // Art. 15(4): the fact/time that others blocked this user is the subject's
     // personal data, but the blocker's identity is a third party's data and is
     // intentionally withheld.
     blockedByOthers: Array<{
-        blockedAt: number | null;
+        blockedAt: string | null;
         active: boolean;
     }>;
     notifications: Array<{
@@ -84,7 +85,7 @@ export interface UserDataExport {
         role: 'recipient' | 'sender';
         roomId: string;
         read: boolean;
-        createdAt: number | null;
+        createdAt: string | null;
     }>;
 }
 
@@ -162,19 +163,19 @@ export async function exportUserData(userId: string): Promise<UserDataExport> {
     });
 
     return {
-        exportedAt: Date.now(),
+        exportedAt: new Date().toISOString(),
         account: {
             id: user._id.toString(),
             username: user.username || '',
             bio: user.bio || '',
             profileImageUrl: user.profileImageUrl || '',
-            createdAt: user.createdAt.getTime(),
-            updatedAt: user.updatedAt.getTime(),
-            lastLogin: user.lastLogin.getTime(),
+            createdAt: user.createdAt ? user.createdAt.toISOString() : null,
+            updatedAt: user.updatedAt ? user.updatedAt.toISOString() : null,
+            lastLogin: user.lastLogin ? user.lastLogin.toISOString() : null,
             hiddenDirectRoomIds: (user.hiddenDirectRooms || []).map((roomId) => roomId.toString()),
             roomReadPointers: (user.roomReadPointers || []).map((pointer) => ({
                 roomId: pointer.roomId.toString(),
-                lastReadAt: pointer.lastReadAt ? pointer.lastReadAt.getTime() : null,
+                lastReadAt: pointer.lastReadAt ? pointer.lastReadAt.toISOString() : null,
             })),
         },
         linkedProviders: identities.map((identity) => ({
@@ -182,20 +183,20 @@ export async function exportUserData(userId: string): Promise<UserDataExport> {
             email: identity.email || '',
             emailVerified: identity.emailVerified ?? false,
             isPrivateRelay: identity.isPrivateRelay ?? false,
-            linkedAt: identity.linkedAt ? identity.linkedAt.getTime() : null,
-            lastUsedAt: identity.lastUsedAt ? identity.lastUsedAt.getTime() : null,
+            linkedAt: identity.linkedAt ? identity.linkedAt.toISOString() : null,
+            lastUsedAt: identity.lastUsedAt ? identity.lastUsedAt.toISOString() : null,
         })),
         passkeys: passkeys.map((passkey) => ({
             deviceType: passkey.deviceType || 'unknown',
             transports: passkey.transports || [],
             backedUp: passkey.backedUp ?? false,
-            createdAt: passkey.createdAt ? passkey.createdAt.getTime() : null,
-            lastUsedAt: passkey.lastUsedAt ? passkey.lastUsedAt.getTime() : null,
+            createdAt: passkey.createdAt ? passkey.createdAt.toISOString() : null,
+            lastUsedAt: passkey.lastUsedAt ? passkey.lastUsedAt.toISOString() : null,
         })),
         pushDevices: pushTokens.map((pushToken) => ({
             platform: pushToken.platform,
-            createdAt: pushToken.createdAt ? pushToken.createdAt.getTime() : null,
-            lastSeenAt: pushToken.lastSeenAt ? pushToken.lastSeenAt.getTime() : null,
+            createdAt: pushToken.createdAt ? pushToken.createdAt.toISOString() : null,
+            lastSeenAt: pushToken.lastSeenAt ? pushToken.lastSeenAt.toISOString() : null,
         })),
         rooms: rooms.map((room) => ({
             id: room._id.toString(),
@@ -211,15 +212,15 @@ export async function exportUserData(userId: string): Promise<UserDataExport> {
             roomId: message.roomId.toString(),
             text: message.text,
             parentMessageId: message.parentMessageId?.toString() || null,
-            createdAt: message.createdAt.getTime(),
+            createdAt: message.createdAt ? message.createdAt.toISOString() : null,
         })),
         blockedUsers: blocks.map((block) => ({
             blockedUserId: block.blockedUserId.toString(),
-            blockedAt: block.blockedAt ? block.blockedAt.getTime() : null,
+            blockedAt: block.blockedAt ? block.blockedAt.toISOString() : null,
             active: block.isActive ?? false,
         })),
         blockedByOthers: blockedByOthers.map((block) => ({
-            blockedAt: block.blockedAt ? block.blockedAt.getTime() : null,
+            blockedAt: block.blockedAt ? block.blockedAt.toISOString() : null,
             active: block.isActive ?? false,
         })),
         notifications: notifications.map((notification) => ({
@@ -227,7 +228,7 @@ export async function exportUserData(userId: string): Promise<UserDataExport> {
             role: notification.recipient.toString() === userId ? 'recipient' as const : 'sender' as const,
             roomId: notification.room.toString(),
             read: notification.read ?? false,
-            createdAt: notification.createdAt ? notification.createdAt.getTime() : null,
+            createdAt: notification.createdAt ? notification.createdAt.toISOString() : null,
         })),
     };
 }

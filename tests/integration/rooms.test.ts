@@ -8,6 +8,7 @@ import { stopRateLimiterCleanupForTests } from '../../middleware/rateLimiter.js'
 import { Room } from '../../models/Room.js';
 import { User } from '../../models/User.js';
 import { Message } from '../../models/Message.js';
+import { UserBlock } from '../../models/UserBlock.js';
 
 async function createPublicRoom(name: string) {
     return Room.create({ name, type: 'public' });
@@ -212,6 +213,28 @@ describe('Rooms API', () => {
                 .get(`/v1/rooms/${room._id}/members`)
                 .set(authHeader(outsider._id.toString()))
                 .expect(403);
+        });
+
+        it('hides blocked-pair users from the member list (both directions)', async () => {
+            const room = await createPublicRoom('Block Members Room');
+            const roomId = room._id as mongoose.Types.ObjectId;
+            const viewer = await createTestUser({ username: 'bob', joinedRooms: [roomId] });
+            const iBlocked = await createTestUser({ username: 'alice', joinedRooms: [roomId] });
+            const blockedMe = await createTestUser({ username: 'charlie', joinedRooms: [roomId] });
+
+            await UserBlock.create([
+                { blockerUserId: viewer._id, blockedUserId: iBlocked._id, isActive: true, source: 'user_action' },
+                { blockerUserId: blockedMe._id, blockedUserId: viewer._id, isActive: true, source: 'user_action' },
+            ]);
+
+            const agent = getTestAgent();
+            const res = await agent
+                .get(`/v1/rooms/${roomId}/members`)
+                .set(authHeader(viewer._id.toString()))
+                .expect(200);
+
+            const names = res.body.map((m: { username: string }) => m.username);
+            assert.deepEqual(names, ['bob']);
         });
     });
 
