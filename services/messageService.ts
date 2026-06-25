@@ -4,7 +4,7 @@ import { sanitizePlainText } from '../utils/sanitize.js';
 import { assertCleanText } from '../utils/contentFilter.js';
 import { AppError, ValidationError, ErrorCode } from '../utils/errors.js';
 import { validateObjectId } from '../utils/validation.js';
-import { isUserBlockedFromActing, type EnforcementState } from '../utils/enforcement.js';
+import { isUserBlockedFromActing } from '../utils/enforcement.js';
 import { getActiveBlockPairUserIds } from './blockService.js';
 import { User } from '../models/User.js';
 import type { LeanRoom, LeanMessage, LeanUserBlock } from '../types/lean.js';
@@ -39,10 +39,13 @@ export interface MessageServiceDeps {
     userRepo: UserRepository;
     roomRepo: RoomRepository;
     messageRepo: MessageRepository;
+    // Injected so the service stays unit-testable without a live DB; defaults to
+    // the real block lookup in defaultMessageService below.
+    getBlockedPairUserIds: (userId: string) => Promise<string[]>;
 }
 
 export function createMessageService(deps: MessageServiceDeps) {
-    const { userRepo, roomRepo, messageRepo } = deps;
+    const { userRepo, roomRepo, messageRepo, getBlockedPairUserIds } = deps;
 
     async function createMessage(input: CreateMessageInput): Promise<CreateMessageResult> {
         const roomObjectId = new mongoose.Types.ObjectId(input.roomId);
@@ -61,11 +64,9 @@ export function createMessageService(deps: MessageServiceDeps) {
 
         // Defense-in-depth: banned/suspended users are blocked at the socket
         // handshake, but re-check here so no send path can bypass enforcement.
-        const senderStatus = await User.findById(input.userId)
-            .select('status suspendedUntil enforcementReason')
-            .lean();
+        const senderStatus = await userRepo.findEnforcementState(input.userId);
         if (senderStatus) {
-            const enforcement = isUserBlockedFromActing(senderStatus as EnforcementState);
+            const enforcement = isUserBlockedFromActing(senderStatus);
             if (enforcement.blocked) {
                 throw new AppError(ErrorCode.FORBIDDEN, enforcement.reason, 403);
             }
@@ -199,7 +200,7 @@ export function createMessageService(deps: MessageServiceDeps) {
         // Drop them from notification recipients here; the socket layer uses the
         // returned list to exclude them from the real-time broadcast and room-list
         // preview as well.
-        const blockedPairUserIds = await getActiveBlockPairUserIds(input.userId);
+        const blockedPairUserIds = await getBlockedPairUserIds(input.userId);
         if (blockedPairUserIds.length > 0) {
             const blockedSet = new Set(blockedPairUserIds);
             candidateRecipientUserIds = candidateRecipientUserIds.filter((userId) => !blockedSet.has(userId));
@@ -228,6 +229,7 @@ const defaultMessageService = createMessageService({
     userRepo: defaultUserRepo,
     roomRepo: defaultRoomRepo,
     messageRepo: defaultMessageRepo,
+    getBlockedPairUserIds: getActiveBlockPairUserIds,
 });
 
 export const createMessage = defaultMessageService.createMessage;

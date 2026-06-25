@@ -21,6 +21,7 @@ function fakeUserRepo(overrides: Partial<UserRepository> = {}): UserRepository {
         findByIdLean: async () => null,
         findByIdSelectJoinedRooms: async () => null,
         findByIdSelectUsername: async () => null,
+        findEnforcementState: async () => null,
         create: async () => null as any,
         updateLastLogin: async () => {},
         findByUsernameLean: async () => null,

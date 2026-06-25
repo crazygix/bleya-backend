@@ -13,6 +13,7 @@ function fakeUserRepo(overrides: Partial<UserRepository> = {}): UserRepository {
         findByIdLean: async () => null,
         findByIdSelectJoinedRooms: async () => null,
         findByIdSelectUsername: async () => null,
+        findEnforcementState: async () => null,
         create: async () => null as any,
         updateLastLogin: async () => {},
         findByUsernameLean: async () => null,
@@ -54,6 +55,23 @@ function fakeMessageRepo(overrides: Partial<MessageRepository> = {}): MessageRep
     };
 }
 
+// Wraps the service factory with a no-op block lookup by default so each test
+// only specifies the repos it cares about (override getBlockedPairUserIds to
+// simulate active blocks).
+function buildService(deps: {
+    userRepo: UserRepository;
+    roomRepo: RoomRepository;
+    messageRepo: MessageRepository;
+    getBlockedPairUserIds?: (userId: string) => Promise<string[]>;
+}) {
+    return createMessageService({
+        userRepo: deps.userRepo,
+        roomRepo: deps.roomRepo,
+        messageRepo: deps.messageRepo,
+        getBlockedPairUserIds: deps.getBlockedPairUserIds ?? (async () => []),
+    });
+}
+
 describe('messageService (mocked repos)', () => {
     it('creates a top-level message successfully', async () => {
         const roomId = new mongoose.Types.ObjectId();
@@ -65,7 +83,7 @@ describe('messageService (mocked repos)', () => {
             participants: [],
         };
 
-        const svc = createMessageService({
+        const svc = buildService({
             userRepo: fakeUserRepo({
                 existsWithRoom: async () => true,
                 findByIdSelectUsername: async () => ({ _id: userId, username: 'alice' }),
@@ -89,6 +107,38 @@ describe('messageService (mocked repos)', () => {
         assert.deepEqual(result.candidateRecipientUserIds, ['other-user-id']);
     });
 
+    it('excludes blocked-pair users from recipients and returns them for broadcast filtering', async () => {
+        const roomId = new mongoose.Types.ObjectId();
+        const userId = new mongoose.Types.ObjectId();
+        const blockedId = '507f1f77bcf86cd799439011';
+        const room: LeanRoom = {
+            _id: roomId,
+            name: 'Test Room',
+            type: 'public',
+            participants: [],
+        };
+
+        const svc = buildService({
+            userRepo: fakeUserRepo({
+                existsWithRoom: async () => true,
+                findByIdSelectUsername: async () => ({ _id: userId, username: 'alice' }),
+                findJoinedUserIds: async () => [userId.toString(), blockedId, 'other-user-id'],
+            }),
+            roomRepo: fakeRoomRepo({ findById: async () => room }),
+            messageRepo: fakeMessageRepo(),
+            getBlockedPairUserIds: async () => [blockedId],
+        });
+
+        const result = await svc.createMessage({
+            userId: userId.toString(),
+            roomId: roomId.toString(),
+            text: 'Hello world',
+        });
+
+        assert.deepEqual(result.candidateRecipientUserIds, ['other-user-id']);
+        assert.deepEqual(result.blockedPairUserIds, [blockedId]);
+    });
+
     it('creates a reply and increments reply count', async () => {
         const roomId = new mongoose.Types.ObjectId();
         const userId = new mongoose.Types.ObjectId();
@@ -105,7 +155,7 @@ describe('messageService (mocked repos)', () => {
             replyCount: 0,
         };
 
-        const svc = createMessageService({
+        const svc = buildService({
             userRepo: fakeUserRepo({
                 existsWithRoom: async () => true,
                 findByIdSelectUsername: async () => ({ _id: userId, username: 'bob' }),
@@ -152,8 +202,36 @@ describe('messageService (mocked repos)', () => {
         ]);
     });
 
+    it('rejects a sender whose account is blocked from acting (banned/suspended)', async () => {
+        const roomId = new mongoose.Types.ObjectId();
+        const room: LeanRoom = {
+            _id: roomId,
+            name: 'Test Room',
+            type: 'public',
+            participants: [],
+        };
+
+        const svc = buildService({
+            userRepo: fakeUserRepo({
+                existsWithRoom: async () => true,
+                findEnforcementState: async () => ({ status: 'banned', enforcementReason: 'Banned for spam.' }),
+            }),
+            roomRepo: fakeRoomRepo({ findById: async () => room }),
+            messageRepo: fakeMessageRepo(),
+        });
+
+        await assert.rejects(
+            () => svc.createMessage({
+                userId: new mongoose.Types.ObjectId().toString(),
+                roomId: roomId.toString(),
+                text: 'Hello',
+            }),
+            (err: Error) => err.message.includes('Banned for spam.')
+        );
+    });
+
     it('throws when room not found', async () => {
-        const svc = createMessageService({
+        const svc = buildService({
             userRepo: fakeUserRepo(),
             roomRepo: fakeRoomRepo({ findById: async () => null }),
             messageRepo: fakeMessageRepo(),
@@ -171,7 +249,7 @@ describe('messageService (mocked repos)', () => {
 
     it('throws when user not in room', async () => {
         const roomId = new mongoose.Types.ObjectId();
-        const svc = createMessageService({
+        const svc = buildService({
             userRepo: fakeUserRepo({ existsWithRoom: async () => false }),
             roomRepo: fakeRoomRepo({
                 findById: async () => ({
@@ -195,7 +273,7 @@ describe('messageService (mocked repos)', () => {
 
     it('throws on empty message text', async () => {
         const roomId = new mongoose.Types.ObjectId();
-        const svc = createMessageService({
+        const svc = buildService({
             userRepo: fakeUserRepo({ existsWithRoom: async () => true }),
             roomRepo: fakeRoomRepo({
                 findById: async () => ({

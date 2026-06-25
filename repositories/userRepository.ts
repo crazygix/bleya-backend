@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import { User } from '../models/User.js';
+import type { EnforcementState } from '../utils/enforcement.js';
 import type { LeanFullUser, LeanUser, LeanJoinedRoomsUser } from '../types/lean.js';
 
 export interface UserRepository {
@@ -7,6 +8,7 @@ export interface UserRepository {
     findByIdLean(id: string): Promise<LeanFullUser | null>;
     findByIdSelectJoinedRooms(id: string): Promise<LeanJoinedRoomsUser | null>;
     findByIdSelectUsername(id: string): Promise<Pick<LeanUser, '_id' | 'username'> | null>;
+    findEnforcementState(id: string): Promise<EnforcementState | null>;
     create(data?: Record<string, unknown>): Promise<mongoose.Document>;
     updateLastLogin(userId: string, lastLogin: Date): Promise<void>;
     findByUsernameLean(username: string): Promise<{ _id: mongoose.Types.ObjectId } | null>;
@@ -38,6 +40,12 @@ export class MongoUserRepository implements UserRepository {
 
     async findByIdSelectUsername(id: string) {
         return User.findById(id).select('_id username').lean<Pick<LeanUser, '_id' | 'username'> | null>();
+    }
+
+    async findEnforcementState(id: string) {
+        return User.findById(id)
+            .select('status suspendedUntil enforcementReason')
+            .lean<EnforcementState | null>();
     }
 
     async create(data: Record<string, unknown> = {}) {
