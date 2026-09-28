@@ -5,6 +5,8 @@ export const REPORT_REASONS = [
     'harassment',
     'inappropriate_content',
     'impersonation',
+    // The user appears to be under the minimum age (15).
+    'underage',
     'other',
 ] as const;
 
@@ -30,6 +32,15 @@ const reportSchema = new mongoose.Schema({
     messageId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Message',
+    },
+    // Copy of the reported message taken when the report is filed. Messages are
+    // hard-deleted with their author's account, so without this the evidence
+    // for a report could vanish before a moderator looks at it.
+    messageSnapshot: {
+        text: { type: String },
+        authorId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+        authorUsername: { type: String },
+        createdAt: { type: Date },
     },
     reason: {
         type: String,

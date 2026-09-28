@@ -13,10 +13,15 @@
     "start": "node dist/server/server.js",
     "dev": "nodemon",
     "test": "npm run build && NODE_ENV=test node --test --test-concurrency=1 dist/tests/**/*.test.js",
-    "build": "tsc",
+    "test:isolated": "npm run build && node scripts/run-tests-isolated.mjs",
+    "build": "rm -rf dist && tsc",
     "migrate:seed-rooms": "npm run build && node dist/migrations/001_seed_public_rooms.js",
     "migrate:drop-legacy-room-index": "npm run build && node dist/migrations/002_drop_legacy_room_name_index.js",
     "migrate:normalize-user-refs": "npm run build && node dist/migrations/003_normalize_user_references.js",
+    "migrate:dedupe-rooms": "npm run build && node dist/migrations/004_dedupe_rooms_and_build_indexes.js",
+    "migrate:unescape-text": "npm run build && node dist/migrations/005_unescape_stored_text.js",
+    "migrate:neutral-dm-names": "npm run build && node dist/migrations/006_neutral_dm_room_names.js",
+    "migrate:reencode-profile-images": "npm run build && node dist/migrations/007_reencode_profile_images.js",
     "db": "npm run build && node dist/scripts/db.js",
     "diagnose-push": "npm run build && node dist/scripts/diagnose-push.js",
     "postinstall": "npm run build"
@@ -48,7 +53,7 @@
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
-    "express": "^4.21.2",
+    "express": "^4.22.3",
     "express-rate-limit": "^8.5.1",
     "firebase-admin": "^13.8.0",
     "helmet": "^8.1.0",
@@ -57,7 +62,7 @@
     "mongoose": "^8.2.0",
     "multer": "^2.0.2",
     "pino": "^10.3.1",
-    "sharp": "^0.34.5",
+    "sharp": "^0.35.5",
     "socket.io": "^4.8.1"
   }
 }

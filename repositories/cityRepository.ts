@@ -12,11 +12,14 @@ export interface CityRepository {
     findNearby(query: NearbyCitiesQuery): Promise<ICity[]>;
     upsertMany(cities: Partial<ICity>[]): Promise<void>;
     updateImageUrl(cityId: string, imageUrl: string): Promise<void>;
+    // Atomically claims an image lookup for a city that still has no image and
+    // wasn't tried since `retryBefore`. False when someone else has it.
+    claimImageAttempt(cityId: string, retryBefore: Date): Promise<boolean>;
 }
 
 class MongoCityRepository implements CityRepository {
     async findById(cityId: string): Promise<ICity | null> {
-        return City.findById(cityId).lean().exec();
+        return City.findById(cityId).lean<ICity | null>().exec();
     }
 
     async findNearby(query: NearbyCitiesQuery): Promise<ICity[]> {
@@ -32,7 +35,7 @@ class MongoCityRepository implements CityRepository {
             },
         })
             .limit(query.limit)
-            .lean()
+            .lean<ICity[]>()
             .exec();
     }
 
@@ -60,6 +63,20 @@ class MongoCityRepository implements CityRepository {
 
     async updateImageUrl(cityId: string, imageUrl: string): Promise<void> {
         await City.updateOne({ _id: cityId }, { $set: { imageUrl } });
+    }
+
+    async claimImageAttempt(cityId: string, retryBefore: Date): Promise<boolean> {
+        const result = await City.updateOne(
+            {
+                _id: cityId,
+                $and: [
+                    { $or: [{ imageUrl: { $exists: false } }, { imageUrl: null }, { imageUrl: '' }] },
+                    { $or: [{ imageCheckedAt: null }, { imageCheckedAt: { $lt: retryBefore } }] },
+                ],
+            },
+            { $set: { imageCheckedAt: new Date() } }
+        );
+        return result.modifiedCount === 1;
     }
 }
 

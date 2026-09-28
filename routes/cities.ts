@@ -1,7 +1,8 @@
 import express from 'express';
 import { config } from '../config/index.js';
-import { findNearbyCitiesWithImages } from '../services/cityService.js';
+import { findNearbyCitiesWithImages, findOrCreateCityRoom } from '../services/cityService.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
+import { createRateLimiter } from '../middleware/rateLimiter.js';
 import { ValidationError, NotFoundError, ErrorCode } from '../utils/errors.js';
 import { cityRepository } from '../repositories/cityRepository.js';
 import { Room } from '../models/Room.js';
@@ -11,9 +12,16 @@ import { authenticateUser, AuthRequest } from '../middleware/auth.js';
 
 const router = express.Router();
 
+// Each call can start image lookups against external APIs.
+const nearbyLimiter = createRateLimiter({
+    name: 'cities.nearby',
+    limit: config.isProduction ? 60 : 1000,
+});
+
 router.get(
     '/nearby',
     authenticateUser,
+    nearbyLimiter,
     asyncHandler(async (req: AuthRequest, res: express.Response) => {
         const userId = req.user!.userId;
         const latParam = req.query.lat;
@@ -79,18 +87,9 @@ router.post(
         }
 
         // 2. Find or create room for this city
-        let room = await Room.findOne({ cityKey: cityId });
+        const room = await findOrCreateCityRoom(city);
         if (!room) {
-            room = await Room.create({
-                name: `${city.name}, ${city.countryName}`,
-                type: 'public',
-                cityKey: cityId,
-                imageUrl: city.imageUrl || undefined,
-                geo: {
-                    type: 'Point',
-                    coordinates: [city.location.coordinates[0], city.location.coordinates[1]],
-                },
-            });
+            throw new Error('Failed to create or fetch city room');
         }
 
         // 3. Join user to room

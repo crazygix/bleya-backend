@@ -56,6 +56,9 @@ interface StoredPushToken {
     platform: PushPlatform;
 }
 
+// FCM's sendEach takes at most 500 messages per call; more fails the whole call.
+const FCM_MAX_BATCH_SIZE = 500;
+
 let firebaseApp: App | null = null;
 let pushMessagingClient: PushMessagingClient | null = null;
 
@@ -174,37 +177,62 @@ function isInvalidTokenError(code?: string): boolean {
         || code === 'messaging/invalid-registration-token';
 }
 
-async function markPushTokenSuccess(id: mongoose.Types.ObjectId): Promise<void> {
-    await PushToken.updateOne(
-        { _id: id },
-        {
-            $set: {
-                lastSuccessAt: new Date(),
-                failureReason: '',
-            },
-            $unset: {
-                lastFailureAt: '',
-            },
-        }
-    );
-}
+type SendEachResponse = Awaited<ReturnType<PushMessagingClient['sendEach']>>;
 
-async function markPushTokenFailure(
-    token: StoredPushToken,
-    code: string | undefined,
-    message: string
+// One bulk write per batch: a single update for all successes, one per failure.
+async function recordSendResults(
+    response: SendEachResponse,
+    tokens: StoredPushToken[],
+    type: PushNotificationType
 ): Promise<void> {
     const now = new Date();
-    const update: Record<string, unknown> = {
-        lastFailureAt: now,
-        failureReason: code || message,
-    };
+    const successIds: mongoose.Types.ObjectId[] = [];
+    const failureOps: Parameters<typeof PushToken.bulkWrite>[0] = [];
 
-    if (isInvalidTokenError(code)) {
-        update.isActive = false;
+    response.responses.forEach((sendResponse, index) => {
+        const token = tokens[index];
+        if (!token) {
+            return;
+        }
+
+        if (sendResponse.success) {
+            successIds.push(token._id);
+            return;
+        }
+
+        const errorCode = sendResponse.error?.code;
+        const errorMessage = sendResponse.error?.message || 'Push send failed';
+
+        logger.warn('push.send.failed', {
+            userId: token.userId.toString(),
+            type,
+            code: errorCode,
+            error: errorMessage,
+        });
+
+        const update: Record<string, unknown> = {
+            lastFailureAt: now,
+            failureReason: errorCode || errorMessage,
+        };
+        if (isInvalidTokenError(errorCode)) {
+            update.isActive = false;
+        }
+        failureOps.push({ updateOne: { filter: { _id: token._id }, update: { $set: update } } });
+    });
+
+    const ops: Parameters<typeof PushToken.bulkWrite>[0] = [...failureOps];
+    if (successIds.length > 0) {
+        ops.push({
+            updateMany: {
+                filter: { _id: { $in: successIds } },
+                update: { $set: { lastSuccessAt: now, failureReason: '' }, $unset: { lastFailureAt: '' } },
+            },
+        });
     }
 
-    await PushToken.updateOne({ _id: token._id }, { $set: update });
+    if (ops.length > 0) {
+        await PushToken.bulkWrite(ops, { ordered: false });
+    }
 }
 
 export async function registerPushToken(input: RegisterPushTokenInput): Promise<void> {
@@ -304,28 +332,20 @@ export async function sendPushNotifications(input: SendPushNotificationsInput): 
         return;
     }
 
-    const response = await messagingClient.sendEach(messages);
-    await Promise.all(response.responses.map(async (sendResponse, index) => {
-        const token = tokensInSendOrder[index];
-        if (!token) {
-            return;
+    for (let start = 0; start < messages.length; start += FCM_MAX_BATCH_SIZE) {
+        const batchMessages = messages.slice(start, start + FCM_MAX_BATCH_SIZE);
+        const batchTokens = tokensInSendOrder.slice(start, start + FCM_MAX_BATCH_SIZE);
+
+        // A failed batch is logged and skipped; the remaining batches still go out.
+        try {
+            const response = await messagingClient.sendEach(batchMessages);
+            await recordSendResults(response, batchTokens, input.type);
+        } catch (error) {
+            logger.error('push.send.batch_failed', {
+                type: input.type,
+                batchSize: batchMessages.length,
+                error: error instanceof Error ? error.message : String(error),
+            });
         }
-
-        if (sendResponse.success) {
-            await markPushTokenSuccess(token._id);
-            return;
-        }
-
-        const errorCode = sendResponse.error?.code;
-        const errorMessage = sendResponse.error?.message || 'Push send failed';
-
-        logger.warn('push.send.failed', {
-            userId: token.userId.toString(),
-            type: input.type,
-            code: errorCode,
-            error: errorMessage,
-        });
-
-        await markPushTokenFailure(token, errorCode, errorMessage);
-    }));
+    }
 }

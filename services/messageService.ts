@@ -111,7 +111,7 @@ export function createMessageService(deps: MessageServiceDeps) {
         const sanitizedText = sanitizePlainText(input.text || '', {
             maxLength: 2000,
             collapseWhitespace: true,
-            escapeHtml: true,
+            preserveNewlines: true,
         });
 
         if (!sanitizedText || sanitizedText.trim().length === 0) {

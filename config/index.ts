@@ -24,12 +24,16 @@ function findProjectRoot(startDir: string): string {
 }
 
 function loadEnvFiles(projectRoot: string, nodeEnv: string): void {
-  const candidates = [
-    '.env',
-    `.env.${nodeEnv}`,
-    '.env.local',
-    `.env.${nodeEnv}.local`,
-  ];
+  // Tests read only .env.test(.local): the shared .env / .env.local files hold
+  // live Firebase, R2, Pexels and Atlas credentials that a test must never use.
+  const candidates = nodeEnv === 'test'
+    ? ['.env.test', '.env.test.local']
+    : [
+      '.env',
+      `.env.${nodeEnv}`,
+      '.env.local',
+      `.env.${nodeEnv}.local`,
+    ];
 
   // Snapshot env vars set externally (by Railway, CI, shell, etc.) before any
   // .env file is read. These always win — .env files only fill in gaps. Files
@@ -48,6 +52,9 @@ function loadEnvFiles(projectRoot: string, nodeEnv: string): void {
   }
 }
 
+// Captured before defaulting so startup can warn when a hosted deploy forgot to
+// set NODE_ENV (it would otherwise silently run with development settings).
+export const nodeEnvWasUnset = !process.env.NODE_ENV || process.env.NODE_ENV.trim().length === 0;
 const bootNodeEnv = process.env.NODE_ENV || 'development';
 const projectRoot = findProjectRoot(__dirname);
 loadEnvFiles(projectRoot, bootNodeEnv);
@@ -202,7 +209,12 @@ const isTest = nodeEnv === 'test';
 
 const port = parseNumberEnv('PORT', 8080);
 const publicOrigin = isProduction ? 'https://api.bleyachat.com' : `http://localhost:${port}`;
-const adminApiKey = process.env.ADMIN_API_KEY?.trim() || '';
+// Admin keys shorter than this are refused (admin stays disabled) — the key is
+// the only thing guarding the moderation API.
+export const MIN_ADMIN_API_KEY_LENGTH = 32;
+const rawAdminApiKey = process.env.ADMIN_API_KEY?.trim() || '';
+const adminApiKeyTooShort = rawAdminApiKey.length > 0 && rawAdminApiKey.length < MIN_ADMIN_API_KEY_LENGTH;
+const adminApiKey = adminApiKeyTooShort ? '' : rawAdminApiKey;
 const adminDashboardOrigin = normalizeUrl(process.env.ADMIN_DASHBOARD_ORIGIN || '');
 const corsOrigins = isProduction
   ? ['https://bleyachat.com', 'https://www.bleyachat.com', ...(adminDashboardOrigin ? [adminDashboardOrigin] : [])]
@@ -225,6 +237,7 @@ const appleAndroidCallbackRoute = deriveMountedRoutePath(
 const passkeyExpectedOrigins = parseList(process.env.PASSKEY_EXPECTED_ORIGINS);
 const passkeyRpId = process.env.PASSKEY_RP_ID?.trim() || 'bleyachat.com';
 const passkeyRpName = process.env.PASSKEY_RP_NAME?.trim() || 'Bleya';
+const jwtSecret = requiredEnv('JWT_SECRET', { defaultInTest: 'test-jwt-secret' });
 const citySearchDefaults = {
   defaultRadiusKm: 30,
   defaultLimit: 20,
@@ -245,7 +258,12 @@ export const config = {
   },
 
   mongoUri: requiredEnv('MONGODB_URI', { defaultInTest: 'mongodb://127.0.0.1:27017/bleya_test' }),
-  jwtSecret: requiredEnv('JWT_SECRET', { defaultInTest: 'test-jwt-secret' }),
+  jwtSecret,
+
+  // Keys the HMAC used to remember banned sign-in identities after account
+  // deletion. Defaults to a value derived from JWT_SECRET; set it explicitly so
+  // rotating JWT_SECRET doesn't silently forget bans.
+  identityHashSecret: process.env.IDENTITY_HASH_SECRET?.trim() || `banned-identity:${jwtSecret}`,
 
   accessTokenTtl,
   refreshTokenTtlDays,
@@ -253,6 +271,10 @@ export const config = {
   authProviders: {
     googleAllowedAudiences,
     appleAllowedAudiences,
+    // When true, provider sign-in requires a rawNonce whose hash matches the ID
+    // token's nonce claim. Off until the mobile app sends a nonce for both
+    // Google and Apple — turning it on earlier would reject every sign-in.
+    requireNonce: parseBooleanEnv('REQUIRE_PROVIDER_NONCE', false),
     appleAndroidServiceId: process.env.APPLE_ANDROID_SERVICE_ID?.trim() || '',
     appleAndroidRedirectPath,
     appleAndroidCallbackRoute,
@@ -317,7 +339,17 @@ export const config = {
   // admin panel can call the API from the browser.
   admin: {
     apiKey: adminApiKey,
+    apiKeyTooShort: adminApiKeyTooShort,
     dashboardOrigin: adminDashboardOrigin,
+  },
+
+  socket: {
+    // Disconnect a socket when the access token it connected with expires.
+    // Off until the mobile app reconnects with a fresh token on its own
+    // (otherwise realtime would drop every hour).
+    enforceTokenExpiry: parseBooleanEnv('SOCKET_ENFORCE_TOKEN_EXPIRY', false),
+    // Newest connection wins; older sockets beyond this are disconnected.
+    maxConnectionsPerUser: parseNumberEnv('SOCKET_MAX_CONNECTIONS_PER_USER', 5),
   },
 
   // Proactive content filtering at post time. blockedTerms extends the built-in

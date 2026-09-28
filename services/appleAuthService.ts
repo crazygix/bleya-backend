@@ -17,7 +17,8 @@ export function isAppleRevocationConfigured(): boolean {
 }
 
 // The client secret is a short-lived ES256 JWT signed with the Apple .p8 key.
-function buildClientSecret(): string {
+// Its `sub` must be the client id the code/token was issued to.
+function buildClientSecret(clientId: string): string {
     const a = config.apple;
     const nowSec = Math.floor(Date.now() / 1000);
     const privateKey = a.privateKey.replace(/\\n/g, '\n');
@@ -27,11 +28,30 @@ function buildClientSecret(): string {
             iat: nowSec,
             exp: nowSec + 300,
             aud: 'https://appleid.apple.com',
-            sub: a.revokeClientId,
+            sub: clientId,
         },
         privateKey,
         { algorithm: 'ES256', keyid: a.keyId }
     );
+}
+
+// Apple issues codes and tokens per client: the iOS bundle id for native
+// sign-in, the Services ID for the Android web flow. Use the ID token's
+// audience when it is one of ours, and fall back to APPLE_REVOKE_CLIENT_ID.
+function resolveClientId(audience?: string | null): string {
+    if (audience && config.authProviders.appleAllowedAudiences.includes(audience)) {
+        return audience;
+    }
+    return config.apple.revokeClientId;
+}
+
+// Codes from the Android web flow were requested with our callback as the
+// redirect_uri, and Apple requires the same value when redeeming them.
+function redirectUriFor(clientId: string): string | undefined {
+    const androidServiceId = config.authProviders.appleAndroidServiceId;
+    return androidServiceId && clientId === androidServiceId
+        ? `${config.urls.publicOrigin}${config.authProviders.appleAndroidRedirectPath}`
+        : undefined;
 }
 
 async function postForm(url: string, params: Record<string, string>): Promise<Response | null> {
@@ -47,17 +67,23 @@ async function postForm(url: string, params: Record<string, string>): Promise<Re
     }
 }
 
-export async function exchangeAuthorizationCode(code: string): Promise<string | null> {
+export async function exchangeAuthorizationCode(code: string, clientId: string): Promise<string | null> {
     if (!isAppleRevocationConfigured()) {
         return null;
     }
 
-    const res = await postForm(APPLE_TOKEN_URL, {
-        client_id: config.apple.revokeClientId,
-        client_secret: buildClientSecret(),
+    const params: Record<string, string> = {
+        client_id: clientId,
+        client_secret: buildClientSecret(clientId),
         code,
         grant_type: 'authorization_code',
-    });
+    };
+    const redirectUri = redirectUriFor(clientId);
+    if (redirectUri) {
+        params.redirect_uri = redirectUri;
+    }
+
+    const res = await postForm(APPLE_TOKEN_URL, params);
 
     if (!res) {
         return null;
@@ -77,18 +103,20 @@ export async function exchangeAuthorizationCode(code: string): Promise<string | 
 export async function captureAppleRefreshToken(
     provider: string,
     providerUserId: string,
-    authorizationCode?: string | null
+    authorizationCode?: string | null,
+    audience?: string | null
 ): Promise<void> {
     if (provider !== 'apple' || !authorizationCode || !isAppleRevocationConfigured()) {
         return;
     }
 
     try {
-        const refreshToken = await exchangeAuthorizationCode(authorizationCode);
+        const clientId = resolveClientId(audience);
+        const refreshToken = await exchangeAuthorizationCode(authorizationCode, clientId);
         if (refreshToken) {
             await UserIdentity.updateOne(
                 { provider: 'apple', providerUserId },
-                { $set: { appleRefreshToken: refreshToken } }
+                { $set: { appleRefreshToken: refreshToken, appleClientId: clientId } }
             );
         }
     } catch (error) {
@@ -96,14 +124,17 @@ export async function captureAppleRefreshToken(
     }
 }
 
-export async function revokeRefreshToken(refreshToken: string): Promise<void> {
+// `clientId` is the client the token was issued to (stored with it at sign-in);
+// Apple rejects a revocation signed for a different client.
+export async function revokeRefreshToken(refreshToken: string, clientId?: string | null): Promise<void> {
     if (!isAppleRevocationConfigured() || !refreshToken) {
         return;
     }
 
+    const resolvedClientId = clientId || config.apple.revokeClientId;
     const res = await postForm(APPLE_REVOKE_URL, {
-        client_id: config.apple.revokeClientId,
-        client_secret: buildClientSecret(),
+        client_id: resolvedClientId,
+        client_secret: buildClientSecret(resolvedClientId),
         token: refreshToken,
         token_type_hint: 'refresh_token',
     });

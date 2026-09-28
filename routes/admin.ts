@@ -5,15 +5,32 @@ import { createRateLimiter } from '../middleware/rateLimiter.js';
 import { config } from '../config/index.js';
 import { listModerationActions } from '../services/auditService.js';
 import { listReports, getReport, updateReportStatus } from '../services/reportService.js';
-import { deleteMessage, restoreMessage, banUser, unbanUser, suspendUser } from '../services/moderationService.js';
+import {
+    deleteMessage,
+    restoreMessage,
+    banUser,
+    unbanUser,
+    suspendUser,
+    clearUserProfile,
+    removeUserMessages,
+} from '../services/moderationService.js';
+import { exportUserData, deleteUserAccount } from '../services/accountService.js';
+import { recordModerationAction } from '../services/auditService.js';
+import { validateObjectId } from '../utils/validation.js';
 
 const router = express.Router();
 
 // Every admin route is gated and rate-limited. The gate is fail-closed (denies
 // all when ADMIN_API_KEY is unset), so mounting this is safe even before a key
-// is configured.
+// is configured. Failed attempts are limited *before* the key check so the key
+// can't be guessed at full speed.
+const adminKeyFailureLimiter = createRateLimiter({
+    name: 'admin.key-failures',
+    limit: config.isProduction ? 20 : 2000,
+    skipSuccessfulRequests: true,
+});
 const adminLimiter = createRateLimiter({ name: 'admin', limit: config.isProduction ? 240 : 2000 });
-router.use(requireAdmin, adminLimiter);
+router.use(adminKeyFailureLimiter, requireAdmin, adminLimiter);
 
 // Lightweight check the web panel can call to confirm the key works.
 router.get('/ping', (req: AdminRequest, res: express.Response) => {
@@ -69,6 +86,46 @@ router.post('/users/:id/suspend', asyncHandler(async (req: AdminRequest, res: ex
 
 router.post('/users/:id/unban', asyncHandler(async (req: AdminRequest, res: express.Response) => {
     const result = await unbanUser(req.params.id, req.admin!.actor);
+    res.json(result);
+}));
+
+// Remove abusive profile content. Body: { fields?: ('username'|'bio'|'avatar')[], reason? }
+router.post('/users/:id/clear-profile', asyncHandler(async (req: AdminRequest, res: express.Response) => {
+    const result = await clearUserProfile(req.params.id, req.admin!.actor, req.body?.fields, req.body?.reason);
+    res.json(result);
+}));
+
+// Soft-delete all of a user's messages. Body: { reason?, roomId? }
+router.post('/users/:id/remove-messages', asyncHandler(async (req: AdminRequest, res: express.Response) => {
+    const result = await removeUserMessages(req.params.id, req.admin!.actor, req.body?.reason, req.body?.roomId);
+    res.json(result);
+}));
+
+// --- Data-subject requests received outside the app (email, under-age) -------
+
+router.get('/users/:id/export', asyncHandler(async (req: AdminRequest, res: express.Response) => {
+    const id = validateObjectId(req.params.id, 'user ID');
+    const data = await exportUserData(id.toString());
+    await recordModerationAction({
+        actorLabel: req.admin!.actor,
+        action: 'user_data_exported',
+        targetType: 'user',
+        targetId: id,
+    });
+    res.json(data);
+}));
+
+router.delete('/users/:id', asyncHandler(async (req: AdminRequest, res: express.Response) => {
+    const id = validateObjectId(req.params.id, 'user ID');
+    const result = await deleteUserAccount(id.toString());
+    await recordModerationAction({
+        actorLabel: req.admin!.actor,
+        action: 'user_account_deleted',
+        targetType: 'user',
+        targetId: id,
+        reason: typeof req.body?.reason === 'string' ? req.body.reason.slice(0, 500) : '',
+        metadata: { removed: result.removed },
+    });
     res.json(result);
 }));
 

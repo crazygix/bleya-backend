@@ -2,7 +2,14 @@
 builder = "nixpacks"
 
 [deploy]
-startCommand = "npm start"
+# Run node directly (not through npm) so SIGTERM reaches the server and it can
+# shut down gracefully (server/server.ts).
+startCommand = "node dist/server/server.js"
 healthcheckPath = "/health"
 healthcheckTimeout = 300
-restartPolicyType = "on_failure" 
+restartPolicyType = "on_failure"
+# Realtime delivery, presence and rate limits are in-memory, so the API must
+# run as a single instance until a Socket.IO adapter and shared stores exist.
+numReplicas = 1
+# Time between SIGTERM and SIGKILL; the server's own shutdown timeout is 10 s.
+drainingSeconds = 15

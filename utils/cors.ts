@@ -10,8 +10,9 @@ export function buildCorsOptions(): CorsOptions {
 
   return {
     credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    // x-admin-key lets the admin dashboard origin call /v1/admin from a browser.
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'x-admin-key'],
     origin(origin, callback) {
       // Non-browser clients (mobile apps, curl, server-to-server) often send no Origin.
       if (!origin) return callback(null, true);
@@ -20,7 +21,11 @@ export function buildCorsOptions(): CorsOptions {
 
       if (allowed.includes(origin)) return callback(null, true);
 
-      return callback(new Error('CORS: origin not allowed'));
+      // Unknown origin: just omit the CORS headers so browsers block the
+      // response. Passing an Error here aborts the request with a 500, which
+      // broke top-level cross-site form posts such as Apple's Android sign-in
+      // callback (Origin: https://appleid.apple.com).
+      return callback(null, false);
     },
   };
 }

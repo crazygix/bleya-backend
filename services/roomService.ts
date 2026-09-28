@@ -35,10 +35,6 @@ interface JoinRoomForUserInput {
     roomId: mongoose.Types.ObjectId;
 }
 
-interface ListPublicRoomsInput {
-    searchQuery?: string;
-}
-
 export function toRoomSummary(room: LeanRoom): RoomSummaryDto {
     return {
         id: room._id.toString(),
@@ -48,21 +44,6 @@ export function toRoomSummary(room: LeanRoom): RoomSummaryDto {
         imageUrl: room.imageUrl || null,
         location: toRoomLocation(room),
     };
-}
-
-export function escapeRegex(value: string): string {
-    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-export function buildPublicRoomFilter(searchQuery?: string): Record<string, unknown> {
-    const filter: Record<string, unknown> = { type: 'public' };
-    if (searchQuery) {
-        filter.name = {
-            $regex: new RegExp(escapeRegex(searchQuery), 'i'),
-        };
-    }
-
-    return filter;
 }
 
 export function isPublicRoom(room: { type?: 'public' | 'private' }): boolean {
@@ -82,12 +63,6 @@ export function createRoomService(deps: RoomServiceDeps) {
             _id: { $in: joinedRoomIds },
             type: 'public',
         });
-    }
-
-    async function listPublicRooms(input: ListPublicRoomsInput = {}): Promise<RoomSummaryDto[]> {
-        const filter = buildPublicRoomFilter(input.searchQuery);
-        const rooms = await roomRepo.findPublicRooms(filter, '_id name type cityKey imageUrl geo');
-        return rooms.map((room) => toRoomSummary(room));
     }
 
     async function joinRoomForUser(input: JoinRoomForUserInput): Promise<JoinRoomResponseDto> {
@@ -156,7 +131,7 @@ export function createRoomService(deps: RoomServiceDeps) {
         };
     }
 
-    return { listPublicRooms, joinRoomForUser };
+    return { joinRoomForUser };
 }
 
 const defaultRoomService = createRoomService({
@@ -164,7 +139,6 @@ const defaultRoomService = createRoomService({
     roomRepo: defaultRoomRepo,
 });
 
-export const listPublicRooms = defaultRoomService.listPublicRooms;
 export const joinRoomForUser = defaultRoomService.joinRoomForUser;
 
 // ============================================================
@@ -286,23 +260,39 @@ export async function getJoinedRoomsForUser(userId: string): Promise<JoinedRoomD
     }
 
     const joinedRoomIds = rooms.map((room) => room._id);
-
-    const lastMessagesRaw = await Message.aggregate([
-        { $match: { roomId: { $in: joinedRoomIds }, parentMessageId: null, deletedAt: null } },
-        { $sort: { createdAt: -1 } },
-        {
-            $group: {
-                _id: '$roomId',
-                lastMessageText: { $first: '$text' },
-                lastMessageTime: { $first: '$createdAt' },
-                lastMessageUserId: { $first: '$userId' },
-            },
-        },
-    ]);
-
-    const lastMessages = lastMessagesRaw as LastMessageAgg[];
-    const lastMessageMap = new Map(lastMessages.map((msg) => [msg._id.toString(), msg]));
     const currentUserObjectId = new mongoose.Types.ObjectId(userId);
+
+    // Mutual block: a blocked-pair user's messages never surface as a preview or
+    // count toward unread, same as in the room itself.
+    const blockedUserObjectIds = (await getActiveBlockPairUserIds(userId))
+        .map((id) => new mongoose.Types.ObjectId(id));
+
+    // Latest visible top-level message per room: one indexed lookup per room
+    // ({roomId, parentMessageId, createdAt, _id}) instead of an aggregate that
+    // scanned every message in every joined room.
+    const latestPerRoom = await Promise.all(joinedRoomIds.map(async (roomId): Promise<LastMessageAgg | null> => {
+        const filter: Record<string, unknown> = { roomId, parentMessageId: null, deletedAt: null };
+        if (blockedUserObjectIds.length > 0) {
+            filter.userId = { $nin: blockedUserObjectIds };
+        }
+
+        const latest = await Message.findOne(filter)
+            .sort({ createdAt: -1, _id: -1 })
+            .select('text createdAt userId')
+            .lean<Pick<LeanMessage, 'text' | 'createdAt' | 'userId'> | null>();
+
+        return latest
+            ? {
+                _id: roomId,
+                lastMessageText: latest.text,
+                lastMessageTime: latest.createdAt,
+                lastMessageUserId: latest.userId,
+            }
+            : null;
+    }));
+    const lastMessages = latestPerRoom.filter((message): message is LastMessageAgg => message !== null);
+
+    const lastMessageMap = new Map(lastMessages.map((msg) => [msg._id.toString(), msg]));
 
     const lastReadAtByRoomId = new Map<string, Date>();
     for (const pointer of user.roomReadPointers || []) {
@@ -322,7 +312,7 @@ export async function getJoinedRoomsForUser(userId: string): Promise<JoinedRoomD
         const condition: Record<string, unknown> = {
             roomId,
             parentMessageId: null,
-            userId: { $ne: currentUserObjectId },
+            userId: { $nin: [currentUserObjectId, ...blockedUserObjectIds] },
             deletedAt: null,
         };
         if (lastReadAt) {
@@ -513,9 +503,29 @@ export async function getRoomMessagesForUser(
     };
 }
 
+const DEFAULT_MEMBERS_PAGE_SIZE = 500;
+const MAX_MEMBERS_PAGE_SIZE = 1000;
+
+export interface RoomMembersQuery {
+    limit?: string;
+    offset?: string;
+}
+
+function parseBoundedInt(value: string | undefined, fallback: number, max: number): number {
+    if (typeof value !== 'string') {
+        return fallback;
+    }
+    const parsed = Number.parseInt(value, 10);
+    if (Number.isNaN(parsed) || parsed < 0) {
+        return fallback;
+    }
+    return Math.min(parsed, max);
+}
+
 export async function getRoomMembersForUser(
     userId: string,
-    roomObjectId: mongoose.Types.ObjectId
+    roomObjectId: mongoose.Types.ObjectId,
+    query: RoomMembersQuery = {}
 ): Promise<RoomMemberDto[]> {
     const [room, user] = await Promise.all([
         Room.findById(roomObjectId).select('_id type participants').lean<LeanRoom | null>(),
@@ -541,32 +551,26 @@ export async function getRoomMembersForUser(
         memberFilter._id = { $nin: blockedUserIds.map((id) => new mongoose.Types.ObjectId(id)) };
     }
 
+    // Sorted by the database (case/accent-insensitive, like the old
+    // localeCompare with sensitivity 'base') and bounded, instead of loading
+    // every member and sorting on the event loop.
+    const limit = Math.max(1, parseBoundedInt(query.limit, DEFAULT_MEMBERS_PAGE_SIZE, MAX_MEMBERS_PAGE_SIZE));
+    const offset = parseBoundedInt(query.offset, 0, Number.MAX_SAFE_INTEGER);
+
     const users = await User.find(memberFilter)
         .select('_id username bio profileImageUrl')
+        .collation({ locale: 'en', strength: 1 })
+        .sort({ username: 1, _id: 1 })
+        .skip(offset)
+        .limit(limit)
         .lean<LeanUser[]>();
 
-    const members: RoomMemberDto[] = users.map((member) => ({
+    return users.map((member) => ({
         id: member._id.toString(),
         username: member.username || '',
         bio: member.bio || '',
         profileImageUrl: member.profileImageUrl || '',
     }));
-
-    members.sort((a, b) => {
-        const usernameComparison = a.username.localeCompare(
-            b.username,
-            undefined,
-            { sensitivity: 'base' }
-        );
-
-        if (usernameComparison !== 0) {
-            return usernameComparison;
-        }
-
-        return a.id.localeCompare(b.id);
-    });
-
-    return members;
 }
 
 export async function leaveRoomForUser(
@@ -757,11 +761,20 @@ export async function buildRoomJoinView(
         );
     }
 
-    const rawMessages = await Message.find({
+    const messageFilter: Record<string, unknown> = {
         roomId: roomObjectId,
         parentMessageId: null,
         deletedAt: null,
-    })
+    };
+
+    // Mutual block: same filter as the HTTP messages page, so opening a chat
+    // over the socket never shows a blocked-pair user's messages.
+    const blockedUserIds = await getActiveBlockPairUserIds(userId);
+    if (blockedUserIds.length > 0) {
+        messageFilter.userId = { $nin: blockedUserIds.map((id) => new mongoose.Types.ObjectId(id)) };
+    }
+
+    const rawMessages = await Message.find(messageFilter)
         .sort({ createdAt: -1, _id: -1 })
         .limit(ROOM_MESSAGES_PAGE_SIZE + 1)
         .lean<LeanMessage[]>();

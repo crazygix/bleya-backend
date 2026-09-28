@@ -9,7 +9,9 @@ import { UserIdentity } from '../models/UserIdentity.js';
 import { revokeRefreshToken } from './appleAuthService.js';
 import { AuthChallenge } from '../models/AuthChallenge.js';
 import { PushToken } from '../models/PushToken.js';
+import { Report } from '../models/Report.js';
 import { deleteFromR2, extractKeyFromUrl } from './r2Service.js';
+import { disconnectUser } from '../server/socket.js';
 import { NotFoundError, ErrorCode } from '../utils/errors.js';
 import logger from '../utils/logger.js';
 import type { LeanFullUser, LeanMessage, LeanRoom } from '../types/lean.js';
@@ -39,6 +41,10 @@ export interface UserDataExport {
         lastLogin: string | null;
         hiddenDirectRoomIds: string[];
         roomReadPointers: Array<{ roomId: string; lastReadAt: string | null }>;
+        // Moderation state of the account (Art. 15: data held about the user).
+        status: string;
+        suspendedUntil: string | null;
+        enforcementReason: string;
     };
     linkedProviders: Array<{
         provider: string;
@@ -66,6 +72,16 @@ export interface UserDataExport {
         roomId: string;
         text: string;
         parentMessageId: string | null;
+        createdAt: string | null;
+        removedByModerator: boolean;
+    }>;
+    // Reports this user filed. Who or what was reported beyond the type of
+    // target stays out: that is other people's data.
+    reportsFiled: Array<{
+        reason: string;
+        targetTypes: Array<'user' | 'message' | 'room'>;
+        details: string;
+        status: string;
         createdAt: string | null;
     }>;
     blockedUsers: Array<{
@@ -96,6 +112,9 @@ export async function exportUserData(userId: string): Promise<UserDataExport> {
         joinedRooms?: mongoose.Types.ObjectId[];
         hiddenDirectRooms?: mongoose.Types.ObjectId[];
         roomReadPointers?: Array<{ roomId: mongoose.Types.ObjectId; lastReadAt?: Date | null }>;
+        status?: string;
+        suspendedUntil?: Date | null;
+        enforcementReason?: string;
     } | null>();
 
     if (!user) {
@@ -104,7 +123,7 @@ export async function exportUserData(userId: string): Promise<UserDataExport> {
 
     const joinedRoomIds = user.joinedRooms || [];
 
-    const [identities, passkeys, pushTokens, rooms, messages, blocks, blockedByOthers, notifications] = await Promise.all([
+    const [identities, passkeys, pushTokens, rooms, messages, blocks, blockedByOthers, notifications, reportsFiled] = await Promise.all([
         UserIdentity.find({ userId: userObjectId })
             .select('provider email emailVerified isPrivateRelay linkedAt lastUsedAt')
             .lean<Array<{
@@ -134,9 +153,9 @@ export async function exportUserData(userId: string): Promise<UserDataExport> {
             ],
         }).select('_id type name cityKey participants').lean<LeanRoom[]>(),
         Message.find({ userId: userObjectId })
-            .select('_id roomId text parentMessageId createdAt')
+            .select('_id roomId text parentMessageId createdAt deletedAt')
             .sort({ createdAt: 1 })
-            .lean<LeanMessage[]>(),
+            .lean<Array<LeanMessage & { deletedAt?: Date | null }>>(),
         UserBlock.find({ blockerUserId: userObjectId })
             .select('blockedUserId blockedAt isActive')
             .lean<Array<{ blockedUserId: mongoose.Types.ObjectId; blockedAt?: Date; isActive?: boolean }>>(),
@@ -152,6 +171,18 @@ export async function exportUserData(userId: string): Promise<UserDataExport> {
                 recipient: mongoose.Types.ObjectId;
                 sender: mongoose.Types.ObjectId;
                 read?: boolean;
+                createdAt?: Date;
+            }>>(),
+        Report.find({ reporterUserId: userObjectId })
+            .select('reason reportedUserId messageId roomId details status createdAt')
+            .sort({ createdAt: 1 })
+            .lean<Array<{
+                reason: string;
+                reportedUserId?: mongoose.Types.ObjectId | null;
+                messageId?: mongoose.Types.ObjectId | null;
+                roomId?: mongoose.Types.ObjectId | null;
+                details?: string;
+                status?: string;
                 createdAt?: Date;
             }>>(),
     ]);
@@ -177,6 +208,9 @@ export async function exportUserData(userId: string): Promise<UserDataExport> {
                 roomId: pointer.roomId.toString(),
                 lastReadAt: pointer.lastReadAt ? pointer.lastReadAt.toISOString() : null,
             })),
+            status: user.status || 'active',
+            suspendedUntil: user.suspendedUntil ? user.suspendedUntil.toISOString() : null,
+            enforcementReason: user.enforcementReason || '',
         },
         linkedProviders: identities.map((identity) => ({
             provider: identity.provider,
@@ -213,7 +247,21 @@ export async function exportUserData(userId: string): Promise<UserDataExport> {
             text: message.text,
             parentMessageId: message.parentMessageId?.toString() || null,
             createdAt: message.createdAt ? message.createdAt.toISOString() : null,
+            removedByModerator: !!message.deletedAt,
         })),
+        reportsFiled: reportsFiled.map((report) => {
+            const targetTypes: Array<'user' | 'message' | 'room'> = [];
+            if (report.reportedUserId) targetTypes.push('user');
+            if (report.messageId) targetTypes.push('message');
+            if (report.roomId) targetTypes.push('room');
+            return {
+                reason: report.reason,
+                targetTypes,
+                details: report.details || '',
+                status: report.status || 'open',
+                createdAt: report.createdAt ? report.createdAt.toISOString() : null,
+            };
+        }),
         blockedUsers: blocks.map((block) => ({
             blockedUserId: block.blockedUserId.toString(),
             blockedAt: block.blockedAt ? block.blockedAt.toISOString() : null,
@@ -298,15 +346,9 @@ export async function deleteUserAccount(userId: string): Promise<DeleteAccountRe
     // Capture the user's message ids before deletion for notification cleanup.
     const userMessageIds = await Message.distinct('_id', { userId: userObjectId }) as mongoose.Types.ObjectId[];
 
-    const messagesResult = await Message.deleteMany({ userId: userObjectId });
-
-    // Recompute reply counts on surviving parent threads (idempotent).
-    for (const parentId of replyParentIds) {
-        const remaining = await Message.countDocuments({ parentMessageId: parentId });
-        await Message.updateOne({ _id: parentId }, { $set: { replyCount: remaining } });
-    }
-
-    // Notifications involving the user, or referencing their now-deleted messages.
+    // Notifications involving the user, or referencing their messages. Removed
+    // before the messages so a failure in between can't leave notifications
+    // pointing at deleted messages.
     const notificationsResult = await Notification.deleteMany({
         $or: [
             { recipient: userObjectId },
@@ -315,6 +357,14 @@ export async function deleteUserAccount(userId: string): Promise<DeleteAccountRe
             { thread: { $in: userMessageIds } },
         ],
     });
+
+    const messagesResult = await Message.deleteMany({ userId: userObjectId });
+
+    // Recompute reply counts on surviving parent threads (idempotent).
+    for (const parentId of replyParentIds) {
+        const remaining = await Message.countDocuments({ parentMessageId: parentId, deletedAt: null });
+        await Message.updateOne({ _id: parentId }, { $set: { replyCount: remaining } });
+    }
 
     const blocksResult = await UserBlock.deleteMany({
         $or: [{ blockerUserId: userObjectId }, { blockedUserId: userObjectId }],
@@ -327,11 +377,11 @@ export async function deleteUserAccount(userId: string): Promise<DeleteAccountRe
     // was captured at sign-in. revokeRefreshToken swallows its own errors.
     try {
         const appleIdentities = await UserIdentity.find({ userId: userObjectId, provider: 'apple' })
-            .select('+appleRefreshToken')
-            .lean<{ appleRefreshToken?: string }[]>();
+            .select('+appleRefreshToken +appleClientId')
+            .lean<{ appleRefreshToken?: string; appleClientId?: string }[]>();
         for (const appleIdentity of appleIdentities) {
             if (appleIdentity.appleRefreshToken) {
-                await revokeRefreshToken(appleIdentity.appleRefreshToken);
+                await revokeRefreshToken(appleIdentity.appleRefreshToken, appleIdentity.appleClientId);
             }
         }
     } catch {
@@ -351,6 +401,9 @@ export async function deleteUserAccount(userId: string): Promise<DeleteAccountRe
     }
 
     await User.deleteOne({ _id: userObjectId });
+
+    // The account is gone; end any realtime session it still has.
+    disconnectUser(userId);
 
     const removed = {
         messages: messagesResult.deletedCount ?? 0,

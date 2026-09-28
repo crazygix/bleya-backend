@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 import { Report, REPORT_REASONS, REPORT_STATUSES } from '../models/Report.js';
 import { User } from '../models/User.js';
+import { Message } from '../models/Message.js';
 import { ValidationError, NotFoundError, ErrorCode } from '../utils/errors.js';
 import { validateObjectId } from '../utils/validation.js';
 import { sanitizePlainText } from '../utils/sanitize.js';
@@ -41,12 +42,42 @@ export async function createReport(
         throw new ValidationError(`reason must be one of: ${REPORT_REASONS.join(', ')}.`);
     }
 
-    const reportedUserId = parseOptionalObjectId(input.reportedUserId, 'reported user ID');
-    const roomId = parseOptionalObjectId(input.roomId, 'room ID');
+    let reportedUserId = parseOptionalObjectId(input.reportedUserId, 'reported user ID');
+    let roomId = parseOptionalObjectId(input.roomId, 'room ID');
     const messageId = parseOptionalObjectId(input.messageId, 'message ID');
 
     if (!reportedUserId && !roomId && !messageId) {
         throw new ValidationError('A report must reference a user, a room, or a message.');
+    }
+
+    // Keep a copy of a reported message (see Report.messageSnapshot), and fill
+    // in its author and room when the client didn't send them.
+    let messageSnapshot: {
+        text: string;
+        authorId: mongoose.Types.ObjectId;
+        authorUsername: string;
+        createdAt: Date;
+    } | undefined;
+    if (messageId) {
+        const message = await Message.findById(messageId)
+            .select('text userId roomId createdAt')
+            .lean<{ text: string; userId: mongoose.Types.ObjectId; roomId: mongoose.Types.ObjectId; createdAt: Date } | null>();
+        if (!message) {
+            throw new NotFoundError('Message not found', ErrorCode.MESSAGE_NOT_FOUND);
+        }
+
+        const author = await User.findById(message.userId).select('username').lean<{ username?: string } | null>();
+        messageSnapshot = {
+            text: message.text,
+            authorId: message.userId,
+            authorUsername: author?.username || '',
+            createdAt: message.createdAt,
+        };
+
+        if (!reportedUserId && message.userId.toString() !== reporterUserId) {
+            reportedUserId = message.userId;
+        }
+        roomId = roomId || message.roomId;
     }
 
     if (reportedUserId && reportedUserId.toString() === reporterUserId) {
@@ -61,7 +92,7 @@ export async function createReport(
     }
 
     const details = typeof input.details === 'string'
-        ? sanitizePlainText(input.details, { maxLength: 1000, collapseWhitespace: false, escapeHtml: true })
+        ? sanitizePlainText(input.details, { maxLength: 1000, collapseWhitespace: false })
         : '';
 
     const report = await Report.create({
@@ -69,6 +100,7 @@ export async function createReport(
         reportedUserId,
         roomId,
         messageId,
+        messageSnapshot,
         reason: input.reason,
         details,
     });
@@ -133,6 +165,13 @@ export interface ReportDetail extends ReportListItem {
         deleted: boolean;
         author: { id: string | null; username: string | null };
         roomId: string | null;
+        createdAt: number | null;
+    } | null;
+    // The message as it was when reported; still present after the message or
+    // its author's account is deleted.
+    messageSnapshot: {
+        text: string | null;
+        author: { id: string | null; username: string | null };
         createdAt: number | null;
     } | null;
 }
@@ -246,11 +285,23 @@ export async function getReport(reportId: string): Promise<ReportDetail> {
         }
         : null;
 
+    const snapshot = r.messageSnapshot && typeof r.messageSnapshot === 'object' && r.messageSnapshot.text !== undefined
+        ? {
+            text: typeof r.messageSnapshot.text === 'string' ? r.messageSnapshot.text : null,
+            author: {
+                id: refId(r.messageSnapshot.authorId),
+                username: refField(r.messageSnapshot, 'authorUsername'),
+            },
+            createdAt: toMs(r.messageSnapshot.createdAt),
+        }
+        : null;
+
     return {
         ...formatReportListItem(r),
         resolutionNote: r.resolutionNote || '',
         room: { id: refId(r.roomId), name: refField(r.roomId, 'name') },
         message,
+        messageSnapshot: snapshot,
     };
 }
 
@@ -266,7 +317,7 @@ export async function updateReportStatus(
     }
 
     const resolutionNote = typeof note === 'string'
-        ? sanitizePlainText(note, { maxLength: 1000, collapseWhitespace: false, escapeHtml: true })
+        ? sanitizePlainText(note, { maxLength: 1000, collapseWhitespace: false })
         : '';
 
     const updated = await Report.findByIdAndUpdate(

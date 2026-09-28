@@ -31,3 +31,25 @@ export function isUserBlockedFromActing(state: EnforcementState, now: Date = new
 
     return { blocked: false, reason: '' };
 }
+
+/**
+ * User-facing explanation for a blocked account, shown by the app when sign-in
+ * or token refresh is refused. Null when the account may act.
+ */
+export function describeEnforcementForUser(state: EnforcementState, now: Date = new Date()): string | null {
+    if (!isUserBlockedFromActing(state, now).blocked) {
+        return null;
+    }
+
+    const moderatorReason = state.enforcementReason?.trim();
+    const reasonSuffix = moderatorReason ? ` Reason: ${moderatorReason}` : '';
+
+    if (state.status === 'banned') {
+        return `Your account has been banned.${reasonSuffix}`;
+    }
+
+    const until = state.suspendedUntil
+        ? ` until ${state.suspendedUntil.toISOString().slice(0, 10)}`
+        : '';
+    return `Your account is suspended${until}.${reasonSuffix}`;
+}

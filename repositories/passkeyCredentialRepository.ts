@@ -30,6 +30,8 @@ export interface PasskeyCredentialRepository {
     }): Promise<void>;
     updateCounterAndLastUsed(credentialId: string, counter: number): Promise<void>;
     existsForUser(userId: string): Promise<boolean>;
+    // Deletes one of the user's passkeys by its document id; false if none matched.
+    deleteForUser(userId: string, passkeyId: string): Promise<boolean>;
 }
 
 export class MongoPasskeyCredentialRepository implements PasskeyCredentialRepository {
@@ -77,6 +79,14 @@ export class MongoPasskeyCredentialRepository implements PasskeyCredentialReposi
     async existsForUser(userId: string) {
         const result = await PasskeyCredential.exists({ userId: new mongoose.Types.ObjectId(userId) });
         return !!result;
+    }
+
+    async deleteForUser(userId: string, passkeyId: string) {
+        const result = await PasskeyCredential.deleteOne({
+            _id: new mongoose.Types.ObjectId(passkeyId),
+            userId: new mongoose.Types.ObjectId(userId),
+        });
+        return result.deletedCount > 0;
     }
 }
 

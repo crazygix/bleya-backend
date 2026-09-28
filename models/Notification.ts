@@ -55,4 +55,9 @@ notificationSchema.index({ recipient: 1, isDismissed: 1, createdAt: -1 });
 // Index for counting unread active notifications
 notificationSchema.index({ recipient: 1, isDismissed: 1, read: 1 });
 
+// Cleanup lookups on account deletion and content moderation.
+notificationSchema.index({ sender: 1 });
+notificationSchema.index({ message: 1 });
+notificationSchema.index({ thread: 1 });
+
 export const Notification = mongoose.model('Notification', notificationSchema);

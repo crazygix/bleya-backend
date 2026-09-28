@@ -3,6 +3,7 @@ import mongoose from 'mongoose';
 import { AppError, ErrorResponse, ErrorCode } from '../utils/errors.js';
 import { config } from '../config/index.js';
 import logger from '../utils/logger.js';
+import { getLoggablePath } from '../utils/requestPath.js';
 
 interface RequestWithUser extends Request {
   requestId?: string;
@@ -89,7 +90,7 @@ const logError = (error: Error, req: Request, options: LogErrorOptions = {}) => 
   logger[level]('request.error', {
     requestId: request.requestId,
     method: req.method,
-    path: req.originalUrl || req.path,
+    path: getLoggablePath(req),
     error: {
       name: error.name,
       message: error.message,

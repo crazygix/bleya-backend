@@ -16,6 +16,10 @@ export enum ErrorCode {
   FORBIDDEN = 'FORBIDDEN',
   USER_BLOCKED = 'USER_BLOCKED',
 
+  // Socket event sent while the socket hasn't joined a room (e.g. right after a
+  // reconnect). The app matches the 'Not in a room' message text to rejoin.
+  NOT_IN_ROOM = 'NOT_IN_ROOM',
+
   // Not found errors (404)
   NOT_FOUND = 'NOT_FOUND',
   USER_NOT_FOUND = 'USER_NOT_FOUND',

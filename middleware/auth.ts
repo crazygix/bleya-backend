@@ -7,6 +7,9 @@ import { config } from '../config/index.js';
 export interface AuthRequest extends Request {
     user?: {
         userId: string;
+        // Access token `iat` (seconds). Lets sensitive actions require that the
+        // token belongs to the user's current, recent sign-in.
+        tokenIssuedAt?: number;
     };
 }
 
@@ -19,12 +22,16 @@ export const authenticateUser = (
     if (authHeader && authHeader.startsWith('Bearer ')) {
         const token = authHeader.split(' ')[1];
         try {
-            const decoded = jwt.verify(token, config.jwtSecret);
+            const decoded = jwt.verify(token, config.jwtSecret, { algorithms: ['HS256'] });
             if (typeof decoded !== 'object' || decoded === null || typeof (decoded as { userId?: unknown }).userId !== 'string') {
                 return next(new UnauthorizedError('Invalid or expired token'));
             }
 
-            req.user = { userId: (decoded as { userId: string }).userId };
+            const claims = decoded as { userId: string; iat?: unknown };
+            req.user = {
+                userId: claims.userId,
+                tokenIssuedAt: typeof claims.iat === 'number' ? claims.iat : undefined,
+            };
             next();
         } catch {
             return next(new UnauthorizedError('Invalid or expired token'));

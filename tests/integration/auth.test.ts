@@ -148,7 +148,9 @@ describe('Auth API', () => {
                         email: 'shared@example.com',
                         email_verified: true,
                         is_private_email: false,
+                        nonce: 'apple-nonce-2',
                     }),
+                    rawNonce: 'apple-nonce-2',
                 })
                 .expect(200);
 

@@ -2,10 +2,10 @@ import express from 'express';
 import { authenticateUser, AuthRequest } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { createRateLimiter } from '../middleware/rateLimiter.js';
-import { UnauthorizedError } from '../utils/errors.js';
+import { AppError, UnauthorizedError } from '../utils/errors.js';
 import { config } from '../config/index.js';
 import * as authService from '../services/authService.js';
-import { getUserProfile } from '../services/userService.js';
+import { disconnectUser } from '../server/socket.js';
 
 const router = express.Router();
 
@@ -72,7 +72,17 @@ router.get('/security', authenticateUser, asyncHandler(async (req: AuthRequest, 
 }));
 
 router.post('/passkeys/registration/options', authenticateUser, passkeyRegistrationLimiter, asyncHandler(async (req: AuthRequest, res: express.Response) => {
-    const result = await authService.beginPasskeyRegistration(req.user!.userId);
+    const result = await authService.beginPasskeyRegistration(req.user!.userId, req.user!.tokenIssuedAt);
+    res.json(result);
+}));
+
+router.get('/passkeys', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
+    const passkeys = await authService.listPasskeys(req.user!.userId);
+    res.json(passkeys);
+}));
+
+router.delete('/passkeys/:passkeyId', authenticateUser, passkeyRegistrationLimiter, asyncHandler(async (req: AuthRequest, res: express.Response) => {
+    const result = await authService.deletePasskey(req.user!.userId, req.params.passkeyId, req.user!.tokenIssuedAt);
     res.json(result);
 }));
 
@@ -108,11 +118,6 @@ router.get(config.authProviders.appleAndroidCallbackRoute, asyncHandler(async (r
     res.redirect(302, buildAndroidAppleRedirect(req.query as Record<string, unknown>));
 }));
 
-router.get('/me', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
-    const profile = await getUserProfile(req.user!.userId);
-    res.json(profile);
-}));
-
 router.post('/refresh', refreshLimiter, asyncHandler(async (req: express.Request, res: express.Response) => {
     const { refreshToken } = req.cookies || {};
     if (!refreshToken) {
@@ -125,7 +130,12 @@ router.post('/refresh', refreshLimiter, asyncHandler(async (req: express.Request
         setRefreshCookie(res, result.refreshToken);
         res.json({ token: result.accessToken });
     } catch (error) {
-        res.clearCookie('refreshToken', { path: '/' });
+        // Only a rejected session (invalid/expired token, or a banned account)
+        // ends it. A transient failure such as a database blip must keep the
+        // cookie, or the user is logged out for our outage.
+        if (error instanceof AppError && (error.statusCode === 401 || error.statusCode === 403)) {
+            res.clearCookie('refreshToken', { path: '/' });
+        }
         throw error;
     }
 }));
@@ -143,7 +153,11 @@ router.post('/set-username', authenticateUser, asyncHandler(async (req: AuthRequ
 router.post('/logout', asyncHandler(async (req: express.Request, res: express.Response) => {
     const { refreshToken } = req.cookies || {};
     if (refreshToken) {
-        await authService.logout(refreshToken);
+        const userId = await authService.logout(refreshToken);
+        // End the realtime session too, not just the refresh token.
+        if (userId) {
+            disconnectUser(userId);
+        }
     }
     res.clearCookie('refreshToken', { path: '/' });
     res.json({ success: true });

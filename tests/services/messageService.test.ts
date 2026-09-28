@@ -18,7 +18,7 @@ function fakeUserRepo(overrides: Partial<UserRepository> = {}): UserRepository {
         updateLastLogin: async () => {},
         findByUsernameLean: async () => null,
         findOneAndUpdateByRefreshToken: async () => null,
-        clearRefreshToken: async () => {},
+        clearRefreshToken: async () => null,
         addToJoinedRooms: async () => ({ modifiedCount: 0 }),
         removeFromJoinedRooms: async () => {},
         existsWithRoom: async () => false,
@@ -31,7 +31,6 @@ function fakeUserRepo(overrides: Partial<UserRepository> = {}): UserRepository {
 function fakeRoomRepo(overrides: Partial<RoomRepository> = {}): RoomRepository {
     return {
         findById: async () => null,
-        findPublicRooms: async () => [],
         countByFilter: async () => 0,
         ...overrides,
     };

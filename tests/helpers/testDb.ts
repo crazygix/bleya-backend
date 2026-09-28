@@ -16,6 +16,9 @@ export async function connectTestDb(): Promise<void> {
             });
             const uri = mongoServer.getUri();
             await mongoose.connect(uri);
+            // Build every model's indexes up front so unique constraints hold
+            // from the first test on (and an invalid index spec fails loudly).
+            await Promise.all(Object.values(mongoose.models).map((model) => model.init()));
             return;
         } catch (error) {
             lastError = error;
@@ -34,8 +37,16 @@ export async function connectTestDb(): Promise<void> {
     throw lastError instanceof Error ? lastError : new Error('Failed to start test database');
 }
 
+// Empties every collection but keeps the indexes: dropDatabase() removed them,
+// so only the first test in a file ran with unique indexes in place.
 export async function clearTestDb(): Promise<void> {
-    await mongoose.connection.dropDatabase();
+    const db = mongoose.connection.db;
+    if (!db) {
+        return;
+    }
+
+    const collections = await db.collections();
+    await Promise.all(collections.map((collection) => collection.deleteMany({})));
 }
 
 export async function disconnectTestDb(): Promise<void> {

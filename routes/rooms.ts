@@ -2,7 +2,6 @@ import express from 'express';
 import { authenticateUser, AuthRequest } from '../middleware/auth.js';
 import {
     joinRoomForUser,
-    listPublicRooms,
     getJoinedRoomsForUser,
     getRoomMessagesForUser,
     getRoomMembersForUser,
@@ -18,35 +17,18 @@ import {
     openOrCreateDirectRoom,
 } from '../services/directMessageService.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
-import { ValidationError } from '../utils/errors.js';
-import { sanitizePlainText } from '../utils/sanitize.js';
+import { createRateLimiter } from '../middleware/rateLimiter.js';
+import { config } from '../config/index.js';
 import { validateObjectId } from '../utils/validation.js';
 
 const router = express.Router();
 
-function parseSearchQuery(value: unknown): string | undefined {
-    if (value === undefined || value === null) {
-        return undefined;
-    }
-
-    if (typeof value !== 'string') {
-        throw new ValidationError('Search needs to be text.');
-    }
-
-    const sanitized = sanitizePlainText(value, {
-        maxLength: 80,
-        collapseWhitespace: true,
-        escapeHtml: false,
-    });
-
-    return sanitized.length > 0 ? sanitized : undefined;
-}
-
-router.get('/', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
-    const searchQuery = parseSearchQuery(req.query.search ?? req.query.q);
-    const rooms = await listPublicRooms({ searchQuery });
-    res.json(rooms);
-}));
+// Opening a DM creates a room and adds it to both users' lists; cap it so one
+// account can't spray DMs at everyone.
+const directRoomLimiter = createRateLimiter({
+    name: 'rooms.direct-open',
+    limit: config.isProduction ? 60 : 1000,
+});
 
 router.get('/joined', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
     const rooms = await getJoinedRoomsForUser(req.user!.userId);
@@ -77,7 +59,11 @@ router.get('/:roomId/messages', authenticateUser, asyncHandler(async (req: AuthR
 
 router.get('/:roomId/members', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
     const roomObjectId = validateObjectId(req.params.roomId, 'room ID');
-    const members = await getRoomMembersForUser(req.user!.userId, roomObjectId);
+    const { limit, offset } = req.query;
+    const members = await getRoomMembersForUser(req.user!.userId, roomObjectId, {
+        limit: typeof limit === 'string' ? limit : undefined,
+        offset: typeof offset === 'string' ? offset : undefined,
+    });
     res.json(members);
 }));
 
@@ -113,7 +99,7 @@ router.post('/direct/:otherUserId/unblock', authenticateUser, asyncHandler(async
     res.json(result);
 }));
 
-router.post('/direct/:otherUserId', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
+router.post('/direct/:otherUserId', authenticateUser, directRoomLimiter, asyncHandler(async (req: AuthRequest, res: express.Response) => {
     const result = await openOrCreateDirectRoom(req.user!.userId, req.params.otherUserId);
     res.json(result);
 }));

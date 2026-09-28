@@ -16,8 +16,9 @@ export interface UserRepository {
         hash: string,
         expiresAfter: Date,
         update: Record<string, unknown>
-    ): Promise<{ _id: mongoose.Types.ObjectId } | null>;
-    clearRefreshToken(hash: string): Promise<void>;
+    ): Promise<({ _id: mongoose.Types.ObjectId } & EnforcementState) | null>;
+    // Returns the id of the user whose session was cleared, if any.
+    clearRefreshToken(hash: string): Promise<string | null>;
     addToJoinedRooms(userId: string, roomId: mongoose.Types.ObjectId): Promise<{ modifiedCount: number }>;
     removeFromJoinedRooms(userId: string, roomId: mongoose.Types.ObjectId): Promise<void>;
     existsWithRoom(userId: string, roomId: mongoose.Types.ObjectId): Promise<boolean>;
@@ -64,21 +65,28 @@ export class MongoUserRepository implements UserRepository {
         hash: string,
         expiresAfter: Date,
         update: Record<string, unknown>
-    ): Promise<{ _id: mongoose.Types.ObjectId } | null> {
+    ): Promise<({ _id: mongoose.Types.ObjectId } & EnforcementState) | null> {
         const doc = await User.findOneAndUpdate(
             { refreshTokenHash: hash, refreshTokenExpiresAt: { $gt: expiresAfter } },
             update,
-            { new: true }
-        );
+            { new: true, projection: { _id: 1, status: 1, suspendedUntil: 1, enforcementReason: 1 } }
+        ).lean<{ _id: mongoose.Types.ObjectId } & EnforcementState | null>();
         if (!doc) return null;
-        return { _id: doc._id as mongoose.Types.ObjectId };
+        return {
+            _id: doc._id,
+            status: doc.status,
+            suspendedUntil: doc.suspendedUntil,
+            enforcementReason: doc.enforcementReason,
+        };
     }
 
     async clearRefreshToken(hash: string) {
-        await User.findOneAndUpdate(
+        const doc = await User.findOneAndUpdate(
             { refreshTokenHash: hash },
-            { $unset: { refreshTokenHash: '', refreshTokenExpiresAt: '' } }
-        );
+            { $unset: { refreshTokenHash: '', refreshTokenExpiresAt: '' } },
+            { projection: { _id: 1 } }
+        ).lean<{ _id: mongoose.Types.ObjectId } | null>();
+        return doc ? doc._id.toString() : null;
     }
 
     async addToJoinedRooms(userId: string, roomId: mongoose.Types.ObjectId) {

@@ -1,7 +1,6 @@
 import { Server as SocketIOServer, Socket } from 'socket.io';
 import { Server as HTTPServer } from 'http';
 import jwt from 'jsonwebtoken';
-import { Room } from '../models/Room.js';
 import { Message } from '../models/Message.js';
 import { User } from '../models/User.js';
 import {
@@ -25,6 +24,8 @@ interface AuthenticatedSocket {
     userId: string;
     roomId?: string;
     threadId?: string;
+    // Expiry (ms since epoch) of the access token the socket connected with.
+    tokenExpiresAt?: number;
 }
 
 interface EventRateState {
@@ -34,7 +35,6 @@ interface EventRateState {
 
 interface SocketDataState {
     user?: AuthenticatedSocket;
-    eventRateLimits?: Map<string, EventRateState>;
 }
 
 interface SocketPresence {
@@ -53,6 +53,44 @@ const EVENT_RATE_LIMITS: Record<string, { max: number; windowMs: number }> = {
     close_thread: { max: 120, windowMs: 60_000 },
 };
 
+// Event budgets are per user, shared by all of that user's sockets, so opening
+// extra connections doesn't multiply the message or join allowance.
+const eventBudgetsByUserId = new Map<string, Map<string, EventRateState>>();
+const EVENT_BUDGET_SWEEP_INTERVAL_MS = 60_000;
+let eventBudgetSweeper: NodeJS.Timeout | null = null;
+
+function startEventBudgetSweeper(): void {
+    if (eventBudgetSweeper) {
+        return;
+    }
+
+    eventBudgetSweeper = setInterval(() => {
+        const now = Date.now();
+        for (const [userId, budgets] of eventBudgetsByUserId) {
+            for (const [eventName, state] of budgets) {
+                if (state.resetAt <= now) {
+                    budgets.delete(eventName);
+                }
+            }
+            if (budgets.size === 0) {
+                eventBudgetsByUserId.delete(userId);
+            }
+        }
+    }, EVENT_BUDGET_SWEEP_INTERVAL_MS);
+    eventBudgetSweeper.unref();
+}
+
+// Socket.IO's own connection-error message prefixes are a protocol with the
+// mobile client: "Authentication error" => refresh the token and reconnect,
+// "Account blocked:" => log out. Anything that is neither (like a database
+// outage) must use a different prefix so the app just retries later.
+const SERVER_UNAVAILABLE_ERROR = 'Server unavailable: please try again shortly.';
+
+// The app auto-rejoins its current room when an error message contains
+// "Not in a room" (e.g. a message sent right after a reconnect), and doesn't
+// show it — so keep that phrase in this text.
+const NOT_IN_ROOM_MESSAGE = 'Not in a room. Reopen the chat and try again.';
+
 function emitSocketError(socket: SocketWithState, code: ErrorCode, message: string): void {
     socket.emit('error', {
         error: {
@@ -62,17 +100,19 @@ function emitSocketError(socket: SocketWithState, code: ErrorCode, message: stri
     });
 }
 
-function consumeEventBudget(socket: SocketWithState, eventName: keyof typeof EVENT_RATE_LIMITS): boolean {
+function consumeEventBudget(userId: string, eventName: keyof typeof EVENT_RATE_LIMITS): boolean {
     const limits = EVENT_RATE_LIMITS[eventName];
-    if (!socket.data.eventRateLimits) {
-        socket.data.eventRateLimits = new Map();
+    let budgets = eventBudgetsByUserId.get(userId);
+    if (!budgets) {
+        budgets = new Map();
+        eventBudgetsByUserId.set(userId, budgets);
     }
 
     const now = Date.now();
-    const existing = socket.data.eventRateLimits.get(eventName);
+    const existing = budgets.get(eventName);
 
     if (!existing || existing.resetAt <= now) {
-        socket.data.eventRateLimits.set(eventName, {
+        budgets.set(eventName, {
             count: 1,
             resetAt: now + limits.windowMs,
         });
@@ -84,7 +124,6 @@ function consumeEventBudget(socket: SocketWithState, eventName: keyof typeof EVE
     }
 
     existing.count += 1;
-    socket.data.eventRateLimits.set(eventName, existing);
     return true;
 }
 
@@ -255,7 +294,12 @@ async function emitRoomSummaryUpdate(
 let ioRef: SocketIOServer | null = null;
 
 // Push a removal so connected clients drop a moderated message immediately.
-export function emitMessageRemoved(roomId: string, payload: { messageId: string; roomId: string }): void {
+// parentMessageId is set when the removed message is a thread reply, and is null
+// for a top-level message (whose open thread view should then close).
+export function emitMessageRemoved(
+    roomId: string,
+    payload: { messageId: string; roomId: string; parentMessageId: string | null }
+): void {
     ioRef?.to(roomId).emit('message_removed', payload);
 }
 
@@ -279,17 +323,19 @@ export function setupSocketIO(server: HTTPServer) {
         }
 
         let userId: string;
+        let tokenExpiresAt: number | undefined;
         try {
-            const decoded = jwt.verify(token, config.jwtSecret);
+            const decoded = jwt.verify(token, config.jwtSecret, { algorithms: ['HS256'] });
             if (typeof decoded !== 'object' || decoded === null) {
                 return next(new Error('Authentication error: Invalid token payload'));
             }
 
-            const payload = decoded as { userId?: unknown };
+            const payload = decoded as { userId?: unknown; exp?: unknown };
             if (typeof payload.userId !== 'string') {
                 return next(new Error('Authentication error: Invalid user ID payload'));
             }
             userId = payload.userId;
+            tokenExpiresAt = typeof payload.exp === 'number' ? payload.exp * 1000 : undefined;
         } catch {
             return next(new Error('Authentication error: Invalid token'));
         }
@@ -302,27 +348,47 @@ export function setupSocketIO(server: HTTPServer) {
             const enforcementDoc = await User.findById(userId)
                 .select('status suspendedUntil enforcementReason')
                 .lean();
-            if (enforcementDoc) {
-                const enforcement = isUserBlockedFromActing(enforcementDoc as EnforcementState);
-                if (enforcement.blocked) {
-                    // Stable "Account blocked:" prefix so the mobile client treats
-                    // this as a hard ban (show + log out), distinct from the
-                    // "Authentication error" prefix it uses to trigger token refresh.
-                    return next(new Error(`Account blocked: ${enforcement.reason || 'Your account is not allowed to connect.'}`));
-                }
+            if (!enforcementDoc) {
+                // Deleted account: its still-unexpired token must not connect.
+                return next(new Error('Authentication error: Account not found'));
             }
-        } catch {
-            return next(new Error('Authentication error: Invalid token'));
+
+            const enforcement = isUserBlockedFromActing(enforcementDoc as EnforcementState);
+            if (enforcement.blocked) {
+                // Stable "Account blocked:" prefix so the mobile client treats
+                // this as a hard ban (show + log out), distinct from the
+                // "Authentication error" prefix it uses to trigger token refresh.
+                return next(new Error(`Account blocked: ${enforcement.reason || 'Your account is not allowed to connect.'}`));
+            }
+        } catch (error) {
+            // A lookup failure is our problem, not the token's. Using the
+            // "Authentication error" prefix here made the app refresh (or log
+            // out) during a database blip.
+            logger.error('socket.handshake.enforcement_lookup_failed', {
+                userId,
+                error: error instanceof Error ? error.message : String(error),
+            });
+            return next(new Error(SERVER_UNAVAILABLE_ERROR));
         }
 
-        socket.data.user = { userId };
-        socket.data.eventRateLimits = new Map();
+        socket.data.user = { userId, tokenExpiresAt };
         next();
     });
+
+    startEventBudgetSweeper();
 
     io.on('connection', (rawSocket) => {
         const socket = rawSocket as SocketWithState;
         const user = getSocketUser(socket);
+
+        // Newest connection wins: beyond the per-user cap, drop the oldest
+        // sockets (presence maps keep insertion order).
+        const existingSocketIds = [...(userPresenceBySocketId.get(user.userId)?.keys() || [])];
+        const excess = existingSocketIds.length + 1 - config.socket.maxConnectionsPerUser;
+        for (const staleSocketId of existingSocketIds.slice(0, Math.max(0, excess))) {
+            io.sockets.sockets.get(staleSocketId)?.disconnect(true);
+            clearSocketPresence(user.userId, staleSocketId);
+        }
 
         setSocketPresence(user.userId, socket.id, {});
 
@@ -331,8 +397,18 @@ export function setupSocketIO(server: HTTPServer) {
         const userRoom = `user:${user.userId}`;
         socket.join(userRoom);
 
+        // Optionally end the socket when its access token expires, so a session
+        // can't outlive the token it was opened with (see config.socket).
+        let tokenExpiryTimer: NodeJS.Timeout | null = null;
+        if (config.socket.enforceTokenExpiry && user.tokenExpiresAt) {
+            tokenExpiryTimer = setTimeout(() => {
+                emitSocketError(socket, ErrorCode.TOKEN_EXPIRED, 'Authentication error: session expired');
+                socket.disconnect(true);
+            }, Math.max(0, user.tokenExpiresAt - Date.now()));
+        }
+
         socket.on('join_room', async (data: unknown) => {
-            if (!consumeEventBudget(socket, 'join_room')) {
+            if (!consumeEventBudget(user.userId, 'join_room')) {
                 emitSocketError(socket, ErrorCode.TOO_MANY_REQUESTS, 'Too many join requests. Please slow down.');
                 return;
             }
@@ -363,7 +439,6 @@ export function setupSocketIO(server: HTTPServer) {
                     lastReadAt: view.lastReadAt,
                 });
 
-                socket.to(roomId).emit('user_joined', { userId: user.userId });
                 logger.info('socket.room_joined', { userId: user.userId, roomId });
             } catch (error) {
                 if (error instanceof AppError) {
@@ -380,7 +455,7 @@ export function setupSocketIO(server: HTTPServer) {
         });
 
         socket.on('open_thread', async (data: unknown) => {
-            if (!consumeEventBudget(socket, 'open_thread')) {
+            if (!consumeEventBudget(user.userId, 'open_thread')) {
                 emitSocketError(socket, ErrorCode.TOO_MANY_REQUESTS, 'Too many thread events. Please slow down.');
                 return;
             }
@@ -389,7 +464,7 @@ export function setupSocketIO(server: HTTPServer) {
                 const payload = parseOpenThreadPayload(data);
 
                 if (!user.roomId) {
-                    emitSocketError(socket, ErrorCode.VALIDATION_ERROR, 'Open a chat first.');
+                    emitSocketError(socket, ErrorCode.NOT_IN_ROOM, NOT_IN_ROOM_MESSAGE);
                     return;
                 }
 
@@ -434,7 +509,7 @@ export function setupSocketIO(server: HTTPServer) {
         });
 
         socket.on('close_thread', () => {
-            if (!consumeEventBudget(socket, 'close_thread')) {
+            if (!consumeEventBudget(user.userId, 'close_thread')) {
                 emitSocketError(socket, ErrorCode.TOO_MANY_REQUESTS, 'Too many thread events. Please slow down.');
                 return;
             }
@@ -446,38 +521,55 @@ export function setupSocketIO(server: HTTPServer) {
             });
         });
 
-        socket.on('send_message', async (data: unknown) => {
-            if (!consumeEventBudget(socket, 'send_message')) {
-                emitSocketError(socket, ErrorCode.TOO_MANY_REQUESTS, 'Too many messages. Please slow down.');
+        socket.on('send_message', async (data: unknown, ack?: unknown) => {
+            // Optional acknowledgement: clients that pass a callback learn whether
+            // the message was stored before clearing their draft. Errors are still
+            // also emitted as an 'error' event for clients that don't use acks.
+            const respond = typeof ack === 'function'
+                ? (ack as (response: Record<string, unknown>) => void)
+                : null;
+            const fail = (code: ErrorCode, message: string): void => {
+                emitSocketError(socket, code, message);
+                respond?.({ ok: false, error: { code, message } });
+            };
+
+            if (!consumeEventBudget(user.userId, 'send_message')) {
+                fail(ErrorCode.TOO_MANY_REQUESTS, 'Too many messages. Please slow down.');
                 return;
             }
+
+            // The room is captured before any await: the user can switch or leave
+            // rooms while the message is being stored.
+            const roomId = user.roomId;
 
             try {
                 const payload = parseSendMessagePayload(data);
 
-                if (!user.roomId) {
-                    emitSocketError(socket, ErrorCode.VALIDATION_ERROR, 'Open a chat first.');
+                if (!roomId) {
+                    fail(ErrorCode.NOT_IN_ROOM, NOT_IN_ROOM_MESSAGE);
                     return;
                 }
 
                 const result = await createMessage({
                     userId: user.userId,
-                    roomId: user.roomId,
+                    roomId,
                     text: payload.text,
                     parentMessageId: payload.parentMessageId,
                 });
 
+                respond?.({ ok: true, message: result.messageData });
+
                 // Mutual block: exclude blocked-pair users from the live broadcast
                 // (.except on their personal `user:<id>` room). An empty list
                 // excludes no one.
-                io.to(user.roomId)
+                io.to(result.roomId)
                     .except(result.blockedPairUserIds.map((id) => `user:${id}`))
                     .emit('new_message', result.messageData);
 
                 if (result.isTopLevel) {
                     await emitRoomSummaryUpdate(
                         io,
-                        user.roomId,
+                        result.roomId,
                         result.messageData,
                         result.roomType,
                         result.roomParticipants,
@@ -501,7 +593,7 @@ export function setupSocketIO(server: HTTPServer) {
                 } catch (error) {
                     logger.error('socket.push_dispatch.failed', {
                         userId: user.userId,
-                        roomId: user.roomId,
+                        roomId: result.roomId,
                         messageId: result.messageData.id,
                         error: error instanceof Error ? error.message : String(error),
                     });
@@ -509,24 +601,26 @@ export function setupSocketIO(server: HTTPServer) {
 
                 logger.info('socket.message_sent', {
                     userId: user.userId,
-                    roomId: user.roomId,
+                    roomId: result.roomId,
                     parentMessageId: payload.parentMessageId || null,
                 });
             } catch (error) {
                 if (error instanceof AppError) {
-                    emitSocketError(socket, error.code, error.message);
+                    fail(error.code, error.message);
                     return;
                 }
                 logger.error('socket.send_message.failed', {
                     userId: user.userId,
-                    roomId: user.roomId,
+                    roomId,
                     error: error instanceof Error ? error.message : String(error),
                 });
-                emitSocketError(socket, ErrorCode.INTERNAL_ERROR, "We couldn't send that message. Please try again.");
+                fail(ErrorCode.INTERNAL_ERROR, "We couldn't send that message. Please try again.");
             }
         });
 
-        socket.on('leave_room', async () => {
+        // Synchronous on purpose: no database work here, so nothing can fail
+        // outside the handler's control.
+        socket.on('leave_room', () => {
             if (!user.roomId) {
                 return;
             }
@@ -536,20 +630,14 @@ export function setupSocketIO(server: HTTPServer) {
             user.threadId = undefined;
             setSocketPresence(user.userId, socket.id, {});
 
-            socket.to(roomId).emit('user_left', { userId: user.userId });
             socket.leave(roomId);
 
-            const room = await Room.findById(roomId).select('name').lean<{ name?: string } | null>();
-            logger.info('socket.room_left', {
-                userId: user.userId,
-                roomId,
-                roomName: room?.name,
-            });
+            logger.info('socket.room_left', { userId: user.userId, roomId });
         });
 
         socket.on('disconnect', () => {
-            if (user.roomId) {
-                socket.to(user.roomId).emit('user_left', { userId: user.userId });
+            if (tokenExpiryTimer) {
+                clearTimeout(tokenExpiryTimer);
             }
 
             clearSocketPresence(user.userId, socket.id);

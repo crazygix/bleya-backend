@@ -14,7 +14,6 @@ import {
     updateProfileImage,
 } from '../services/userService.js';
 import { exportUserData, deleteUserAccount } from '../services/accountService.js';
-import { moderateImage } from '../services/imageModerationService.js';
 import { blockUser, unblockUser } from '../services/blockService.js';
 import { createRateLimiter } from '../middleware/rateLimiter.js';
 import { config } from '../config/index.js';
@@ -29,6 +28,8 @@ const PROD = config.isProduction;
 const exportLimiter = createRateLimiter({ name: 'users.export', limit: PROD ? 5 : 100 });
 // Public-profile lookups are enumerable; cap them to limit bulk harvesting.
 const publicProfileLimiter = createRateLimiter({ name: 'users.public-profile', limit: PROD ? 120 : 1000 });
+// Each upload is decoded, re-encoded and stored in R2.
+const profileImageLimiter = createRateLimiter({ name: 'users.profile-image', limit: PROD ? 20 : 500 });
 
 interface LeanActiveUserBlock {
     _id: mongoose.Types.ObjectId;
@@ -41,6 +42,9 @@ const upload = multer({
     limits: {
         fileSize: 5 * 1024 * 1024,
     },
+    // A cheap first gate only: the app uploads as application/octet-stream, so
+    // the name's extension counts too. The real check is decoding the file
+    // (userService.normalizeProfileImage).
     fileFilter: (_req, file, cb) => {
         const allowedTypes = /jpeg|jpg|png|gif|webp/;
         const extname = path.extname(file.originalname).toLowerCase().replace('.', '');
@@ -71,21 +75,12 @@ router.put('/profile', authenticateUser, asyncHandler(async (req: AuthRequest, r
     res.json(profile);
 }));
 
-router.post('/profile-image', authenticateUser, upload.single('image'), asyncHandler(async (req: AuthRequest, res: express.Response) => {
+router.post('/profile-image', authenticateUser, profileImageLimiter, upload.single('image'), asyncHandler(async (req: AuthRequest, res: express.Response) => {
     if (!req.file) {
         throw new ValidationError('No image selected. Pick one?');
     }
 
-    const imageCheck = await moderateImage(req.file.buffer, req.file.mimetype);
-    if (!imageCheck.allowed) {
-        throw new ValidationError(imageCheck.reason || "That image isn't allowed.");
-    }
-
-    const profile = await updateProfileImage(req.user!.userId, {
-        buffer: req.file.buffer,
-        originalname: req.file.originalname,
-        mimetype: req.file.mimetype,
-    });
+    const profile = await updateProfileImage(req.user!.userId, { buffer: req.file.buffer });
     res.json(profile);
 }));
 

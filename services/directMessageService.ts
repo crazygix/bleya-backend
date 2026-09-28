@@ -54,6 +54,8 @@ export interface OpenDirectRoomResult {
     };
 }
 
+export const DIRECT_ROOM_NAME = 'Direct message';
+
 export function buildDirectParticipantsHash(currentUserId: string, otherUserId: string): string {
     return [currentUserId, otherUserId].sort().join('_');
 }
@@ -108,7 +110,9 @@ export async function getDirectChatStatus(
     currentUserId: string,
     otherUserId: string
 ): Promise<DirectChatStatusDto> {
-    validateObjectId(otherUserId, 'user ID');
+    // Normalized (lowercase) so a mixed-case id can't slip past the self
+    // check, the block-state comparison or the participants hash.
+    otherUserId = validateObjectId(otherUserId, 'user ID').toString();
 
     if (otherUserId === currentUserId) {
         throw new ValidationError("You can't open chat status for yourself.");
@@ -148,7 +152,9 @@ export async function deleteDirectChat(
     currentUserId: string,
     otherUserId: string
 ): Promise<DeleteDirectChatResult> {
-    validateObjectId(otherUserId, 'user ID');
+    // Normalized (lowercase) so a mixed-case id can't slip past the self
+    // check, the block-state comparison or the participants hash.
+    otherUserId = validateObjectId(otherUserId, 'user ID').toString();
 
     if (otherUserId === currentUserId) {
         throw new ValidationError("You can't delete a chat with yourself.");
@@ -195,7 +201,9 @@ export async function blockDirectUser(
     currentUserId: string,
     otherUserId: string
 ): Promise<BlockDirectUserResult> {
-    validateObjectId(otherUserId, 'user ID');
+    // Normalized (lowercase) so a mixed-case id can't slip past the self
+    // check, the block-state comparison or the participants hash.
+    otherUserId = validateObjectId(otherUserId, 'user ID').toString();
 
     if (otherUserId === currentUserId) {
         throw new ValidationError("You can't block yourself.");
@@ -262,7 +270,9 @@ export async function unblockDirectUser(
     currentUserId: string,
     otherUserId: string
 ): Promise<UnblockDirectUserResult> {
-    validateObjectId(otherUserId, 'user ID');
+    // Normalized (lowercase) so a mixed-case id can't slip past the self
+    // check, the block-state comparison or the participants hash.
+    otherUserId = validateObjectId(otherUserId, 'user ID').toString();
 
     if (otherUserId === currentUserId) {
         throw new ValidationError("You can't unblock yourself.");
@@ -280,7 +290,7 @@ export async function unblockDirectUser(
         blockerUserId: blockerUserObjectId,
         blockedUserId: blockedUserObjectId,
         isActive: true,
-    }).select('_id roomId').lean<Array<{ _id: mongoose.Types.ObjectId; roomId: mongoose.Types.ObjectId }>>();
+    }).select('_id roomId').lean<Array<{ _id: mongoose.Types.ObjectId; roomId?: mongoose.Types.ObjectId | null }>>();
 
     if (activeBlocks.length === 0) {
         return {
@@ -293,7 +303,10 @@ export async function unblockDirectUser(
 
     const now = new Date();
     const activeBlockIds = activeBlocks.map((block) => block._id);
-    const roomIds = [...new Set(activeBlocks.map((block) => block.roomId.toString()))]
+    // User-level blocks (from a profile or public room) have no roomId.
+    const roomIds = [...new Set(activeBlocks
+        .filter((block) => block.roomId)
+        .map((block) => block.roomId!.toString()))]
         .map((roomId) => new mongoose.Types.ObjectId(roomId));
 
     await UserBlock.updateMany(
@@ -334,7 +347,9 @@ export async function openOrCreateDirectRoom(
     currentUserId: string,
     otherUserId: string
 ): Promise<OpenDirectRoomResult> {
-    validateObjectId(otherUserId, 'user ID');
+    // Normalized (lowercase) so a mixed-case id can't slip past the self
+    // check, the block-state comparison or the participants hash.
+    otherUserId = validateObjectId(otherUserId, 'user ID').toString();
 
     if (otherUserId === currentUserId) {
         throw new ValidationError("You can't message yourself.");
@@ -342,7 +357,7 @@ export async function openOrCreateDirectRoom(
 
     const [otherUser, currentUser, blockState] = await Promise.all([
         User.findById(otherUserId).select('_id username profileImageUrl').lean<LeanUser | null>(),
-        User.findById(currentUserId).select('_id username').lean<LeanUser | null>(),
+        User.findById(currentUserId).select('_id').lean<LeanUser | null>(),
         getDirectBlockState(currentUserId, otherUserId),
     ]);
 
@@ -369,24 +384,7 @@ export async function openOrCreateDirectRoom(
     const participants = [currentUserId, otherUserId].sort();
     const participantsHash = participants.join('_');
 
-    const room = await Room.findOneAndUpdate(
-        {
-            type: 'private',
-            participantsHash,
-        },
-        {
-            $setOnInsert: {
-                name: `DM: ${currentUser.username || currentUserId} & ${otherUser.username || otherUserId}`,
-                type: 'private',
-                participants: participants.map((id) => new mongoose.Types.ObjectId(id)),
-                participantsHash,
-            },
-        },
-        {
-            upsert: true,
-            new: true,
-        }
-    );
+    const room = await upsertDirectRoom(participantsHash, participants);
 
     if (!room) {
         throw new Error('Failed to create or fetch direct message room');
@@ -416,4 +414,37 @@ export async function openOrCreateDirectRoom(
             otherUserId,
         },
     };
+}
+
+// The unique {participantsHash, type} index makes two concurrent upserts for
+// the same pair collide; the loser reads the winner's room.
+async function upsertDirectRoom(participantsHash: string, participants: string[]) {
+    try {
+        return await Room.findOneAndUpdate(
+            {
+                type: 'private',
+                participantsHash,
+            },
+        {
+            $setOnInsert: {
+                // Neutral on purpose: the app shows the other participant's
+                // current username, and a stored name would keep a deleted
+                // user's handle around.
+                name: DIRECT_ROOM_NAME,
+                type: 'private',
+                participants: participants.map((id) => new mongoose.Types.ObjectId(id)),
+                participantsHash,
+            },
+        },
+            {
+                upsert: true,
+                new: true,
+            }
+        );
+    } catch (error) {
+        if ((error as { code?: unknown }).code === 11000) {
+            return Room.findOne({ type: 'private', participantsHash });
+        }
+        throw error;
+    }
 }

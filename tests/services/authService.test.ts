@@ -35,7 +35,7 @@ function fakeUserRepo(overrides: Partial<UserRepository> = {}): UserRepository {
         updateLastLogin: async () => {},
         findByUsernameLean: async () => null,
         findOneAndUpdateByRefreshToken: async () => null,
-        clearRefreshToken: async () => {},
+        clearRefreshToken: async () => null,
         addToJoinedRooms: async () => ({ modifiedCount: 0 }),
         removeFromJoinedRooms: async () => {},
         existsWithRoom: async () => false,
@@ -71,6 +71,7 @@ function fakePasskeyCredentialRepo(overrides: Partial<PasskeyCredentialRepositor
         create: async () => {},
         updateCounterAndLastUsed: async () => {},
         existsForUser: async () => false,
+        deleteForUser: async () => false,
         ...overrides,
     };
 }
@@ -229,9 +230,14 @@ describe('authService (mocked)', () => {
         const userId = new mongoose.Types.ObjectId().toString();
         let createdCredential = '';
 
+        const signedInAt = new Date();
         const svc = createAuthService({
             userRepo: fakeUserRepo({
-                findById: async () => createMockUser({ _id: new mongoose.Types.ObjectId(userId), username: 'alice' }) as any,
+                findById: async () => createMockUser({
+                    _id: new mongoose.Types.ObjectId(userId),
+                    username: 'alice',
+                    lastLogin: signedInAt,
+                }) as any,
             }),
             userIdentityRepo: fakeUserIdentityRepo(),
             passkeyCredentialRepo: fakePasskeyCredentialRepo({
@@ -252,7 +258,7 @@ describe('authService (mocked)', () => {
             passkeyService: fakePasskeyService(),
         });
 
-        const options = await svc.beginPasskeyRegistration(userId);
+        const options = await svc.beginPasskeyRegistration(userId, Math.floor(signedInAt.getTime() / 1000));
         assert.equal(typeof options.challengeId, 'string');
 
         const result = await svc.finishPasskeyRegistration(userId, options.challengeId, {

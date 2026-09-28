@@ -13,6 +13,10 @@ import type { LeanRoom, LeanMessage, LeanUser } from '../types/lean.js';
 
 const router = express.Router();
 
+// Newest replies returned for a thread (oldest first), so one huge thread
+// can't produce an unbounded response.
+const MAX_THREAD_REPLIES = 500;
+
 async function assertCanAccessMessageRoom(userId: string, roomId: mongoose.Types.ObjectId): Promise<void> {
     const [room, hasRoomMembership] = await Promise.all([
         Room.findById(roomId).select('_id type participants').lean<LeanRoom | null>(),
@@ -66,9 +70,11 @@ router.get('/:messageId/thread', authenticateUser, asyncHandler(async (req: Auth
         repliesFilter.userId = { $nin: blockedUserIds.map((id) => new mongoose.Types.ObjectId(id)) };
     }
 
-    const replies = await Message.find(repliesFilter)
-        .sort({ createdAt: 1 })
-        .lean<LeanMessage[]>();
+    const replies = (await Message.find(repliesFilter)
+        .sort({ createdAt: -1, _id: -1 })
+        .limit(MAX_THREAD_REPLIES)
+        .lean<LeanMessage[]>())
+        .reverse();
 
     const allMessages = [parentMessage, ...replies];
     const userIds = [...new Set(allMessages.map((msg) => msg.userId.toString()))]

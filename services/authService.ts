@@ -1,8 +1,10 @@
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import mongoose from 'mongoose';
-import { ValidationError, UnauthorizedError, NotFoundError, ErrorCode } from '../utils/errors.js';
+import { AppError, ValidationError, UnauthorizedError, NotFoundError, ErrorCode } from '../utils/errors.js';
 import { isValidUsername, normalizeUsernameInput } from '../utils/username.js';
+import { assertCleanText, containsBlockedTerm } from '../utils/contentFilter.js';
+import { describeEnforcementForUser, type EnforcementState } from '../utils/enforcement.js';
 import { config } from '../config/index.js';
 import { captureAppleRefreshToken } from './appleAuthService.js';
 import { type UserProfileResponse, toUserProfileResponse } from './userService.js';
@@ -28,6 +30,7 @@ import {
     type PasskeyService,
     passkeyService as defaultPasskeyService,
 } from './passkeyService.js';
+import { isIdentityBanned } from './bannedIdentityService.js';
 import type {
     RegistrationResponseJSON,
     AuthenticationResponseJSON,
@@ -58,6 +61,23 @@ export interface PasskeyOptionsResult {
     options: Record<string, unknown>;
 }
 
+export interface PasskeySummary {
+    id: string;
+    deviceType: string;
+    backedUp: boolean;
+    createdAt: number | null;
+    lastUsedAt: number | null;
+}
+
+// Adding (or removing) a passkey changes how the account can be entered, so it
+// needs a fresh sign-in rather than any valid access token: the token must come
+// from the current session (issued at or after its sign-in) and that sign-in
+// must be recent. The app only offers registration right after sign-in or
+// choosing a username, which is well inside this window.
+const RECENT_SIGN_IN_WINDOW_MS = 30 * 60 * 1000;
+// iat has one-second resolution; lastLogin is stamped just before signing.
+const TOKEN_CLOCK_SKEW_MS = 5_000;
+
 export interface AuthServiceDeps {
     userRepo: UserRepository;
     userIdentityRepo: UserIdentityRepository;
@@ -65,9 +85,12 @@ export interface AuthServiceDeps {
     authChallengeRepo: AuthChallengeRepository;
     providerIdentityService: ProviderIdentityService;
     passkeyService: PasskeyService;
+    // Whether a provider identity belongs to a banned/suspended account that was
+    // deleted. Optional so DB-less unit tests can omit it (treated as not banned).
+    isIdentityBanned?: (provider: AuthProvider, providerUserId: string) => Promise<boolean>;
 }
 
-type AuthUserDocument = mongoose.Document & {
+type AuthUserDocument = mongoose.Document & EnforcementState & {
     _id: mongoose.Types.ObjectId;
     username?: string;
     bio?: string;
@@ -78,6 +101,15 @@ type AuthUserDocument = mongoose.Document & {
     refreshTokenHash?: string;
     refreshTokenExpiresAt?: Date;
 };
+
+// Banned/suspended accounts get no session. 403 + USER_BLOCKED + a message the
+// app can show as-is (it displays error.message).
+function assertAccountMayStartSession(state: EnforcementState): void {
+    const explanation = describeEnforcementForUser(state);
+    if (explanation) {
+        throw new AppError(ErrorCode.USER_BLOCKED, explanation, 403);
+    }
+}
 
 export function signAccessToken(payload: { userId: string }): string {
     return jwt.sign(payload, config.jwtSecret, {
@@ -158,8 +190,11 @@ export function createAuthService(deps: AuthServiceDeps) {
         providerIdentityService,
         passkeyService,
     } = deps;
+    const isIdentityBanned = deps.isIdentityBanned ?? (async () => false);
 
     async function issueSessionForUser(user: AuthUserDocument): Promise<AuthSessionResult & { refreshToken: string }> {
+        assertAccountMayStartSession(user);
+
         const now = new Date();
         const refreshToken = generateRefreshToken();
         user.refreshTokenHash = hashRefreshToken(refreshToken);
@@ -193,6 +228,12 @@ export function createAuthService(deps: AuthServiceDeps) {
         if (existingIdentity) {
             await userIdentityRepo.updateLastUsed(existingIdentity._id!.toString());
             return loadUser(existingIdentity.userId.toString());
+        }
+
+        // A banned (or still-suspended) account that was deleted can't come back
+        // under the same Apple/Google identity.
+        if (await isIdentityBanned(identity.provider, identity.providerUserId)) {
+            throw new AppError(ErrorCode.USER_BLOCKED, 'This account has been banned.', 403);
         }
 
         const user = await userRepo.create({}) as AuthUserDocument;
@@ -241,7 +282,8 @@ export function createAuthService(deps: AuthServiceDeps) {
         await captureAppleRefreshToken(
             identity.provider,
             identity.providerUserId,
-            normalizeOptionalString(input.authorizationCode)
+            normalizeOptionalString(input.authorizationCode),
+            identity.audience
         );
 
         return issueSessionForUser(user);
@@ -256,8 +298,48 @@ export function createAuthService(deps: AuthServiceDeps) {
         };
     }
 
-    async function beginPasskeyRegistration(userId: string): Promise<PasskeyOptionsResult> {
+    function assertRecentSignIn(user: AuthUserDocument, tokenIssuedAt?: number): void {
+        const lastLoginMs = user.lastLogin ? user.lastLogin.getTime() : 0;
+        const tokenIssuedMs = typeof tokenIssuedAt === 'number' ? tokenIssuedAt * 1000 : 0;
+        const tokenFromCurrentSession = tokenIssuedMs + TOKEN_CLOCK_SKEW_MS >= lastLoginMs;
+        const signInIsRecent = Date.now() - lastLoginMs <= RECENT_SIGN_IN_WINDOW_MS;
+
+        if (!tokenFromCurrentSession || !signInIsRecent) {
+            throw new AppError(ErrorCode.FORBIDDEN, 'For your security, please sign in again before changing your passkeys.', 403);
+        }
+    }
+
+    async function listPasskeys(userId: string): Promise<PasskeySummary[]> {
+        await loadUser(userId);
+        const passkeys = await passkeyCredentialRepo.listForUser(userId);
+        return passkeys.map((passkey) => ({
+            id: passkey._id ? passkey._id.toString() : '',
+            deviceType: passkey.deviceType || 'unknown',
+            backedUp: passkey.backedUp ?? false,
+            createdAt: passkey.createdAt ? passkey.createdAt.getTime() : null,
+            lastUsedAt: passkey.lastUsedAt ? passkey.lastUsedAt.getTime() : null,
+        }));
+    }
+
+    async function deletePasskey(userId: string, passkeyId: unknown, tokenIssuedAt?: number): Promise<AuthSecurityStatus> {
+        if (typeof passkeyId !== 'string' || !mongoose.Types.ObjectId.isValid(passkeyId)) {
+            throw new ValidationError("That passkey isn't valid.");
+        }
+
         const user = await loadUser(userId);
+        assertRecentSignIn(user, tokenIssuedAt);
+
+        const deleted = await passkeyCredentialRepo.deleteForUser(userId, passkeyId);
+        if (!deleted) {
+            throw new NotFoundError('Passkey not found');
+        }
+
+        return getSecurityStatus(userId);
+    }
+
+    async function beginPasskeyRegistration(userId: string, tokenIssuedAt?: number): Promise<PasskeyOptionsResult> {
+        const user = await loadUser(userId);
+        assertRecentSignIn(user, tokenIssuedAt);
         const existingPasskeys = await passkeyCredentialRepo.listForUser(userId);
 
         const username = user.username?.trim() || `user-${user._id.toString()}`;
@@ -385,13 +467,22 @@ export function createAuthService(deps: AuthServiceDeps) {
             throw new UnauthorizedError('Invalid or expired refresh token');
         }
 
+        // Moderation normally clears the refresh token, but check anyway so no
+        // path can renew a banned or suspended session.
+        if (describeEnforcementForUser(user)) {
+            await userRepo.clearRefreshToken(newRefreshHash);
+            assertAccountMayStartSession(user);
+        }
+
         const accessToken = signAccessToken({ userId: user._id.toString() });
         return { accessToken, refreshToken: newRefresh };
     }
 
-    async function logout(refreshToken: string): Promise<void> {
+    // Returns the id of the user whose session ended, so callers can also drop
+    // that user's live sockets.
+    async function logout(refreshToken: string): Promise<string | null> {
         const hashed = hashRefreshToken(refreshToken);
-        await userRepo.clearRefreshToken(hashed);
+        return userRepo.clearRefreshToken(hashed);
     }
 
     async function checkUsernameAvailability(username: unknown): Promise<boolean> {
@@ -400,7 +491,7 @@ export function createAuthService(deps: AuthServiceDeps) {
         }
 
         const normalizedUsername = normalizeUsernameInput(username);
-        if (!isValidUsername(normalizedUsername)) {
+        if (!isValidUsername(normalizedUsername) || containsBlockedTerm(normalizedUsername)) {
             return false;
         }
 
@@ -417,6 +508,8 @@ export function createAuthService(deps: AuthServiceDeps) {
         if (!isValidUsername(normalizedUsername)) {
             throw new ValidationError('Keep it simple: 3-30 characters, just letters, numbers, and underscores.');
         }
+
+        assertCleanText(normalizedUsername, 'username');
 
         const user = await loadUser(userId);
 
@@ -439,6 +532,8 @@ export function createAuthService(deps: AuthServiceDeps) {
     return {
         providerSignIn,
         getSecurityStatus,
+        listPasskeys,
+        deletePasskey,
         beginPasskeyRegistration,
         finishPasskeyRegistration,
         beginPasskeyAuthentication,
@@ -457,10 +552,13 @@ const defaultAuthService = createAuthService({
     authChallengeRepo: defaultAuthChallengeRepo,
     providerIdentityService: defaultProviderIdentityService,
     passkeyService: defaultPasskeyService,
+    isIdentityBanned,
 });
 
 export const providerSignIn = defaultAuthService.providerSignIn;
 export const getSecurityStatus = defaultAuthService.getSecurityStatus;
+export const listPasskeys = defaultAuthService.listPasskeys;
+export const deletePasskey = defaultAuthService.deletePasskey;
 export const beginPasskeyRegistration = defaultAuthService.beginPasskeyRegistration;
 export const finishPasskeyRegistration = defaultAuthService.finishPasskeyRegistration;
 export const beginPasskeyAuthentication = defaultAuthService.beginPasskeyAuthentication;

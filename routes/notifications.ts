@@ -6,9 +6,12 @@ import {
     NotificationService,
     PopulatedNotification,
     PopulatedNotificationParticipant,
+    UNKNOWN_SENDER_NAME,
 } from '../services/NotificationService.js';
 import { registerPushToken, unregisterPushToken } from '../services/pushNotificationService.js';
-import { ValidationError } from '../utils/errors.js';
+import { userRepository } from '../repositories/userRepository.js';
+import { AppError, ErrorCode, ValidationError } from '../utils/errors.js';
+import { describeEnforcementForUser } from '../utils/enforcement.js';
 
 const router = express.Router();
 const OBJECT_ID_REGEX = /^[0-9a-fA-F]{24}$/;
@@ -69,6 +72,14 @@ router.post('/push/register', authenticateUser, asyncHandler(async (req: AuthReq
     const token = parsePushToken(req.body?.token);
     const platform = parsePushPlatform(req.body?.platform);
 
+    // Moderation deactivates a banned/suspended user's token; a still-valid
+    // access token must not be able to switch pushes back on.
+    const enforcement = await userRepository.findEnforcementState(userId);
+    const blockedExplanation = enforcement ? describeEnforcementForUser(enforcement) : null;
+    if (blockedExplanation) {
+        throw new AppError(ErrorCode.USER_BLOCKED, blockedExplanation, 403);
+    }
+
     await registerPushToken({
         userId,
         token,
@@ -118,7 +129,7 @@ router.get('/', authenticateUser, asyncHandler(async (req: AuthRequest, res: exp
             id: notification._id.toString(),
             sender: {
                 id: notification.sender._id.toString(),
-                username: notification.sender.username || '',
+                username: notification.sender.username || UNKNOWN_SENDER_NAME,
                 profileImageUrl: notification.sender.profileImageUrl || null,
             },
             type: notification.type,
@@ -127,9 +138,9 @@ router.get('/', authenticateUser, asyncHandler(async (req: AuthRequest, res: exp
             roomType: notification.room.type || 'public',
             messageId: notification.message._id.toString(),
             threadId: notification.thread._id.toString(),
-            parentMessageText: notification.thread?.text || null,
-            replyText: notification.message?.text || '',
-            previewText: notification.message?.text ? notification.message.text.substring(0, 100) : '',
+            parentMessageText: notification.thread.text || null,
+            replyText: notification.message.text || '',
+            previewText: notification.message.text ? notification.message.text.substring(0, 100) : '',
             read: notification.read,
             isDismissed: notification.isDismissed || false,
             createdAt: notification.createdAt.getTime(),

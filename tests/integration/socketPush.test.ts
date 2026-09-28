@@ -52,9 +52,37 @@ async function connectSocket(baseUrl: string, userId: string): Promise<ClientSoc
     return socket;
 }
 
+// Waits for the server's answer instead of sleeping: join_room is done once
+// room_joined (or an error) comes back. open_thread has no reply event, so it
+// falls back to a short pause.
 function emitAndWait(socket: ClientSocket, event: string, payload: Record<string, unknown>): Promise<void> {
-    socket.emit(event, payload);
-    return new Promise((resolve) => setTimeout(resolve, 100));
+    if (event !== 'join_room') {
+        socket.emit(event, payload);
+        return new Promise((resolve) => setTimeout(resolve, 100));
+    }
+
+    return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+            cleanup();
+            reject(new Error('Timed out waiting for room_joined'));
+        }, 3000);
+        const onJoined = () => {
+            cleanup();
+            resolve();
+        };
+        const onError = (error: unknown) => {
+            cleanup();
+            reject(new Error(`join_room failed: ${JSON.stringify(error)}`));
+        };
+        const cleanup = () => {
+            clearTimeout(timer);
+            socket.off('room_joined', onJoined);
+            socket.off('error', onError);
+        };
+        socket.on('room_joined', onJoined);
+        socket.on('error', onError);
+        socket.emit(event, payload);
+    });
 }
 
 describe('Socket push integration', () => {
@@ -280,9 +308,9 @@ describe('Socket push integration', () => {
         const blockerSocket = await connectSocket(baseUrl, blocker._id.toString());
         const bystanderSocket = await connectSocket(baseUrl, bystander._id.toString());
 
-        let blockerReceived = 0;
+        const blockerTexts: string[] = [];
         let bystanderReceived = 0;
-        blockerSocket.on('new_message', () => { blockerReceived += 1; });
+        blockerSocket.on('new_message', (message: { text: string }) => { blockerTexts.push(message.text); });
         bystanderSocket.on('new_message', () => { bystanderReceived += 1; });
 
         try {
@@ -291,14 +319,15 @@ describe('Socket push integration', () => {
             await emitAndWait(bystanderSocket, 'join_room', { roomId: roomId.toString() });
 
             senderSocket.emit('send_message', { text: 'Hello room' });
-
-            // The non-blocked bystander receives it; give the blocker the same window
-            // to (not) receive it.
             await waitFor(() => bystanderReceived === 1);
-            await new Promise((resolve) => setTimeout(resolve, 150));
 
-            assert.equal(bystanderReceived, 1);
-            assert.equal(blockerReceived, 0);
+            // Broadcasts reach a socket in order, so once the blocker has the
+            // bystander's later message, the blocked one would already be there.
+            bystanderSocket.emit('send_message', { text: 'From bystander' });
+            await waitFor(() => blockerTexts.length > 0);
+
+            assert.equal(bystanderReceived, 2);
+            assert.deepEqual(blockerTexts, ['From bystander']);
         } finally {
             senderSocket.disconnect();
             blockerSocket.disconnect();

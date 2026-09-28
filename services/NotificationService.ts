@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import { Notification } from '../models/Notification.js';
+import { getActiveBlockPairUserIds } from './blockService.js';
 import logger from '../utils/logger.js';
 
 interface CreateReplyNotificationsParams {
@@ -56,11 +57,25 @@ export interface PopulatedNotification {
     updatedAt: Date;
 }
 
-type NotificationsQuery = {
-    recipient: string;
-    isDismissed: false;
-    createdAt?: { $lt: Date };
+// A populated reference comes back null when the target was deleted (account
+// deletion) or filtered out (soft-deleted message). Such notifications are
+// dropped rather than failing the whole list.
+type RawPopulatedNotification = Omit<PopulatedNotification, 'sender' | 'room' | 'message' | 'thread'> & {
+    sender: PopulatedNotificationUser | null;
+    room: PopulatedNotificationRoom | null;
+    message: PopulatedNotificationMessage | null;
+    thread: PopulatedNotificationMessage | null;
 };
+
+function isComplete(notification: RawPopulatedNotification): notification is PopulatedNotification {
+    return Boolean(notification.sender && notification.room && notification.message && notification.thread);
+}
+
+// Soft-deleted (moderated) messages never show up in a notification.
+const VISIBLE_MESSAGE_MATCH = { deletedAt: null };
+
+// The app requires a non-empty sender name on every notification.
+export const UNKNOWN_SENDER_NAME = 'Unknown';
 
 export interface ReplyNotificationEvent {
     targetUserId: string;
@@ -157,7 +172,7 @@ export class NotificationService {
             return [];
         }
 
-        const populatedNotifications = await Notification.find({ _id: { $in: objectIds } })
+        const rawNotifications = await Notification.find({ _id: { $in: objectIds } })
             .select('recipient sender type room message thread read isDismissed createdAt updatedAt')
             .populate('sender', 'username profileImageUrl')
             .populate({
@@ -165,11 +180,11 @@ export class NotificationService {
                 select: 'name type participants',
                 populate: { path: 'participants', select: 'username' },
             })
-            .populate('message', 'text')
-            .populate('thread', 'text')
-            .lean<PopulatedNotification[]>();
+            .populate({ path: 'message', select: 'text', match: VISIBLE_MESSAGE_MATCH })
+            .populate({ path: 'thread', select: 'text', match: VISIBLE_MESSAGE_MATCH })
+            .lean<RawPopulatedNotification[]>();
 
-        return populatedNotifications.map((notification) => {
+        return rawNotifications.filter(isComplete).map((notification) => {
             const targetUserId = notification.recipient.toString();
             const roomName = resolveNotificationRoomName(notification, targetUserId);
 
@@ -180,7 +195,7 @@ export class NotificationService {
                     recipient: targetUserId,
                     sender: {
                         id: notification.sender._id.toString(),
-                        username: notification.sender.username || 'Unknown',
+                        username: notification.sender.username || UNKNOWN_SENDER_NAME,
                         profileImageUrl: notification.sender.profileImageUrl || null,
                     },
                     type: notification.type,
@@ -206,7 +221,17 @@ export class NotificationService {
         nextCursor: Date | null;
         unreadCount: number;
     }> {
-        const query: NotificationsQuery = { recipient: userId, isDismissed: false };
+        // Mutual block: nothing from a blocked-pair user appears in the list or
+        // counts as unread.
+        const blockedUserIds = (await getActiveBlockPairUserIds(userId))
+            .map((id) => new mongoose.Types.ObjectId(id));
+
+        const baseFilter: Record<string, unknown> = { recipient: userId, isDismissed: false };
+        if (blockedUserIds.length > 0) {
+            baseFilter.sender = { $nin: blockedUserIds };
+        }
+
+        const query: Record<string, unknown> = { ...baseFilter };
         if (before) {
             query.createdAt = { $lt: before };
         }
@@ -224,16 +249,29 @@ export class NotificationService {
                     select: 'username',
                 },
             })
-            .populate('message', 'text')
-            .populate('thread', 'text')
+            .populate({ path: 'message', select: 'text', match: VISIBLE_MESSAGE_MATCH })
+            .populate({ path: 'thread', select: 'text', match: VISIBLE_MESSAGE_MATCH })
             .maxTimeMS(7000)
-            .lean<PopulatedNotification[]>();
+            .lean<RawPopulatedNotification[]>();
 
-        const unreadCountQuery = Notification.countDocuments({
-            recipient: userId,
-            isDismissed: false,
-            read: false,
-        }).maxTimeMS(3000);
+        // Counts only what the list can show: the reply and its thread root must
+        // still exist and not be removed by moderation.
+        const visibleMessageLookup = (field: 'message' | 'thread') => ({
+            $lookup: {
+                from: 'messages',
+                localField: field,
+                foreignField: '_id',
+                pipeline: [{ $match: VISIBLE_MESSAGE_MATCH }, { $project: { _id: 1 } }],
+                as: `${field}Visible`,
+            },
+        });
+        const unreadCountQuery = Notification.aggregate<{ count: number }>([
+            { $match: { ...baseFilter, recipient: new mongoose.Types.ObjectId(userId), read: false } },
+            visibleMessageLookup('message'),
+            visibleMessageLookup('thread'),
+            { $match: { 'messageVisible.0': { $exists: true }, 'threadVisible.0': { $exists: true } } },
+            { $count: 'count' },
+        ]).option({ maxTimeMS: 3000 }).then((result) => result[0]?.count ?? 0);
 
         const [notificationsResult, unreadCountResult] = await Promise.allSettled([
             notificationsQuery,
@@ -244,7 +282,8 @@ export class NotificationService {
             throw notificationsResult.reason;
         }
 
-        const notifications = notificationsResult.value;
+        const rawNotifications = notificationsResult.value;
+        const notifications = rawNotifications.filter(isComplete);
         const unreadCount = unreadCountResult.status === 'fulfilled'
             ? unreadCountResult.value
             : notifications.reduce((count, notification) => (
@@ -262,9 +301,10 @@ export class NotificationService {
             });
         }
 
-        // Check for more
-        const lastNotification = notifications[notifications.length - 1];
-        const nextCursor = (notifications.length === limit && lastNotification)
+        // Check for more. Based on the unfiltered page so dropped entries don't
+        // end pagination early.
+        const lastNotification = rawNotifications[rawNotifications.length - 1];
+        const nextCursor = (rawNotifications.length === limit && lastNotification)
             ? lastNotification.createdAt
             : null;
 

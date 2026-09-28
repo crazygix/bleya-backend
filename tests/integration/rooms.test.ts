@@ -39,45 +39,6 @@ describe('Rooms API', () => {
         resetTestApp();
     });
 
-    describe('GET /v1/rooms', () => {
-        it('lists public rooms', async () => {
-            const user = await createTestUser();
-            await createPublicRoom('Room Alpha');
-            await createPublicRoom('Room Beta');
-
-            const agent = getTestAgent();
-            const res = await agent
-                .get('/v1/rooms')
-                .set(authHeader(user._id.toString()))
-                .expect(200);
-
-            assert.equal(res.body.length, 2);
-            const names = res.body.map((r: { name: string }) => r.name);
-            assert.ok(names.includes('Room Alpha'));
-            assert.ok(names.includes('Room Beta'));
-        });
-
-        it('filters rooms by search query', async () => {
-            const user = await createTestUser();
-            await createPublicRoom('Berlin');
-            await createPublicRoom('Paris');
-
-            const agent = getTestAgent();
-            const res = await agent
-                .get('/v1/rooms?search=berlin')
-                .set(authHeader(user._id.toString()))
-                .expect(200);
-
-            assert.equal(res.body.length, 1);
-            assert.equal(res.body[0].name, 'Berlin');
-        });
-
-        it('returns 401 without auth', async () => {
-            const agent = getTestAgent();
-            await agent.get('/v1/rooms').expect(401);
-        });
-    });
-
     describe('POST /v1/rooms/:roomId/join', () => {
         it('joins a public room', async () => {
             const user = await createTestUser();

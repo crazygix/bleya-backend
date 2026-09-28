@@ -86,6 +86,7 @@ export class PexelsImageService implements IImageService {
                 headers: {
                     Authorization: this.apiKey,
                 },
+                signal: AbortSignal.timeout(10_000),
             });
 
             if (!response.ok) {

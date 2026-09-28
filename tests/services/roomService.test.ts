@@ -26,7 +26,7 @@ function fakeUserRepo(overrides: Partial<UserRepository> = {}): UserRepository {
         updateLastLogin: async () => {},
         findByUsernameLean: async () => null,
         findOneAndUpdateByRefreshToken: async () => null,
-        clearRefreshToken: async () => {},
+        clearRefreshToken: async () => null,
         addToJoinedRooms: async () => ({ modifiedCount: 0 }),
         removeFromJoinedRooms: async () => {},
         existsWithRoom: async () => false,
@@ -39,7 +39,6 @@ function fakeUserRepo(overrides: Partial<UserRepository> = {}): UserRepository {
 function fakeRoomRepo(overrides: Partial<RoomRepository> = {}): RoomRepository {
     return {
         findById: async () => null,
-        findPublicRooms: async () => [],
         countByFilter: async () => 0,
         ...overrides,
     };
@@ -141,39 +140,6 @@ describe('roomService (mocked)', () => {
                 }),
                 (err: Error) => err.message.includes('Room not found')
             );
-        });
-    });
-
-    describe('listPublicRooms', () => {
-        it('returns formatted room summaries', async () => {
-            const rooms = [
-                fakeRoom({ name: 'Berlin' }),
-                fakeRoom({ name: 'Paris' }),
-            ];
-
-            const svc = createRoomService({
-                userRepo: fakeUserRepo(),
-                roomRepo: fakeRoomRepo({
-                    findPublicRooms: async () => rooms,
-                }),
-            });
-
-            const result = await svc.listPublicRooms();
-            assert.equal(result.length, 2);
-            assert.equal(result[0].name, 'Berlin');
-            assert.equal(result[1].name, 'Paris');
-        });
-
-        it('returns empty array when no rooms', async () => {
-            const svc = createRoomService({
-                userRepo: fakeUserRepo(),
-                roomRepo: fakeRoomRepo({
-                    findPublicRooms: async () => [],
-                }),
-            });
-
-            const result = await svc.listPublicRooms();
-            assert.equal(result.length, 0);
         });
     });
 });

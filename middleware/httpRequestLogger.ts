@@ -2,6 +2,8 @@ import { NextFunction, Request, Response } from 'express';
 import crypto from 'crypto';
 import { HttpLogBodyMode, config } from '../config/index.js';
 import logger from '../utils/logger.js';
+import { getLoggablePath, getPathname } from '../utils/requestPath.js';
+import { getClientIp } from '../utils/trustedProxy.js';
 
 interface AuthContext {
   userId?: string;
@@ -14,6 +16,16 @@ interface RequestWithLoggingContext extends Request {
 
 const TRUNCATED_SUFFIX = '...[truncated]';
 const REDACTED_VALUE = '[REDACTED]';
+
+// Request bodies are client-controlled, so anything we walk or serialize for a
+// log line is bounded (depth, array length, key count).
+const MAX_LOG_DEPTH = 8;
+const MAX_LOG_ARRAY_ITEMS = 50;
+const MAX_LOG_OBJECT_KEYS = 50;
+
+// Routes whose request bodies are never logged: the Apple Android callback
+// carries the authorization code, id_token and the user's name/email.
+const BODY_LOG_EXCLUDED_PATHS = new Set([config.authProviders.appleAndroidRedirectPath]);
 
 const redactedFieldSet = new Set(config.httpLogging.bodyRedactFields.map((field) => field.toLowerCase()));
 
@@ -52,38 +64,6 @@ function parseNumericHeader(value: string | string[] | number | undefined): numb
   return undefined;
 }
 
-function safeStringify(value: unknown): string {
-  const seen = new WeakSet<object>();
-
-  return JSON.stringify(value, (_key, currentValue: unknown) => {
-    if (typeof currentValue === 'bigint') {
-      return currentValue.toString();
-    }
-
-    if (Buffer.isBuffer(currentValue)) {
-      return `[Buffer ${currentValue.length} bytes]`;
-    }
-
-    if (currentValue instanceof Error) {
-      return {
-        name: currentValue.name,
-        message: currentValue.message,
-        stack: currentValue.stack,
-      };
-    }
-
-    if (typeof currentValue === 'object' && currentValue !== null) {
-      if (seen.has(currentValue)) {
-        return '[Circular]';
-      }
-
-      seen.add(currentValue);
-    }
-
-    return currentValue;
-  });
-}
-
 function truncateUtf8String(value: string, maxBytes: number): { value: string; truncated: boolean } {
   const sourceBuffer = Buffer.from(value, 'utf8');
   if (sourceBuffer.byteLength <= maxBytes) {
@@ -97,18 +77,27 @@ function truncateUtf8String(value: string, maxBytes: number): { value: string; t
   };
 }
 
-function redactPayload(value: unknown, seen = new WeakSet<object>()): unknown {
+/**
+ * Copies a payload into a log-safe shape: depth, array length and key count are
+ * capped, circular references are cut, and (when `redact` is on) sensitive keys
+ * are masked. The result is plain data that JSON serialization can't choke on.
+ */
+function boundPayload(
+  value: unknown,
+  redact: boolean,
+  seen = new WeakSet<object>(),
+  depth = 0
+): unknown {
   if (value === null || value === undefined) {
     return value;
   }
 
-  if (
-    typeof value === 'string'
-    || typeof value === 'number'
-    || typeof value === 'boolean'
-    || typeof value === 'bigint'
-  ) {
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
     return value;
+  }
+
+  if (typeof value === 'bigint') {
+    return value.toString();
   }
 
   if (Buffer.isBuffer(value)) {
@@ -116,7 +105,7 @@ function redactPayload(value: unknown, seen = new WeakSet<object>()): unknown {
   }
 
   if (value instanceof Date) {
-    return value.toISOString();
+    return Number.isNaN(value.getTime()) ? 'Invalid Date' : value.toISOString();
   }
 
   if (value instanceof Error) {
@@ -127,60 +116,68 @@ function redactPayload(value: unknown, seen = new WeakSet<object>()): unknown {
     };
   }
 
+  if (typeof value !== 'object') {
+    return String(value);
+  }
+
+  if (depth >= MAX_LOG_DEPTH) {
+    return '[MaxDepth]';
+  }
+
+  if (seen.has(value)) {
+    return '[Circular]';
+  }
+
+  seen.add(value);
+
   if (Array.isArray(value)) {
-    return value.map((entry) => redactPayload(entry, seen));
+    const items = value
+      .slice(0, MAX_LOG_ARRAY_ITEMS)
+      .map((entry) => boundPayload(entry, redact, seen, depth + 1));
+    if (value.length > MAX_LOG_ARRAY_ITEMS) {
+      items.push(`[+${value.length - MAX_LOG_ARRAY_ITEMS} more]`);
+    }
+    return items;
   }
 
-  if (typeof value === 'object') {
-    if (seen.has(value)) {
-      return '[Circular]';
-    }
-
-    seen.add(value);
-
-    const redactedObject: Record<string, unknown> = {};
-    for (const [key, nestedValue] of Object.entries(value as Record<string, unknown>)) {
-      if (redactedFieldSet.has(key.toLowerCase())) {
-        redactedObject[key] = REDACTED_VALUE;
-      } else {
-        redactedObject[key] = redactPayload(nestedValue, seen);
-      }
-    }
-
-    return redactedObject;
+  const entries = Object.entries(value as Record<string, unknown>);
+  const boundedObject: Record<string, unknown> = {};
+  for (const [key, nestedValue] of entries.slice(0, MAX_LOG_OBJECT_KEYS)) {
+    boundedObject[key] = redact && redactedFieldSet.has(key.toLowerCase())
+      ? REDACTED_VALUE
+      : boundPayload(nestedValue, redact, seen, depth + 1);
+  }
+  if (entries.length > MAX_LOG_OBJECT_KEYS) {
+    boundedObject['[truncatedKeys]'] = entries.length - MAX_LOG_OBJECT_KEYS;
   }
 
-  return String(value);
+  return boundedObject;
 }
 
 function transformPayloadForLogging(payload: unknown): { payload: unknown; truncated: boolean } {
-  let transformedPayload = payload;
-
-  if (config.httpLogging.redactBodies) {
-    transformedPayload = redactPayload(transformedPayload);
-  }
+  const boundedPayload = boundPayload(payload, config.httpLogging.redactBodies);
 
   if (!config.httpLogging.truncateBodies) {
-    return { payload: transformedPayload, truncated: false };
+    return { payload: boundedPayload, truncated: false };
   }
 
-  if (typeof transformedPayload === 'string') {
-    const truncated = truncateUtf8String(transformedPayload, config.httpLogging.maxBodyBytes);
+  if (typeof boundedPayload === 'string') {
+    const truncated = truncateUtf8String(boundedPayload, config.httpLogging.maxBodyBytes);
     return {
       payload: truncated.value,
       truncated: truncated.truncated,
     };
   }
 
-  if (transformedPayload === undefined) {
-    return { payload: transformedPayload, truncated: false };
+  if (boundedPayload === undefined) {
+    return { payload: boundedPayload, truncated: false };
   }
 
-  const serialized = safeStringify(transformedPayload);
+  const serialized = JSON.stringify(boundedPayload);
   const truncated = truncateUtf8String(serialized, config.httpLogging.maxBodyBytes);
 
   if (!truncated.truncated) {
-    return { payload: transformedPayload, truncated: false };
+    return { payload: boundedPayload, truncated: false };
   }
 
   return {
@@ -217,8 +214,10 @@ export function httpRequestLogger(req: Request, res: Response, next: NextFunctio
   res.setHeader('x-request-id', requestId);
 
   const startedAt = Date.now();
-  const requestPath = req.originalUrl || req.url;
+  const requestPath = getLoggablePath(req);
+  const clientIp = getClientIp(req);
   const requestBody = req.body;
+  const logRequestBody = !BODY_LOG_EXCLUDED_PATHS.has(getPathname(req));
   let responseBody: unknown;
 
   const originalJson = res.json.bind(res) as (body?: unknown) => Response;
@@ -241,46 +240,59 @@ export function httpRequestLogger(req: Request, res: Response, next: NextFunctio
     requestId,
     method: req.method,
     path: requestPath,
-    ip: req.ip,
+    ip: clientIp,
     userAgent: req.get('user-agent'),
   });
 
   res.on('finish', () => {
-    const statusCode = res.statusCode;
-    const shouldIncludeBody = shouldLogBodies(config.httpLogging.bodyMode, statusCode);
+    // Logging must never be able to take the process down: this runs outside
+    // any request error handling, so an exception here would be uncaught.
+    try {
+      const statusCode = res.statusCode;
+      const shouldIncludeBody = shouldLogBodies(config.httpLogging.bodyMode, statusCode);
 
-    const baseContext: Record<string, unknown> = {
-      requestId,
-      method: req.method,
-      path: requestPath,
-      statusCode,
-      durationMs: Date.now() - startedAt,
-      userId: request.user?.userId,
-      ip: req.ip,
-      userAgent: req.get('user-agent'),
-      requestSizeBytes: parseNumericHeader(req.headers['content-length']),
-      responseSizeBytes: parseNumericHeader(res.getHeader('content-length')),
-    };
+      const baseContext: Record<string, unknown> = {
+        requestId,
+        method: req.method,
+        path: requestPath,
+        statusCode,
+        durationMs: Date.now() - startedAt,
+        userId: request.user?.userId,
+        ip: clientIp,
+        userAgent: req.get('user-agent'),
+        requestSizeBytes: parseNumericHeader(req.headers['content-length']),
+        responseSizeBytes: parseNumericHeader(res.getHeader('content-length')),
+      };
 
-    if (shouldIncludeBody) {
-      if (hasMeaningfulRequestBody(requestBody)) {
-        const transformedRequestBody = transformPayloadForLogging(requestBody);
-        baseContext.requestBody = transformedRequestBody.payload;
-        if (transformedRequestBody.truncated) {
-          baseContext.requestBodyTruncated = true;
+      if (shouldIncludeBody) {
+        if (logRequestBody && hasMeaningfulRequestBody(requestBody)) {
+          const transformedRequestBody = transformPayloadForLogging(requestBody);
+          baseContext.requestBody = transformedRequestBody.payload;
+          if (transformedRequestBody.truncated) {
+            baseContext.requestBodyTruncated = true;
+          }
+        }
+
+        if (responseBody !== undefined) {
+          const transformedResponseBody = transformPayloadForLogging(responseBody);
+          baseContext.responseBody = transformedResponseBody.payload;
+          if (transformedResponseBody.truncated) {
+            baseContext.responseBodyTruncated = true;
+          }
         }
       }
 
-      if (responseBody !== undefined) {
-        const transformedResponseBody = transformPayloadForLogging(responseBody);
-        baseContext.responseBody = transformedResponseBody.payload;
-        if (transformedResponseBody.truncated) {
-          baseContext.responseBodyTruncated = true;
-        }
+      logger.info('http.request.finish', baseContext);
+    } catch (error) {
+      try {
+        logger.warn('http.request.log_failed', {
+          requestId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      } catch {
+        // Nothing else we can safely do.
       }
     }
-
-    logger.info('http.request.finish', baseContext);
   });
 
   next();

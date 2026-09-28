@@ -1,6 +1,7 @@
 import mongoose, { Schema, Document } from 'mongoose';
 
-export interface ICity extends Document {
+// Document<string>: cities use their slug as _id, not an ObjectId.
+export interface ICity extends Document<string> {
     _id: string; // City slug (e.g., "paris-fr")
     name: string; // "Paris"
     country: string; // "FR"
@@ -10,6 +11,7 @@ export interface ICity extends Document {
         coordinates: [number, number]; // [lng, lat] GeoJSON
     };
     imageUrl?: string; // R2 URL (lazy-loaded)
+    imageCheckedAt?: Date | null; // Last image lookup attempt (limits retries)
     population?: number;
     lastUpdated: Date;
 }
@@ -24,6 +26,7 @@ const CitySchema = new Schema<ICity>({
         coordinates: { type: [Number], required: true },
     },
     imageUrl: { type: String },
+    imageCheckedAt: { type: Date, default: null },
     population: { type: Number },
     lastUpdated: { type: Date, default: Date.now },
 });

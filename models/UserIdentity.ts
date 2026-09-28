@@ -38,6 +38,13 @@ const userIdentitySchema = new mongoose.Schema({
         default: '',
         select: false,
     },
+    // The Apple client id (bundle id or Services ID) that token belongs to;
+    // revocation must be signed for the same client.
+    appleClientId: {
+        type: String,
+        default: '',
+        select: false,
+    },
     linkedAt: {
         type: Date,
         default: Date.now,

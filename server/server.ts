@@ -2,6 +2,7 @@ import http from 'http';
 import mongoose from 'mongoose';
 import { pathToFileURL } from 'url';
 import type { Express } from 'express';
+import type { Server as SocketIOServer } from 'socket.io';
 import { setupSocketIO } from './socket.js';
 import { createApp } from './app.js';
 import logger from '../utils/logger.js';
@@ -21,6 +22,12 @@ const mongooseOptions: mongoose.ConnectOptions = {
 
 let processHandlersRegistered = false;
 let mongooseHandlersRegistered = false;
+let shutdownHandlersRegistered = false;
+
+// Railway sends SIGTERM on every deploy and SIGKILLs after drainingSeconds
+// (railway.toml). Stay under that so in-flight requests finish and clients get
+// a clean socket close instead of a dropped connection.
+const SHUTDOWN_TIMEOUT_MS = 10_000;
 
 function handleFatalError(error: Error, eventName: string, exitOnFatalError: boolean): void {
     logger.error(eventName, {
@@ -131,15 +138,70 @@ export interface CreateHttpServerOptions {
 export function createHttpServer(options: CreateHttpServerOptions = {}): {
     app: Express;
     server: http.Server;
+    io: SocketIOServer | null;
 } {
     const app = options.app || createApp();
     const server = http.createServer(app);
+    const io = (options.withSocketIO ?? true) ? setupSocketIO(server) : null;
 
-    if (options.withSocketIO ?? true) {
-        setupSocketIO(server);
+    return { app, server, io };
+}
+
+/**
+ * Graceful shutdown: stop accepting connections, disconnect sockets, let
+ * in-flight requests finish, then close Mongo. A timer forces the exit if
+ * anything hangs, so the process never outlives the platform's grace period.
+ */
+function registerShutdownHandlers(server: http.Server, io: SocketIOServer | null): void {
+    if (shutdownHandlersRegistered) {
+        return;
     }
+    shutdownHandlersRegistered = true;
 
-    return { app, server };
+    let shuttingDown = false;
+
+    const shutdown = async (signal: string): Promise<void> => {
+        if (shuttingDown) {
+            return;
+        }
+        shuttingDown = true;
+        logger.info('server.shutdown.started', { signal });
+
+        const forceExitTimer = setTimeout(() => {
+            logger.error('server.shutdown.timeout', { timeoutMs: SHUTDOWN_TIMEOUT_MS });
+            process.exit(1);
+        }, SHUTDOWN_TIMEOUT_MS);
+        forceExitTimer.unref();
+
+        try {
+            await new Promise<void>((resolve) => {
+                if (io) {
+                    // Disconnects every socket and closes the attached HTTP server.
+                    io.close(() => resolve());
+                } else {
+                    server.close(() => resolve());
+                }
+                // Idle keep-alive connections would otherwise hold close() open.
+                server.closeIdleConnections();
+            });
+
+            if (mongoose.connection.readyState !== 0) {
+                await mongoose.disconnect();
+            }
+
+            logger.info('server.shutdown.completed', { signal });
+            process.exit(0);
+        } catch (error) {
+            logger.error('server.shutdown.failed', {
+                signal,
+                error: error instanceof Error ? error.message : String(error),
+            });
+            process.exit(1);
+        }
+    };
+
+    process.once('SIGTERM', () => void shutdown('SIGTERM'));
+    process.once('SIGINT', () => void shutdown('SIGINT'));
 }
 
 export interface StartServerOptions {
@@ -200,12 +262,16 @@ export async function startServer(options: StartServerOptions = {}): Promise<{
             }
         }
 
-        const { app, server } = createHttpServer({
+        const { app, server, io } = createHttpServer({
             app: options.app,
             withSocketIO: resolvedOptions.withSocketIO,
         });
 
         await listen(server, resolvedOptions.port);
+
+        if (resolvedOptions.registerFatalProcessHandlers) {
+            registerShutdownHandlers(server, io);
+        }
 
         server.on('error', (error: NodeJS.ErrnoException) => {
             if (error.code === 'EADDRINUSE') {

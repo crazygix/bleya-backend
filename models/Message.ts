@@ -48,6 +48,10 @@ messageSchema.index({ parentMessageId: 1, createdAt: 1 });
 
 // Index for efficient room message queries (most common query)
 messageSchema.index({ roomId: 1, createdAt: -1 });
-messageSchema.index({ roomId: 1, parentMessageId: 1, createdAt: -1 }); // Compound for filtered queries
+// Room pages and previews sort by (createdAt, _id); without _id in the index
+// the sort couldn't use it and opening a room scanned its whole history.
+messageSchema.index({ roomId: 1, parentMessageId: 1, createdAt: -1, _id: -1 });
+// A user's own messages: account deletion and data export.
+messageSchema.index({ userId: 1, createdAt: 1 });
 
 export const Message = mongoose.model('Message', messageSchema);

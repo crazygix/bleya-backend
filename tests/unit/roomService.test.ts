@@ -3,8 +3,6 @@ import assert from 'node:assert/strict';
 import mongoose from 'mongoose';
 import {
     toRoomSummary,
-    buildPublicRoomFilter,
-    escapeRegex,
     isPublicRoom,
 } from '../../services/roomService.js';
 
@@ -39,31 +37,6 @@ test('toRoomSummary handles missing optional fields', () => {
     assert.equal(dto.cityKey, null);
     assert.equal(dto.imageUrl, null);
     assert.equal(dto.location, null);
-});
-
-test('buildPublicRoomFilter returns type filter without search', () => {
-    const filter = buildPublicRoomFilter();
-    assert.deepEqual(filter, { type: 'public' });
-});
-
-test('buildPublicRoomFilter adds case-insensitive regex for search', () => {
-    const filter = buildPublicRoomFilter('Berlin') as { type: string; name: { $regex: RegExp } };
-    assert.equal(filter.type, 'public');
-    assert.ok(filter.name.$regex instanceof RegExp);
-    assert.ok(filter.name.$regex.test('Berlin'));
-    assert.ok(filter.name.$regex.test('berlin'));
-});
-
-test('escapeRegex escapes special regex characters', () => {
-    assert.equal(escapeRegex('a.b'), 'a\\.b');
-    assert.equal(escapeRegex('a+b'), 'a\\+b');
-    assert.equal(escapeRegex('a*b'), 'a\\*b');
-    assert.equal(escapeRegex('(test)'), '\\(test\\)');
-    assert.equal(escapeRegex('[x]'), '\\[x\\]');
-});
-
-test('escapeRegex leaves normal characters unchanged', () => {
-    assert.equal(escapeRegex('hello world'), 'hello world');
 });
 
 test('isPublicRoom returns true for public rooms', () => {

@@ -39,6 +39,7 @@ export class WikidataImageService implements IImageService {
                         Accept: 'application/sparql-results+json',
                         'User-Agent': 'bleya-backend/1.0',
                     },
+                    signal: AbortSignal.timeout(10_000),
                 }
             );
 

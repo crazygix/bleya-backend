@@ -1,9 +1,13 @@
 import mongoose from 'mongoose';
 import { Message } from '../models/Message.js';
+import { Notification } from '../models/Notification.js';
+import { PushToken } from '../models/PushToken.js';
 import { NotFoundError, ValidationError, ErrorCode } from '../utils/errors.js';
 import { validateObjectId } from '../utils/validation.js';
 import { sanitizePlainText } from '../utils/sanitize.js';
 import { recordModerationAction } from './auditService.js';
+import { rememberBannedIdentities, forgetBannedIdentities } from './bannedIdentityService.js';
+import { deleteFromR2, extractKeyFromUrl } from './r2Service.js';
 import { emitMessageRemoved, disconnectUser } from '../server/socket.js';
 import { User } from '../models/User.js';
 import logger from '../utils/logger.js';
@@ -21,6 +25,21 @@ async function recomputeReplyCount(parentMessageId: mongoose.Types.ObjectId): Pr
     await Message.updateOne({ _id: parentMessageId }, { $set: { replyCount: count } });
 }
 
+// Reply notifications quote the reply and its thread root, so removed content
+// must take its notifications with it.
+async function deleteNotificationsForMessages(messageIds: mongoose.Types.ObjectId[]): Promise<void> {
+    if (messageIds.length === 0) {
+        return;
+    }
+
+    await Notification.deleteMany({
+        $or: [
+            { message: { $in: messageIds } },
+            { thread: { $in: messageIds } },
+        ],
+    });
+}
+
 export async function deleteMessage(
     messageId: string,
     actorLabel: string,
@@ -33,9 +52,7 @@ export async function deleteMessage(
         throw new NotFoundError('Message not found', ErrorCode.MESSAGE_NOT_FOUND);
     }
 
-    const deleteReason = typeof reason === 'string'
-        ? sanitizePlainText(reason, { maxLength: 500, collapseWhitespace: true, escapeHtml: true })
-        : '';
+    const deleteReason = sanitizeReason(reason);
 
     const roomId = (message.roomId as mongoose.Types.ObjectId).toString();
     const parentMessageId = (message.parentMessageId as mongoose.Types.ObjectId | null) || null;
@@ -51,8 +68,14 @@ export async function deleteMessage(
         }
     }
 
+    await deleteNotificationsForMessages([id]);
+
     // Drop it from connected clients in the room in real time.
-    emitMessageRemoved(roomId, { messageId: id.toString(), roomId });
+    emitMessageRemoved(roomId, {
+        messageId: id.toString(),
+        roomId,
+        parentMessageId: parentMessageId ? parentMessageId.toString() : null,
+    });
 
     await recordModerationAction({
         actorLabel,
@@ -119,8 +142,14 @@ export interface UserEnforcementResult {
 
 function sanitizeReason(reason: unknown): string {
     return typeof reason === 'string'
-        ? sanitizePlainText(reason, { maxLength: 500, collapseWhitespace: true, escapeHtml: true })
+        ? sanitizePlainText(reason, { maxLength: 500, collapseWhitespace: true })
         : '';
+}
+
+// A banned/suspended user must stop receiving pushes right away; the app
+// re-registers its token after the next successful sign-in.
+async function deactivatePushTokens(userId: mongoose.Types.ObjectId): Promise<void> {
+    await PushToken.updateMany({ userId }, { $set: { isActive: false, failureReason: 'account_blocked' } });
 }
 
 function parseSuspendedUntil(value: unknown): Date | null {
@@ -166,6 +195,8 @@ export async function banUser(userId: string, actorLabel: string, reason?: unkno
     );
 
     disconnectUser(id.toString());
+    await deactivatePushTokens(id);
+    await rememberBannedIdentities(id.toString(), null);
 
     await recordModerationAction({
         actorLabel,
@@ -201,6 +232,9 @@ export async function suspendUser(
     );
 
     disconnectUser(id.toString());
+    await deactivatePushTokens(id);
+    // Deleting the account and signing up again must not end a suspension early.
+    await rememberBannedIdentities(id.toString(), suspendedUntil);
 
     await recordModerationAction({
         actorLabel,
@@ -229,6 +263,7 @@ export async function unbanUser(userId: string, actorLabel: string): Promise<Use
         { _id: id },
         { $set: { status: 'active', enforcementReason: '', suspendedUntil: null } }
     );
+    await forgetBannedIdentities(id.toString());
 
     await recordModerationAction({
         actorLabel,
@@ -240,4 +275,153 @@ export async function unbanUser(userId: string, actorLabel: string): Promise<Use
     logger.info('moderation.user_unbanned', { userId: id.toString(), actor: actorLabel });
 
     return { id: id.toString(), status: 'active', suspendedUntil: null, enforcementReason: '' };
+}
+
+// ---------------------------------------------------------------------------
+// Profile and bulk content removal
+// ---------------------------------------------------------------------------
+
+export const CLEARABLE_PROFILE_FIELDS = ['username', 'bio', 'avatar'] as const;
+type ClearableProfileField = (typeof CLEARABLE_PROFILE_FIELDS)[number];
+
+export interface ClearProfileResult {
+    id: string;
+    cleared: ClearableProfileField[];
+}
+
+function parseProfileFields(value: unknown): ClearableProfileField[] {
+    if (value === undefined || value === null) {
+        return [...CLEARABLE_PROFILE_FIELDS];
+    }
+    if (!Array.isArray(value) || value.length === 0) {
+        throw new ValidationError(`fields must be a non-empty array of: ${CLEARABLE_PROFILE_FIELDS.join(', ')}.`);
+    }
+    const allowed = new Set<string>(CLEARABLE_PROFILE_FIELDS);
+    for (const field of value) {
+        if (typeof field !== 'string' || !allowed.has(field)) {
+            throw new ValidationError(`fields must be a non-empty array of: ${CLEARABLE_PROFILE_FIELDS.join(', ')}.`);
+        }
+    }
+    return [...new Set(value as ClearableProfileField[])];
+}
+
+/**
+ * Removes abusive profile content. A cleared username makes the app ask the user
+ * to pick a new one at their next sign-in; the avatar file is deleted from R2.
+ */
+export async function clearUserProfile(
+    userId: string,
+    actorLabel: string,
+    fieldsInput?: unknown,
+    reason?: unknown
+): Promise<ClearProfileResult> {
+    const id = validateObjectId(userId, 'user ID');
+    const fields = parseProfileFields(fieldsInput);
+
+    const user = await User.findById(id).select('profileImageUrl').lean<{ profileImageUrl?: string } | null>();
+    if (!user) {
+        throw new NotFoundError('User not found', ErrorCode.USER_NOT_FOUND);
+    }
+
+    const update: Record<string, unknown> = { updatedAt: new Date() };
+    if (fields.includes('username')) update.username = '';
+    if (fields.includes('bio')) update.bio = '';
+    if (fields.includes('avatar')) update.profileImageUrl = '';
+    await User.updateOne({ _id: id }, { $set: update });
+
+    if (fields.includes('avatar') && user.profileImageUrl) {
+        const key = extractKeyFromUrl(user.profileImageUrl);
+        if (key) {
+            await deleteFromR2(key);
+        }
+    }
+
+    const cleanReason = sanitizeReason(reason);
+    await recordModerationAction({
+        actorLabel,
+        action: 'user_profile_cleared',
+        targetType: 'user',
+        targetId: id,
+        reason: cleanReason,
+        metadata: { fields },
+    });
+
+    logger.info('moderation.user_profile_cleared', { userId: id.toString(), fields, actor: actorLabel });
+
+    return { id: id.toString(), cleared: fields };
+}
+
+export interface RemoveUserMessagesResult {
+    id: string;
+    removed: number;
+}
+
+/**
+ * Soft-deletes every visible message a user has posted (optionally only in one
+ * room), like deleteMessage does for a single one.
+ */
+export async function removeUserMessages(
+    userId: string,
+    actorLabel: string,
+    reason?: unknown,
+    roomIdInput?: unknown
+): Promise<RemoveUserMessagesResult> {
+    const id = validateObjectId(userId, 'user ID');
+    await assertUserExists(id);
+
+    const filter: Record<string, unknown> = { userId: id, deletedAt: null };
+    if (roomIdInput !== undefined && roomIdInput !== null && roomIdInput !== '') {
+        if (typeof roomIdInput !== 'string') {
+            throw new ValidationError('roomId must be a string.');
+        }
+        filter.roomId = validateObjectId(roomIdInput, 'room ID');
+    }
+
+    const messages = await Message.find(filter)
+        .select('_id roomId parentMessageId')
+        .lean<Array<{ _id: mongoose.Types.ObjectId; roomId: mongoose.Types.ObjectId; parentMessageId?: mongoose.Types.ObjectId | null }>>();
+
+    if (messages.length === 0) {
+        return { id: id.toString(), removed: 0 };
+    }
+
+    const deleteReason = sanitizeReason(reason);
+    const messageIds = messages.map((message) => message._id);
+    await Message.updateMany(
+        { _id: { $in: messageIds }, deletedAt: null },
+        { $set: { deletedAt: new Date(), deletedBy: actorLabel, deleteReason } }
+    );
+
+    const parentIds = new Map<string, mongoose.Types.ObjectId>();
+    for (const message of messages) {
+        if (message.parentMessageId) {
+            parentIds.set(message.parentMessageId.toString(), message.parentMessageId);
+        }
+    }
+    for (const parentId of parentIds.values()) {
+        await recomputeReplyCount(parentId);
+    }
+
+    await deleteNotificationsForMessages(messageIds);
+
+    for (const message of messages) {
+        emitMessageRemoved(message.roomId.toString(), {
+            messageId: message._id.toString(),
+            roomId: message.roomId.toString(),
+            parentMessageId: message.parentMessageId ? message.parentMessageId.toString() : null,
+        });
+    }
+
+    await recordModerationAction({
+        actorLabel,
+        action: 'user_messages_removed',
+        targetType: 'user',
+        targetId: id,
+        reason: deleteReason,
+        metadata: { count: messages.length, roomId: filter.roomId ? String(filter.roomId) : null },
+    });
+
+    logger.info('moderation.user_messages_removed', { userId: id.toString(), count: messages.length, actor: actorLabel });
+
+    return { id: id.toString(), removed: messages.length };
 }

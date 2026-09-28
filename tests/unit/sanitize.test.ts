@@ -1,10 +1,26 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { sanitizePlainText, sanitizeUsername } from '../../utils/sanitize.js';
+import { escapeHtml, sanitizePlainText, sanitizeUsername, unescapeHtml } from '../../utils/sanitize.js';
 
-test('sanitizePlainText escapes HTML and removes control chars', () => {
-    const value = sanitizePlainText('hi\u0000 <script>alert(1)</script>');
+test('sanitizePlainText stores text as typed, minus control chars', () => {
+    const value = sanitizePlainText("hi\u0000 it's <b>5 & 6</b>");
+    assert.equal(value, "hi it's <b>5 & 6</b>");
+});
+
+test('sanitizePlainText escapes HTML only when asked to', () => {
+    const value = sanitizePlainText('hi\u0000 <script>alert(1)</script>', { escapeHtml: true });
     assert.equal(value, 'hi &lt;script&gt;alert(1)&lt;/script&gt;');
+});
+
+test('sanitizePlainText keeps line breaks when preserveNewlines is set', () => {
+    const value = sanitizePlainText('line one  \r\n\n\n\n  line   two\t', { preserveNewlines: true });
+    assert.equal(value, 'line one\n\nline two');
+});
+
+test('unescapeHtml exactly reverses escapeHtml', () => {
+    const original = `a & b <c> "d" 'e' &amp; already`;
+    assert.equal(unescapeHtml(escapeHtml(original)), original);
+    assert.equal(unescapeHtml('&amp;lt;'), '&lt;');
 });
 
 test('sanitizePlainText handles empty string', () => {

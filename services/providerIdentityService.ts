@@ -10,6 +10,9 @@ export interface VerifiedIdentityProfile {
     email: string;
     emailVerified: boolean;
     isPrivateRelay: boolean;
+    // The token's `aud`: which of our client ids it was issued to (for Apple,
+    // the iOS bundle id or the Android Services ID).
+    audience?: string;
 }
 
 export interface ProviderIdentityService {
@@ -71,19 +74,35 @@ function sha256Base64Url(input: string): string {
     return crypto.createHash('sha256').update(input).digest('base64url');
 }
 
+// The nonce binds an ID token to the sign-in attempt that requested it, so a
+// token lifted from elsewhere can't be replayed here. The app sends a rawNonce
+// for every Apple sign-in, so Apple always requires it; Google does once the
+// app sends one there too (REQUIRE_PROVIDER_NONCE).
+function isNonceRequired(provider: 'google' | 'apple'): boolean {
+    return provider === 'apple' || config.authProviders.requireNonce;
+}
+
 function assertNonceMatches(
     provider: 'google' | 'apple',
     claims: JWTPayload,
     rawNonce?: string,
 ): void {
+    const failure = () => new UnauthorizedError(
+        `Unable to verify that ${provider === 'google' ? 'Google' : 'Apple'} sign-in attempt.`
+    );
+
     if (!rawNonce) {
+        if (isNonceRequired(provider)) {
+            throw failure();
+        }
         return;
     }
 
+    // A nonce was sent, so the token must carry the same one (raw, or its
+    // SHA-256 as Apple's native flow uses). A missing claim is a mismatch.
     const tokenNonce = typeof claims.nonce === 'string' ? claims.nonce : '';
-    const expectedHashed = sha256Base64Url(rawNonce);
-    if (tokenNonce && tokenNonce !== rawNonce && tokenNonce !== expectedHashed) {
-        throw new UnauthorizedError(`Unable to verify that ${provider === 'google' ? 'Google' : 'Apple'} sign-in attempt.`);
+    if (!tokenNonce || (tokenNonce !== rawNonce && tokenNonce !== sha256Base64Url(rawNonce))) {
+        throw failure();
     }
 }
 
@@ -109,12 +128,15 @@ function buildVerifiedIdentity(
         throw new UnauthorizedError('Unable to verify that identity.');
     }
 
+    const audience = Array.isArray(claims.aud) ? claims.aud[0] : claims.aud;
+
     return {
         provider,
         providerUserId,
         email: normalizeEmail(claims.email),
         emailVerified: parseBooleanClaim(claims.email_verified),
         isPrivateRelay: provider === 'apple' && parseBooleanClaim(claims.is_private_email),
+        audience: typeof audience === 'string' ? audience : undefined,
     };
 }
 
