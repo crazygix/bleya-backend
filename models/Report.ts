@@ -69,8 +69,8 @@ const reportSchema = new mongoose.Schema({
         type: String,
         default: '',
     },
-    // When the report's personal data (reporter/reported ids) may be purged after
-    // a referenced account is deleted. Set by the account-deletion anonymization.
+    // When the report (and its message copy) is deleted, by the TTL index
+    // below. Set on creation to config.reports.retentionDays after filing.
     retainUntil: {
         type: Date,
     },
@@ -82,5 +82,7 @@ const reportSchema = new mongoose.Schema({
 reportSchema.index({ status: 1, createdAt: -1 });
 // Surface repeat-reported users.
 reportSchema.index({ reportedUserId: 1, status: 1 });
+// Storage limitation: MongoDB deletes each report once retainUntil passes.
+reportSchema.index({ retainUntil: 1 }, { expireAfterSeconds: 0 });
 
 export const Report = mongoose.model('Report', reportSchema);

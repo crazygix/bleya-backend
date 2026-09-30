@@ -100,6 +100,7 @@ type AuthUserDocument = mongoose.Document & EnforcementState & {
     lastLogin: Date;
     refreshTokenHash?: string;
     refreshTokenExpiresAt?: Date;
+    revokedRefreshTokenHash?: string;
 };
 
 // Banned/suspended accounts get no session. 403 + USER_BLOCKED + a message the
@@ -199,6 +200,11 @@ export function createAuthService(deps: AuthServiceDeps) {
         const refreshToken = generateRefreshToken();
         user.refreshTokenHash = hashRefreshToken(refreshToken);
         user.refreshTokenExpiresAt = getRefreshExpiryDate();
+        // A new session replaces any session a past ban or suspension ended.
+        // markModified: the field isn't loaded (select: false), so assigning
+        // undefined alone wouldn't be saved as a change.
+        user.revokedRefreshTokenHash = undefined;
+        user.markModified('revokedRefreshTokenHash');
         user.lastLogin = now;
         await user.save();
 
@@ -464,6 +470,12 @@ export function createAuthService(deps: AuthServiceDeps) {
         );
 
         if (!user) {
+            // A session ended by a ban or suspension: say why (403) rather
+            // than a bare 401, so the app can show the reason.
+            const revoked = await userRepo.findEnforcementByRevokedRefreshToken(hashed);
+            if (revoked) {
+                assertAccountMayStartSession(revoked);
+            }
             throw new UnauthorizedError('Invalid or expired refresh token');
         }
 

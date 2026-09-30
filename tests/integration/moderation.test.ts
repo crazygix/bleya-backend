@@ -96,14 +96,73 @@ describe('Moderation and enforcement', () => {
                 .expect(403);
         });
 
-        it('ends the refresh session', async () => {
+        it('ends the refresh session and says why', async () => {
             const res = await googleSignIn('google-banned-2').expect(200);
             const cookie = res.headers['set-cookie'];
             const user = await User.findOne({}).select('_id').lean();
 
+            await getTestAgent()
+                .post(`/v1/admin/users/${user!._id}/ban`)
+                .set(admin())
+                .send({ reason: 'spam' })
+                .expect(200);
+
+            const refresh = await getTestAgent().post('/v1/auth/refresh').set('Cookie', cookie).expect(403);
+            assert.equal(refresh.body.error.code, 'USER_BLOCKED');
+            assert.equal(refresh.body.error.message, 'Your account has been banned. Reason: spam');
+            assert.equal(refresh.body.token, undefined);
+
+            const stored = await User.findById(user!._id).select('+refreshTokenHash').lean();
+            assert.equal(stored?.refreshTokenHash, undefined);
+        });
+
+        it('explains a suspension on refresh', async () => {
+            const res = await googleSignIn('google-suspended-2').expect(200);
+            const cookie = res.headers['set-cookie'];
+            const user = await User.findOne({}).select('_id').lean();
+
+            await getTestAgent()
+                .post(`/v1/admin/users/${user!._id}/suspend`)
+                .set(admin())
+                .send({ suspendedUntil: '2999-01-01T00:00:00Z' })
+                .expect(200);
+
+            const refresh = await getTestAgent().post('/v1/auth/refresh').set('Cookie', cookie).expect(403);
+            assert.match(refresh.body.error.message, /suspended until 2999-01-01/);
+        });
+
+        it('keeps the ended session ended after the ban is lifted', async () => {
+            const res = await googleSignIn('google-banned-4').expect(200);
+            const cookie = res.headers['set-cookie'];
+            const user = await User.findOne({}).select('_id').lean();
+
             await getTestAgent().post(`/v1/admin/users/${user!._id}/ban`).set(admin()).send({}).expect(200);
+            await getTestAgent().post(`/v1/admin/users/${user!._id}/unban`).set(admin()).expect(200);
 
             await getTestAgent().post('/v1/auth/refresh').set('Cookie', cookie).expect(401);
+        });
+
+        it('forgets the ended session once the user signs in again', async () => {
+            const userId = await signedInUserId('google-returning-1');
+            await User.updateOne({ _id: userId }, { $set: { revokedRefreshTokenHash: 'ended-session' } });
+
+            await googleSignIn('google-returning-1').expect(200);
+
+            const stored = await User.findById(userId).select('+revokedRefreshTokenHash').lean();
+            assert.equal(stored?.revokedRefreshTokenHash, undefined);
+        });
+
+        it('stores a reason that starts with $ as written', async () => {
+            const userId = await signedInUserId('google-banned-5');
+
+            await getTestAgent()
+                .post(`/v1/admin/users/${userId}/ban`)
+                .set(admin())
+                .send({ reason: '$100 scam links' })
+                .expect(200);
+
+            const signIn = await googleSignIn('google-banned-5').expect(403);
+            assert.equal(signIn.body.error.message, 'Your account has been banned. Reason: $100 scam links');
         });
 
         it('survives account deletion: the same identity cannot sign up again', async () => {

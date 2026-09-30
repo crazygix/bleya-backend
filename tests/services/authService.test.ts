@@ -20,6 +20,7 @@ function createMockUser(overrides: Record<string, unknown> = {}) {
         save: async function save() {
             return this;
         },
+        markModified: () => {},
         ...overrides,
     };
 }
@@ -36,6 +37,7 @@ function fakeUserRepo(overrides: Partial<UserRepository> = {}): UserRepository {
         findByUsernameLean: async () => null,
         findOneAndUpdateByRefreshToken: async () => null,
         clearRefreshToken: async () => null,
+        findEnforcementByRevokedRefreshToken: async () => null,
         addToJoinedRooms: async () => ({ modifiedCount: 0 }),
         removeFromJoinedRooms: async () => {},
         existsWithRoom: async () => false,
@@ -274,5 +276,53 @@ describe('authService (mocked)', () => {
 
         assert.equal(createdCredential, 'credential-1');
         assert.equal(result.hasPasskey, true);
+    });
+});
+
+describe('authService.refreshAccessToken for a session ended by moderation', () => {
+    function serviceWithRevokedSession(state: Awaited<ReturnType<UserRepository['findEnforcementByRevokedRefreshToken']>>) {
+        return createAuthService({
+            userRepo: fakeUserRepo({
+                findEnforcementByRevokedRefreshToken: async () => state,
+            }),
+            userIdentityRepo: fakeUserIdentityRepo(),
+            passkeyCredentialRepo: fakePasskeyCredentialRepo(),
+            authChallengeRepo: fakeAuthChallengeRepo(),
+            providerIdentityService: fakeProviderIdentityService(),
+            passkeyService: fakePasskeyService(),
+        });
+    }
+
+    it('answers with the ban reason instead of a bare 401', async () => {
+        const svc = serviceWithRevokedSession({ status: 'banned', enforcementReason: 'spam' });
+
+        await assert.rejects(svc.refreshAccessToken('old-refresh-token'), (error: any) => {
+            assert.equal(error.statusCode, 403);
+            assert.equal(error.code, 'USER_BLOCKED');
+            assert.equal(error.message, 'Your account has been banned. Reason: spam');
+            return true;
+        });
+    });
+
+    it('treats it as expired once the suspension is over', async () => {
+        const svc = serviceWithRevokedSession({
+            status: 'suspended',
+            suspendedUntil: new Date(Date.now() - 60_000),
+            enforcementReason: 'cool-off',
+        });
+
+        await assert.rejects(svc.refreshAccessToken('old-refresh-token'), (error: any) => {
+            assert.equal(error.statusCode, 401);
+            return true;
+        });
+    });
+
+    it('stays a plain 401 for a token nobody knows', async () => {
+        const svc = serviceWithRevokedSession(null);
+
+        await assert.rejects(svc.refreshAccessToken('unknown-token'), (error: any) => {
+            assert.equal(error.statusCode, 401);
+            return true;
+        });
     });
 });

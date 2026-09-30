@@ -170,6 +170,28 @@ function parseSuspendedUntil(value: unknown): Date | null {
     return date;
 }
 
+// Applies a ban or suspension and ends the refresh session. The session's hash
+// moves to revokedRefreshTokenHash, so a refresh with it is answered with the
+// reason instead of a bare 401 (see authService.refreshAccessToken). Values are
+// $literal because an aggregation pipeline reads strings starting with '$' as
+// field paths.
+async function applyEnforcement(
+    id: mongoose.Types.ObjectId,
+    fields: { status: 'banned' | 'suspended'; enforcementReason: string; suspendedUntil: Date | null }
+): Promise<void> {
+    await User.updateOne({ _id: id }, [
+        {
+            $set: {
+                status: { $literal: fields.status },
+                enforcementReason: { $literal: fields.enforcementReason },
+                suspendedUntil: { $literal: fields.suspendedUntil },
+                revokedRefreshTokenHash: { $ifNull: ['$refreshTokenHash', '$revokedRefreshTokenHash'] },
+            },
+        },
+        { $unset: ['refreshTokenHash', 'refreshTokenExpiresAt'] },
+    ]);
+}
+
 async function assertUserExists(id: mongoose.Types.ObjectId): Promise<void> {
     const exists = await User.exists({ _id: id });
     if (!exists) {
@@ -177,8 +199,8 @@ async function assertUserExists(id: mongoose.Types.ObjectId): Promise<void> {
     }
 }
 
-// Ban: blocks connect + send indefinitely. Clears the refresh-token hash so the
-// session can't be renewed, and force-disconnects live sockets. The current
+// Ban: blocks connect + send indefinitely. Ends the refresh session so it can't
+// be renewed, and force-disconnects live sockets. The current
 // short-lived access token still works until it expires (revocation is
 // deliberately not implemented), but socket messaging is cut immediately.
 export async function banUser(userId: string, actorLabel: string, reason?: unknown): Promise<UserEnforcementResult> {
@@ -186,13 +208,7 @@ export async function banUser(userId: string, actorLabel: string, reason?: unkno
     await assertUserExists(id);
 
     const enforcementReason = sanitizeReason(reason);
-    await User.updateOne(
-        { _id: id },
-        {
-            $set: { status: 'banned', enforcementReason, suspendedUntil: null },
-            $unset: { refreshTokenHash: '', refreshTokenExpiresAt: '' },
-        }
-    );
+    await applyEnforcement(id, { status: 'banned', enforcementReason, suspendedUntil: null });
 
     disconnectUser(id.toString());
     await deactivatePushTokens(id);
@@ -223,13 +239,7 @@ export async function suspendUser(
     const enforcementReason = sanitizeReason(reason);
     const suspendedUntil = parseSuspendedUntil(suspendedUntilInput);
 
-    await User.updateOne(
-        { _id: id },
-        {
-            $set: { status: 'suspended', enforcementReason, suspendedUntil },
-            $unset: { refreshTokenHash: '', refreshTokenExpiresAt: '' },
-        }
-    );
+    await applyEnforcement(id, { status: 'suspended', enforcementReason, suspendedUntil });
 
     disconnectUser(id.toString());
     await deactivatePushTokens(id);
@@ -261,7 +271,11 @@ export async function unbanUser(userId: string, actorLabel: string): Promise<Use
 
     await User.updateOne(
         { _id: id },
-        { $set: { status: 'active', enforcementReason: '', suspendedUntil: null } }
+        {
+            $set: { status: 'active', enforcementReason: '', suspendedUntil: null },
+            // The ended session stays ended; it just no longer explains itself.
+            $unset: { revokedRefreshTokenHash: '' },
+        }
     );
     await forgetBannedIdentities(id.toString());
 

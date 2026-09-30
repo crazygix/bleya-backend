@@ -19,6 +19,8 @@ export interface UserRepository {
     ): Promise<({ _id: mongoose.Types.ObjectId } & EnforcementState) | null>;
     // Returns the id of the user whose session was cleared, if any.
     clearRefreshToken(hash: string): Promise<string | null>;
+    // Enforcement state of the user whose session a ban/suspension ended.
+    findEnforcementByRevokedRefreshToken(hash: string): Promise<EnforcementState | null>;
     addToJoinedRooms(userId: string, roomId: mongoose.Types.ObjectId): Promise<{ modifiedCount: number }>;
     removeFromJoinedRooms(userId: string, roomId: mongoose.Types.ObjectId): Promise<void>;
     existsWithRoom(userId: string, roomId: mongoose.Types.ObjectId): Promise<boolean>;
@@ -87,6 +89,18 @@ export class MongoUserRepository implements UserRepository {
             { projection: { _id: 1 } }
         ).lean<{ _id: mongoose.Types.ObjectId } | null>();
         return doc ? doc._id.toString() : null;
+    }
+
+    async findEnforcementByRevokedRefreshToken(hash: string) {
+        const doc = await User.findOne({ revokedRefreshTokenHash: hash })
+            .select('status suspendedUntil enforcementReason')
+            .lean<EnforcementState | null>();
+        if (!doc) return null;
+        return {
+            status: doc.status,
+            suspendedUntil: doc.suspendedUntil,
+            enforcementReason: doc.enforcementReason,
+        };
     }
 
     async addToJoinedRooms(userId: string, roomId: mongoose.Types.ObjectId) {

@@ -19,6 +19,7 @@ function fakeUserRepo(overrides: Partial<UserRepository> = {}): UserRepository {
         findByUsernameLean: async () => null,
         findOneAndUpdateByRefreshToken: async () => null,
         clearRefreshToken: async () => null,
+        findEnforcementByRevokedRefreshToken: async () => null,
         addToJoinedRooms: async () => ({ modifiedCount: 0 }),
         removeFromJoinedRooms: async () => {},
         existsWithRoom: async () => false,

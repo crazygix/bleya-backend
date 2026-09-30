@@ -352,6 +352,12 @@ export const config = {
     maxConnectionsPerUser: parseNumberEnv('SOCKET_MAX_CONNECTIONS_PER_USER', 5),
   },
 
+  reports: {
+    // Reports (with the copy of a reported message) are deleted automatically
+    // this long after they are filed. The privacy policy states two years.
+    retentionDays: parseNumberEnv('REPORT_RETENTION_DAYS', 730),
+  },
+
   // Proactive content filtering at post time. blockedTerms extends the built-in
   // text blocklist (comma-separated CONTENT_BLOCKLIST). imageModeration plugs in
   // an image-safety provider; empty = disabled (uploads allowed).

@@ -52,6 +52,25 @@ describe('Reports API', () => {
             assert.equal(stored!.details, 'rude messages');
         });
 
+        it('schedules the report for automatic deletion two years after filing', async () => {
+            const me = await createTestUser({ username: 'alice' });
+            const other = await createTestUser({ username: 'bob' });
+
+            const res = await getTestAgent()
+                .post('/v1/reports')
+                .set(authHeader(me._id.toString()))
+                .send({ reportedUserId: other._id.toString(), reason: 'spam' })
+                .expect(201);
+
+            const stored = await Report.findById(res.body.id).lean<{ retainUntil?: Date } | null>();
+            const days = (stored!.retainUntil!.getTime() - res.body.createdAt) / (24 * 60 * 60 * 1000);
+            assert.ok(Math.abs(days - 730) < 0.01, `retainUntil is ${days} days after filing`);
+
+            const indexes = await Report.collection.indexes();
+            const ttl = indexes.find((index) => index.key.retainUntil === 1);
+            assert.equal(ttl?.expireAfterSeconds, 0);
+        });
+
         it('creates a report against a specific message', async () => {
             const room = await Room.create({ name: 'Room', type: 'public' });
             const roomId = room._id as mongoose.Types.ObjectId;

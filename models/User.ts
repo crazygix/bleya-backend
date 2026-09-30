@@ -12,6 +12,12 @@ const userSchema = new mongoose.Schema({
         type: Date,
         select: false,
     },
+    // The session a ban or suspension ended. Presenting it again is answered
+    // with the reason (403) instead of a bare 401; it can't renew anything.
+    revokedRefreshTokenHash: {
+        type: String,
+        select: false,
+    },
     username: {
         type: String,
         default: '',
@@ -96,6 +102,8 @@ userSchema.index(
     { username: 1 },
     { unique: true, partialFilterExpression: { username: { $gt: '' } } },
 );
+
+userSchema.index({ revokedRefreshTokenHash: 1 }, { sparse: true });
 
 // Index for efficient room member queries (finding users by joinedRooms)
 userSchema.index({ joinedRooms: 1 });
