@@ -85,6 +85,14 @@ describe('Moderation and enforcement', () => {
             const token = await PushToken.findOne({ userId }).lean();
             assert.equal(token?.isActive, false);
 
+            // The action is logged, and the log entry is deleted automatically
+            // two years later.
+            const logged = await ModerationAction.findOne({ targetId: userId, action: 'user_banned' }).lean();
+            const days = (logged!.retainUntil!.getTime() - logged!.createdAt.getTime()) / (24 * 60 * 60 * 1000);
+            assert.ok(Math.abs(days - 730) < 0.01, `retainUntil is ${days} days after the action`);
+            const ttl = (await ModerationAction.collection.indexes()).find((index) => index.key.retainUntil === 1);
+            assert.equal(ttl?.expireAfterSeconds, 0);
+
             const signIn = await googleSignIn('google-banned-1').expect(403);
             assert.equal(signIn.body.error.code, 'USER_BLOCKED');
             assert.equal(signIn.body.error.message, 'Your account has been banned. Reason: spam');

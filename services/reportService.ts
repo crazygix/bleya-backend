@@ -4,6 +4,7 @@ import { User } from '../models/User.js';
 import { Message } from '../models/Message.js';
 import { ValidationError, NotFoundError, ErrorCode } from '../utils/errors.js';
 import { validateObjectId } from '../utils/validation.js';
+import { retainUntilAfter } from '../utils/retention.js';
 import { sanitizePlainText } from '../utils/sanitize.js';
 import { recordModerationAction } from './auditService.js';
 import { config } from '../config/index.js';
@@ -24,13 +25,6 @@ export interface CreateReportResult {
 }
 
 const REPORT_REASON_SET = new Set<string>(REPORT_REASONS);
-
-const DAY_MS = 24 * 60 * 60 * 1000;
-
-// When a report filed at [filedAt] is deleted (see Report.retainUntil).
-export function reportRetainUntil(filedAt: Date): Date {
-    return new Date(filedAt.getTime() + config.reports.retentionDays * DAY_MS);
-}
 
 function parseOptionalObjectId(value: unknown, fieldName: string): mongoose.Types.ObjectId | undefined {
     if (value === undefined || value === null || value === '') {
@@ -111,7 +105,7 @@ export async function createReport(
         messageSnapshot,
         reason: input.reason,
         details,
-        retainUntil: reportRetainUntil(new Date()),
+        retainUntil: retainUntilAfter(config.reports.retentionDays),
     });
 
     logger.info('report.created', {

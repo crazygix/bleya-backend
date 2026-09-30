@@ -1,6 +1,8 @@
 import mongoose from 'mongoose';
+import { config } from '../config/index.js';
 import { ModerationAction, ModerationTargetType } from '../models/ModerationAction.js';
 import logger from '../utils/logger.js';
+import { retainUntilAfter } from '../utils/retention.js';
 
 export interface RecordActionInput {
     actorLabel: string;
@@ -27,6 +29,7 @@ export async function recordModerationAction(input: RecordActionInput): Promise<
             reportId: input.reportId ? toObjectId(input.reportId) : undefined,
             reason: input.reason || '',
             metadata: input.metadata,
+            retainUntil: retainUntilAfter(config.auditLog.retentionDays),
         });
     } catch (error) {
         logger.error('audit.record_failed', {

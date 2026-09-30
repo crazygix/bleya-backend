@@ -23,6 +23,7 @@
     "migrate:neutral-dm-names": "npm run build && node dist/migrations/006_neutral_dm_room_names.js",
     "migrate:reencode-profile-images": "npm run build && node dist/migrations/007_reencode_profile_images.js",
     "migrate:report-retention": "npm run build && node dist/migrations/008_report_retention.js",
+    "migrate:audit-log-retention": "npm run build && node dist/migrations/009_audit_log_retention.js",
     "db": "npm run build && node dist/scripts/db.js",
     "diagnose-push": "npm run build && node dist/scripts/diagnose-push.js",
     "postinstall": "npm run build"

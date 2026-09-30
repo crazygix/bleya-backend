@@ -358,6 +358,12 @@ export const config = {
     retentionDays: parseNumberEnv('REPORT_RETENTION_DAYS', 730),
   },
 
+  auditLog: {
+    // Moderation-action records are deleted automatically this long after the
+    // action. The privacy policy states two years.
+    retentionDays: parseNumberEnv('AUDIT_LOG_RETENTION_DAYS', 730),
+  },
+
   // Proactive content filtering at post time. blockedTerms extends the built-in
   // text blocklist (comma-separated CONTENT_BLOCKLIST). imageModeration plugs in
   // an image-safety provider; empty = disabled (uploads allowed).
