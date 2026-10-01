@@ -220,13 +220,47 @@ describe('messageService (mocked repos)', () => {
             messageRepo: fakeMessageRepo(),
         });
 
+        // Same sentence as sign-in and the socket handshake.
         await assert.rejects(
             () => svc.createMessage({
                 userId: new mongoose.Types.ObjectId().toString(),
                 roomId: roomId.toString(),
                 text: 'Hello',
             }),
-            (err: Error) => err.message.includes('Banned for spam.')
+            {
+                code: 'FORBIDDEN',
+                message: 'Your account has been banned. Reason: Banned for spam.',
+            }
+        );
+    });
+
+    it('tells a suspended sender until when', async () => {
+        const roomId = new mongoose.Types.ObjectId();
+        const svc = buildService({
+            userRepo: fakeUserRepo({
+                existsWithRoom: async () => true,
+                findEnforcementState: async () => ({
+                    status: 'suspended',
+                    suspendedUntil: new Date('2999-01-02T00:00:00Z'),
+                    enforcementReason: 'Spam',
+                }),
+            }),
+            roomRepo: fakeRoomRepo({
+                findById: async () => ({ _id: roomId, name: 'Room', type: 'public', participants: [] }),
+            }),
+            messageRepo: fakeMessageRepo(),
+        });
+
+        await assert.rejects(
+            () => svc.createMessage({
+                userId: new mongoose.Types.ObjectId().toString(),
+                roomId: roomId.toString(),
+                text: 'Hello',
+            }),
+            {
+                code: 'FORBIDDEN',
+                message: 'Your account is suspended until 2999-01-02. Reason: Spam',
+            }
         );
     });
 

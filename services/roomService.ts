@@ -713,6 +713,24 @@ export async function getRoomDetailForUser(
 // caller performs the actual transport / emits)
 // ============================================================
 
+export interface RoomJoinViewOptions {
+    /**
+     * Asked right before the user is added to the room. Returning false means
+     * the join is no longer wanted (a newer request from the same connection
+     * replaced it), so the room isn't added and RoomJoinSupersededError is
+     * thrown instead.
+     */
+    isStillWanted?: () => boolean;
+}
+
+/** A join that was replaced by a newer request before the user was added to the room. */
+export class RoomJoinSupersededError extends Error {
+    constructor() {
+        super('The room join was replaced by a newer request.');
+        this.name = 'RoomJoinSupersededError';
+    }
+}
+
 /**
  * Encapsulates the join_room business logic: validates access, enforces the
  * public-room limit, joins the room if needed, and builds the room view
@@ -720,7 +738,8 @@ export async function getRoomDetailForUser(
  */
 export async function buildRoomJoinView(
     userId: string,
-    roomObjectId: mongoose.Types.ObjectId
+    roomObjectId: mongoose.Types.ObjectId,
+    options: RoomJoinViewOptions = {}
 ): Promise<RoomJoinView> {
     const roomId = roomObjectId.toString();
 
@@ -753,6 +772,10 @@ export async function buildRoomJoinView(
             if (publicRoomCount >= MAX_PUBLIC_ROOMS) {
                 throw new ValidationError('You can only join up to 5 group chats at a time.');
             }
+        }
+
+        if (options.isStillWanted && !options.isStillWanted()) {
+            throw new RoomJoinSupersededError();
         }
 
         await User.updateOne(

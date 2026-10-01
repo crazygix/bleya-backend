@@ -4,7 +4,7 @@ import { sanitizePlainText } from '../utils/sanitize.js';
 import { assertCleanText } from '../utils/contentFilter.js';
 import { AppError, ValidationError, ErrorCode } from '../utils/errors.js';
 import { validateObjectId } from '../utils/validation.js';
-import { isUserBlockedFromActing } from '../utils/enforcement.js';
+import { describeEnforcementForUser } from '../utils/enforcement.js';
 import { getActiveBlockPairUserIds } from './blockService.js';
 import { User } from '../models/User.js';
 import type { LeanRoom, LeanMessage, LeanUserBlock } from '../types/lean.js';
@@ -64,12 +64,11 @@ export function createMessageService(deps: MessageServiceDeps) {
 
         // Defense-in-depth: banned/suspended users are blocked at the socket
         // handshake, but re-check here so no send path can bypass enforcement.
+        // The message is the same sentence sign-in and the handshake show.
         const senderStatus = await userRepo.findEnforcementState(input.userId);
-        if (senderStatus) {
-            const enforcement = isUserBlockedFromActing(senderStatus);
-            if (enforcement.blocked) {
-                throw new AppError(ErrorCode.FORBIDDEN, enforcement.reason, 403);
-            }
+        const enforcementExplanation = senderStatus ? describeEnforcementForUser(senderStatus) : null;
+        if (enforcementExplanation) {
+            throw new AppError(ErrorCode.FORBIDDEN, enforcementExplanation, 403);
         }
 
         let privateRoomOtherParticipantId: mongoose.Types.ObjectId | null = null;

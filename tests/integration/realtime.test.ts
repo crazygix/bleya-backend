@@ -9,6 +9,7 @@ import { createTestUser, getAuthToken } from '../helpers/auth.js';
 import { stopRateLimiterCleanupForTests } from '../../middleware/rateLimiter.js';
 import { createHttpServer } from '../../server/server.js';
 import { Room } from '../../models/Room.js';
+import { User } from '../../models/User.js';
 import { PushToken } from '../../models/PushToken.js';
 import {
     resetPushMessagingForTests,
@@ -108,6 +109,40 @@ describe('Realtime', () => {
 
         try {
             await assert.rejects(connect(baseUrl, token), /Authentication error: Account not found/);
+        } finally {
+            await stopServer();
+        }
+    });
+
+    // The app signs out on the "Account blocked: " prefix and shows the rest,
+    // which is the same sentence sign-in and refresh use.
+    it('explains a suspension when refusing the connection', async () => {
+        await startServer();
+        const user = await createTestUser({ username: 'paused' });
+        await User.updateOne({ _id: user._id }, {
+            status: 'suspended',
+            suspendedUntil: new Date('2999-01-02T00:00:00Z'),
+            enforcementReason: 'Spam',
+        });
+
+        try {
+            await assert.rejects(connect(baseUrl, getAuthToken(user._id.toString())), {
+                message: 'Account blocked: Your account is suspended until 2999-01-02. Reason: Spam',
+            });
+        } finally {
+            await stopServer();
+        }
+    });
+
+    it('explains a ban without a reason when refusing the connection', async () => {
+        await startServer();
+        const user = await createTestUser({ username: 'banned' });
+        await User.updateOne({ _id: user._id }, { status: 'banned' });
+
+        try {
+            await assert.rejects(connect(baseUrl, getAuthToken(user._id.toString())), {
+                message: 'Account blocked: Your account has been banned.',
+            });
         } finally {
             await stopServer();
         }

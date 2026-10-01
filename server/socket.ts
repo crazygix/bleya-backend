@@ -9,12 +9,16 @@ import {
 } from '../services/NotificationService.js';
 import { prepareMessageDelivery } from '../services/messageDeliveryService.js';
 import { createMessage } from '../services/messageService.js';
-import { buildRoomJoinView, getRoomSummaryRecipientIds } from '../services/roomService.js';
+import {
+    buildRoomJoinView,
+    getRoomSummaryRecipientIds,
+    RoomJoinSupersededError,
+} from '../services/roomService.js';
 import { sendPushNotifications } from '../services/pushNotificationService.js';
 import { buildSocketCors } from '../utils/cors.js';
 import { ErrorCode, AppError, ValidationError } from '../utils/errors.js';
 import { validateObjectId } from '../utils/validation.js';
-import { isUserBlockedFromActing, type EnforcementState } from '../utils/enforcement.js';
+import { describeEnforcementForUser, type EnforcementState } from '../utils/enforcement.js';
 import { config } from '../config/index.js';
 import logger from '../utils/logger.js';
 import type { LeanMessage } from '../types/lean.js';
@@ -90,6 +94,10 @@ const SERVER_UNAVAILABLE_ERROR = 'Server unavailable: please try again shortly.'
 // "Not in a room" (e.g. a message sent right after a reconnect), and doesn't
 // show it — so keep that phrase in this text.
 const NOT_IN_ROOM_MESSAGE = 'Not in a room. Reopen the chat and try again.';
+
+// Acknowledgement for a join_room that a newer join_room, a leave_room or a
+// disconnect overtook while the room was loading.
+const SUPERSEDED_JOIN_RESPONSE = { ok: false, superseded: true } as const;
 
 function emitSocketError(socket: SocketWithState, code: ErrorCode, message: string): void {
     socket.emit('error', {
@@ -192,10 +200,14 @@ function parseOpenThreadPayload(value: unknown): { threadId: string } {
     };
 }
 
-function parseSendMessagePayload(value: unknown): { text: string; parentMessageId?: string } {
+function parseSendMessagePayload(value: unknown): { text: string; roomId?: string; parentMessageId?: string } {
     const payload = parseSocketObjectPayload(value, 'send_message');
+    const text = parseRequiredSocketString(payload.text, 'Message text');
+    const roomId = parseOptionalSocketString(payload.roomId, 'Room ID');
     return {
-        text: parseRequiredSocketString(payload.text, 'Message text'),
+        text,
+        // Normalized, so it compares equal to the id of the room the socket joined.
+        roomId: roomId === undefined ? undefined : validateObjectId(roomId, 'room ID').toString(),
         parentMessageId: parseOptionalSocketString(payload.parentMessageId, 'Parent message ID'),
     };
 }
@@ -353,12 +365,13 @@ export function setupSocketIO(server: HTTPServer) {
                 return next(new Error('Authentication error: Account not found'));
             }
 
-            const enforcement = isUserBlockedFromActing(enforcementDoc as EnforcementState);
-            if (enforcement.blocked) {
+            const explanation = describeEnforcementForUser(enforcementDoc as EnforcementState);
+            if (explanation) {
                 // Stable "Account blocked:" prefix so the mobile client treats
                 // this as a hard ban (show + log out), distinct from the
                 // "Authentication error" prefix it uses to trigger token refresh.
-                return next(new Error(`Account blocked: ${enforcement.reason || 'Your account is not allowed to connect.'}`));
+                // The rest is the same sentence sign-in and refresh show.
+                return next(new Error(`Account blocked: ${explanation}`));
             }
         } catch (error) {
             // A lookup failure is our problem, not the token's. Using the
@@ -407,9 +420,37 @@ export function setupSocketIO(server: HTTPServer) {
             }, Math.max(0, user.tokenExpiresAt - Date.now()));
         }
 
-        socket.on('join_room', async (data: unknown) => {
+        // Last request wins on this socket. join_room, leave_room and a
+        // disconnect each start a new room request; those, open_thread and
+        // close_thread each start a new thread request. A handler that waited
+        // on the database applies its result only while it is still the latest
+        // request of its kind on a connected socket, so a slow join or thread
+        // open can't move the socket back to an old room or mark the user
+        // present after they moved on or went away.
+        let latestRoomRequest = 0;
+        let latestThreadRequest = 0;
+
+        socket.on('join_room', async (data: unknown, ack?: unknown) => {
+            const request = ++latestRoomRequest;
+            latestThreadRequest += 1;
+            const isLatestJoin = (): boolean => request === latestRoomRequest && socket.connected;
+
+            // Optional acknowledgement: clients that pass a callback get the
+            // outcome there ({ok: true} after room_joined, or {ok: false, error})
+            // instead of an 'error' event.
+            const respond = typeof ack === 'function'
+                ? (ack as (response: Record<string, unknown>) => void)
+                : null;
+            const fail = (code: ErrorCode, message: string): void => {
+                if (respond) {
+                    respond({ ok: false, error: { code, message } });
+                } else {
+                    emitSocketError(socket, code, message);
+                }
+            };
+
             if (!consumeEventBudget(user.userId, 'join_room')) {
-                emitSocketError(socket, ErrorCode.TOO_MANY_REQUESTS, 'Too many join requests. Please slow down.');
+                fail(ErrorCode.TOO_MANY_REQUESTS, 'Too many join requests. Please slow down.');
                 return;
             }
 
@@ -418,7 +459,16 @@ export function setupSocketIO(server: HTTPServer) {
                 const roomObjectId = validateObjectId(payload.roomId, 'room ID');
                 const roomId = roomObjectId.toString();
 
-                const view = await buildRoomJoinView(user.userId, roomObjectId);
+                const view = await buildRoomJoinView(user.userId, roomObjectId, {
+                    isStillWanted: isLatestJoin,
+                });
+
+                // A newer request arrived while the room was loading and decides
+                // the room now, so this join changes nothing.
+                if (!isLatestJoin()) {
+                    respond?.(SUPERSEDED_JOIN_RESPONSE);
+                    return;
+                }
 
                 if (user.roomId) {
                     socket.leave(user.roomId);
@@ -438,23 +488,36 @@ export function setupSocketIO(server: HTTPServer) {
                     pagination: view.pagination,
                     lastReadAt: view.lastReadAt,
                 });
+                respond?.({ ok: true });
 
                 logger.info('socket.room_joined', { userId: user.userId, roomId });
             } catch (error) {
-                if (error instanceof AppError) {
-                    emitSocketError(socket, error.code, error.message);
+                if (!(error instanceof AppError || error instanceof RoomJoinSupersededError)) {
+                    logger.error('socket.join_room.failed', {
+                        userId: user.userId,
+                        error: error instanceof Error ? error.message : String(error),
+                    });
+                }
+
+                // The outcome of an overtaken join no longer matters to the app.
+                if (!isLatestJoin()) {
+                    respond?.(SUPERSEDED_JOIN_RESPONSE);
                     return;
                 }
 
-                logger.error('socket.join_room.failed', {
-                    userId: user.userId,
-                    error: error instanceof Error ? error.message : String(error),
-                });
-                emitSocketError(socket, ErrorCode.INTERNAL_ERROR, "We couldn't open that chat. Please try again.");
+                if (error instanceof AppError) {
+                    fail(error.code, error.message);
+                    return;
+                }
+
+                fail(ErrorCode.INTERNAL_ERROR, "We couldn't open that chat. Please try again.");
             }
         });
 
         socket.on('open_thread', async (data: unknown) => {
+            const request = ++latestThreadRequest;
+            const isLatestOpen = (): boolean => request === latestThreadRequest && socket.connected;
+
             if (!consumeEventBudget(user.userId, 'open_thread')) {
                 emitSocketError(socket, ErrorCode.TOO_MANY_REQUESTS, 'Too many thread events. Please slow down.');
                 return;
@@ -472,6 +535,12 @@ export function setupSocketIO(server: HTTPServer) {
                 const threadMessage = await Message.findById(threadObjectId)
                     .select('_id roomId parentMessageId')
                     .lean<Pick<LeanMessage, '_id' | 'roomId' | 'parentMessageId'> | null>();
+
+                // Overtaken while the thread was looked up: drop it quietly, so
+                // a thread the app already left isn't marked open again.
+                if (!isLatestOpen()) {
+                    return;
+                }
 
                 if (!threadMessage) {
                     emitSocketError(socket, ErrorCode.MESSAGE_NOT_FOUND, 'Thread not found');
@@ -494,21 +563,33 @@ export function setupSocketIO(server: HTTPServer) {
                     threadId: user.threadId,
                 });
             } catch (error) {
+                if (!(error instanceof AppError)) {
+                    logger.error('socket.open_thread.failed', {
+                        userId: user.userId,
+                        roomId: user.roomId,
+                        error: error instanceof Error ? error.message : String(error),
+                    });
+                }
+
+                // Overtaken requests are dropped quietly, failures included.
+                if (!isLatestOpen()) {
+                    return;
+                }
+
                 if (error instanceof AppError) {
                     emitSocketError(socket, error.code, error.message);
                     return;
                 }
 
-                logger.error('socket.open_thread.failed', {
-                    userId: user.userId,
-                    roomId: user.roomId,
-                    error: error instanceof Error ? error.message : String(error),
-                });
                 emitSocketError(socket, ErrorCode.INTERNAL_ERROR, "We couldn't open that thread. Please try again.");
             }
         });
 
         socket.on('close_thread', () => {
+            // Overtakes an open_thread that is still loading, even when this
+            // close_thread is over the rate limit itself.
+            latestThreadRequest += 1;
+
             if (!consumeEventBudget(user.userId, 'close_thread')) {
                 emitSocketError(socket, ErrorCode.TOO_MANY_REQUESTS, 'Too many thread events. Please slow down.');
                 return;
@@ -546,6 +627,19 @@ export function setupSocketIO(server: HTTPServer) {
                 const payload = parseSendMessagePayload(data);
 
                 if (!roomId) {
+                    fail(ErrorCode.NOT_IN_ROOM, NOT_IN_ROOM_MESSAGE);
+                    return;
+                }
+
+                // Newer apps say which chat the message is for. If this socket
+                // is in another room, refuse it instead of posting it there; the
+                // app rejoins its chat and sends again.
+                if (payload.roomId && payload.roomId !== roomId) {
+                    logger.warn('socket.send_message.room_mismatch', {
+                        userId: user.userId,
+                        roomId,
+                        requestedRoomId: payload.roomId,
+                    });
                     fail(ErrorCode.NOT_IN_ROOM, NOT_IN_ROOM_MESSAGE);
                     return;
                 }
@@ -621,6 +715,11 @@ export function setupSocketIO(server: HTTPServer) {
         // Synchronous on purpose: no database work here, so nothing can fail
         // outside the handler's control.
         socket.on('leave_room', () => {
+            // Overtakes a join_room or open_thread that is still loading, also
+            // before the first join completes (a join followed by a quick leave).
+            latestRoomRequest += 1;
+            latestThreadRequest += 1;
+
             if (!user.roomId) {
                 return;
             }
@@ -636,6 +735,10 @@ export function setupSocketIO(server: HTTPServer) {
         });
 
         socket.on('disconnect', () => {
+            // Nothing still loading may mark this socket present once it's gone.
+            latestRoomRequest += 1;
+            latestThreadRequest += 1;
+
             if (tokenExpiryTimer) {
                 clearTimeout(tokenExpiryTimer);
             }
