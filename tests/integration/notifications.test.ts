@@ -39,6 +39,42 @@ describe('Notifications API', () => {
             assert.equal(storedToken?.token, 'push-token-1');
             assert.equal(storedToken?.platform, 'ios');
             assert.equal(storedToken?.isActive, true);
+            assert.equal(storedToken?.badge, false);
+        });
+
+        it('stores the badge flag for app builds that ask for the badge count', async () => {
+            const user = await createTestUser();
+            const agent = getTestAgent();
+
+            await agent
+                .post('/v1/notifications/push/register')
+                .set(authHeader(user._id.toString()))
+                .send({
+                    token: 'push-token-1',
+                    platform: 'ios',
+                    badge: true,
+                })
+                .expect(200);
+
+            const storedToken = await PushToken.findOne({ userId: user._id }).lean();
+            assert.equal(storedToken?.badge, true);
+        });
+
+        it('rejects a badge flag that is not true or false', async () => {
+            const user = await createTestUser();
+            const agent = getTestAgent();
+
+            await agent
+                .post('/v1/notifications/push/register')
+                .set(authHeader(user._id.toString()))
+                .send({
+                    token: 'push-token-1',
+                    platform: 'ios',
+                    badge: 'yes',
+                })
+                .expect(400);
+
+            assert.equal(await PushToken.countDocuments({ userId: user._id }), 0);
         });
 
         it('is idempotent and replaces the previous token for the same user', async () => {

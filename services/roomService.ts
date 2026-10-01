@@ -5,7 +5,14 @@ import { Message } from '../models/Message.js';
 import { AppError, NotFoundError, ValidationError, ErrorCode } from '../utils/errors.js';
 import { toRoomLocation, isPrivateRoomParticipant, type RoomLocation } from '../utils/room.js';
 import { formatMessage, buildUsernameMap, type FormattedMessage } from '../utils/message.js';
-import type { LeanRoom, LeanMessage, LeanUser, LeanJoinedRoomsUser, LastMessageAgg } from '../types/lean.js';
+import type {
+    LeanRoom,
+    LeanMessage,
+    LeanUser,
+    LeanJoinedRoomsUser,
+    LastMessageAgg,
+    RoomReadPointer,
+} from '../types/lean.js';
 import { type UserRepository, userRepository as defaultUserRepo } from '../repositories/userRepository.js';
 import { type RoomRepository, roomRepository as defaultRoomRepo } from '../repositories/roomRepository.js';
 import { getActiveBlockPairUserIds } from './blockService.js';
@@ -233,6 +240,58 @@ export function assertUserHasRoomAccess(
     }
 }
 
+// Unread messages per room, as each room's unreadCount in the chat list:
+// top-level messages after the user's read pointer that aren't their own, from
+// a blocked-pair user, or removed by moderation. Rooms with nothing unread are
+// left out.
+async function countUnreadMessagesByRoom(
+    userId: string,
+    roomIds: mongoose.Types.ObjectId[],
+    readPointers: RoomReadPointer[] | undefined,
+    blockedUserObjectIds: mongoose.Types.ObjectId[]
+): Promise<Map<string, number>> {
+    const lastReadAtByRoomId = new Map<string, Date>();
+    for (const pointer of readPointers || []) {
+        if (!pointer.roomId || !pointer.lastReadAt) {
+            continue;
+        }
+
+        const roomId = pointer.roomId.toString();
+        const currentLastReadAt = lastReadAtByRoomId.get(roomId);
+        if (!currentLastReadAt || pointer.lastReadAt > currentLastReadAt) {
+            lastReadAtByRoomId.set(roomId, pointer.lastReadAt);
+        }
+    }
+
+    const currentUserObjectId = new mongoose.Types.ObjectId(userId);
+    const unreadMatchConditions = roomIds.map((roomId) => {
+        const lastReadAt = lastReadAtByRoomId.get(roomId.toString());
+        const condition: Record<string, unknown> = {
+            roomId,
+            parentMessageId: null,
+            userId: { $nin: [currentUserObjectId, ...blockedUserObjectIds] },
+            deletedAt: null,
+        };
+        if (lastReadAt) {
+            condition.createdAt = { $gt: lastReadAt };
+        }
+        return condition;
+    });
+
+    const unreadCountByRoomId = new Map<string, number>();
+    if (unreadMatchConditions.length > 0) {
+        const unreadCounts = await Message.aggregate<{ _id: mongoose.Types.ObjectId; count: number }>([
+            { $match: { $or: unreadMatchConditions } },
+            { $group: { _id: '$roomId', count: { $sum: 1 } } },
+        ]);
+        for (const { _id, count } of unreadCounts) {
+            unreadCountByRoomId.set(_id.toString(), count);
+        }
+    }
+
+    return unreadCountByRoomId;
+}
+
 export async function getJoinedRoomsForUser(userId: string): Promise<JoinedRoomDto[]> {
     const user = await User.findById(userId)
         .select('joinedRooms hiddenDirectRooms roomReadPointers')
@@ -260,7 +319,6 @@ export async function getJoinedRoomsForUser(userId: string): Promise<JoinedRoomD
     }
 
     const joinedRoomIds = rooms.map((room) => room._id);
-    const currentUserObjectId = new mongoose.Types.ObjectId(userId);
 
     // Mutual block: a blocked-pair user's messages never surface as a preview or
     // count toward unread, same as in the room itself.
@@ -294,43 +352,12 @@ export async function getJoinedRoomsForUser(userId: string): Promise<JoinedRoomD
 
     const lastMessageMap = new Map(lastMessages.map((msg) => [msg._id.toString(), msg]));
 
-    const lastReadAtByRoomId = new Map<string, Date>();
-    for (const pointer of user.roomReadPointers || []) {
-        if (!pointer.roomId || !pointer.lastReadAt) {
-            continue;
-        }
-
-        const roomId = pointer.roomId.toString();
-        const currentLastReadAt = lastReadAtByRoomId.get(roomId);
-        if (!currentLastReadAt || pointer.lastReadAt > currentLastReadAt) {
-            lastReadAtByRoomId.set(roomId, pointer.lastReadAt);
-        }
-    }
-
-    const unreadMatchConditions = joinedRoomIds.map((roomId) => {
-        const lastReadAt = lastReadAtByRoomId.get(roomId.toString());
-        const condition: Record<string, unknown> = {
-            roomId,
-            parentMessageId: null,
-            userId: { $nin: [currentUserObjectId, ...blockedUserObjectIds] },
-            deletedAt: null,
-        };
-        if (lastReadAt) {
-            condition.createdAt = { $gt: lastReadAt };
-        }
-        return condition;
-    });
-
-    const unreadCountByRoomId = new Map<string, number>();
-    if (unreadMatchConditions.length > 0) {
-        const unreadCounts = await Message.aggregate<{ _id: mongoose.Types.ObjectId; count: number }>([
-            { $match: { $or: unreadMatchConditions } },
-            { $group: { _id: '$roomId', count: { $sum: 1 } } },
-        ]);
-        for (const { _id, count } of unreadCounts) {
-            unreadCountByRoomId.set(_id.toString(), count);
-        }
-    }
+    const unreadCountByRoomId = await countUnreadMessagesByRoom(
+        userId,
+        joinedRoomIds,
+        user.roomReadPointers,
+        blockedUserObjectIds
+    );
 
     const userIdSet = new Set<string>();
 
@@ -403,6 +430,44 @@ export async function getJoinedRoomsForUser(userId: string): Promise<JoinedRoomD
     });
 
     return joinedRooms;
+}
+
+// DM chats with at least one unread message, as the chat list shows them:
+// joined, not hidden, and counted the same way as each room's unreadCount.
+// City rooms don't count. Callers that already loaded the user's block pairs
+// pass them in to skip that lookup.
+export async function countUnreadDirectRoomsForUser(userId: string, blockedUserIds?: string[]): Promise<number> {
+    const user = await User.findById(userId)
+        .select('joinedRooms hiddenDirectRooms roomReadPointers')
+        .lean<LeanJoinedRoomsUser | null>();
+
+    const joinedRoomIds = user?.joinedRooms || [];
+    if (!user || joinedRoomIds.length === 0) {
+        return 0;
+    }
+
+    const hiddenDirectRoomIdSet = new Set((user.hiddenDirectRooms || []).map((roomId) => roomId.toString()));
+    const directRooms = await Room.find({ _id: { $in: joinedRoomIds }, type: 'private' })
+        .select('_id')
+        .lean<Array<{ _id: mongoose.Types.ObjectId }>>();
+    const directRoomIds = directRooms
+        .map((room) => room._id)
+        .filter((roomId) => !hiddenDirectRoomIdSet.has(roomId.toString()));
+
+    if (directRoomIds.length === 0) {
+        return 0;
+    }
+
+    const blockedUserObjectIds = (blockedUserIds ?? await getActiveBlockPairUserIds(userId))
+        .map((id) => new mongoose.Types.ObjectId(id));
+    const unreadCountByRoomId = await countUnreadMessagesByRoom(
+        userId,
+        directRoomIds,
+        user.roomReadPointers,
+        blockedUserObjectIds
+    );
+
+    return [...unreadCountByRoomId.values()].filter((count) => count > 0).length;
 }
 
 export async function getRoomMessagesForUser(

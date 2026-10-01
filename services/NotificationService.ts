@@ -74,6 +74,38 @@ function isComplete(notification: RawPopulatedNotification): notification is Pop
 // Soft-deleted (moderated) messages never show up in a notification.
 const VISIBLE_MESSAGE_MATCH = { deletedAt: null };
 
+// The user's Activity items: not dismissed, and nothing from a user they're in
+// a block pair with (mutual block).
+function buildActivityFilter(userId: string, blockedUserIds: string[]): Record<string, unknown> {
+    const filter: Record<string, unknown> = { recipient: userId, isDismissed: false };
+    if (blockedUserIds.length > 0) {
+        filter.sender = { $nin: blockedUserIds.map((id) => new mongoose.Types.ObjectId(id)) };
+    }
+    return filter;
+}
+
+// Counts only the unread items the Activity list can show: the reply and its
+// thread root must still exist and not be removed by moderation.
+function countUnreadActivity(userId: string, activityFilter: Record<string, unknown>): Promise<number> {
+    const visibleMessageLookup = (field: 'message' | 'thread') => ({
+        $lookup: {
+            from: 'messages',
+            localField: field,
+            foreignField: '_id',
+            pipeline: [{ $match: VISIBLE_MESSAGE_MATCH }, { $project: { _id: 1 } }],
+            as: `${field}Visible`,
+        },
+    });
+
+    return Notification.aggregate<{ count: number }>([
+        { $match: { ...activityFilter, recipient: new mongoose.Types.ObjectId(userId), read: false } },
+        visibleMessageLookup('message'),
+        visibleMessageLookup('thread'),
+        { $match: { 'messageVisible.0': { $exists: true }, 'threadVisible.0': { $exists: true } } },
+        { $count: 'count' },
+    ]).option({ maxTimeMS: 3000 }).then((result) => result[0]?.count ?? 0);
+}
+
 // The app requires a non-empty sender name on every notification.
 export const UNKNOWN_SENDER_NAME = 'Unknown';
 
@@ -223,13 +255,7 @@ export class NotificationService {
     }> {
         // Mutual block: nothing from a blocked-pair user appears in the list or
         // counts as unread.
-        const blockedUserIds = (await getActiveBlockPairUserIds(userId))
-            .map((id) => new mongoose.Types.ObjectId(id));
-
-        const baseFilter: Record<string, unknown> = { recipient: userId, isDismissed: false };
-        if (blockedUserIds.length > 0) {
-            baseFilter.sender = { $nin: blockedUserIds };
-        }
+        const baseFilter = buildActivityFilter(userId, await getActiveBlockPairUserIds(userId));
 
         const query: Record<string, unknown> = { ...baseFilter };
         if (before) {
@@ -254,28 +280,9 @@ export class NotificationService {
             .maxTimeMS(7000)
             .lean<RawPopulatedNotification[]>();
 
-        // Counts only what the list can show: the reply and its thread root must
-        // still exist and not be removed by moderation.
-        const visibleMessageLookup = (field: 'message' | 'thread') => ({
-            $lookup: {
-                from: 'messages',
-                localField: field,
-                foreignField: '_id',
-                pipeline: [{ $match: VISIBLE_MESSAGE_MATCH }, { $project: { _id: 1 } }],
-                as: `${field}Visible`,
-            },
-        });
-        const unreadCountQuery = Notification.aggregate<{ count: number }>([
-            { $match: { ...baseFilter, recipient: new mongoose.Types.ObjectId(userId), read: false } },
-            visibleMessageLookup('message'),
-            visibleMessageLookup('thread'),
-            { $match: { 'messageVisible.0': { $exists: true }, 'threadVisible.0': { $exists: true } } },
-            { $count: 'count' },
-        ]).option({ maxTimeMS: 3000 }).then((result) => result[0]?.count ?? 0);
-
         const [notificationsResult, unreadCountResult] = await Promise.allSettled([
             notificationsQuery,
-            unreadCountQuery,
+            countUnreadActivity(userId, baseFilter),
         ]);
 
         if (notificationsResult.status === 'rejected') {
@@ -313,6 +320,16 @@ export class NotificationService {
             nextCursor,
             unreadCount
         };
+    }
+
+    /**
+     * Unread Activity items, counted the same way as `unreadCount` in
+     * `getNotifications`. Callers that already loaded the user's block pairs
+     * pass them in to skip that lookup.
+     */
+    static async countUnread(userId: string, blockedUserIds?: string[]): Promise<number> {
+        const blockPairUserIds = blockedUserIds ?? await getActiveBlockPairUserIds(userId);
+        return countUnreadActivity(userId, buildActivityFilter(userId, blockPairUserIds));
     }
 
     static async markAsRead(notificationId: string, userId: string) {

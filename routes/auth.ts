@@ -5,7 +5,9 @@ import { createRateLimiter } from '../middleware/rateLimiter.js';
 import { AppError, UnauthorizedError } from '../utils/errors.js';
 import { config } from '../config/index.js';
 import * as authService from '../services/authService.js';
+import { deactivatePushTokensForUser } from '../services/pushNotificationService.js';
 import { disconnectUser } from '../server/socket.js';
+import logger from '../utils/logger.js';
 
 const router = express.Router();
 
@@ -157,6 +159,18 @@ router.post('/logout', asyncHandler(async (req: express.Request, res: express.Re
         // End the realtime session too, not just the refresh token.
         if (userId) {
             disconnectUser(userId);
+            // The cookie still identifies the account after the access token
+            // has expired, so logout can always stop the account's pushes.
+            // Signing in again registers the token and turns them back on. A
+            // failure here must not keep the cookie from being cleared.
+            try {
+                await deactivatePushTokensForUser(userId, 'logged_out');
+            } catch (error) {
+                logger.error('auth.logout.push_deactivation_failed', {
+                    userId,
+                    error: error instanceof Error ? error.message : String(error),
+                });
+            }
         }
     }
     res.clearCookie('refreshToken', { path: '/' });

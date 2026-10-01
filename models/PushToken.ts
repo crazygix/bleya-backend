@@ -22,6 +22,12 @@ const pushTokenSchema = new mongoose.Schema({
         type: Boolean,
         default: true,
     },
+    // Set by app builds that keep the iOS app-icon badge up to date themselves.
+    // Only their pushes carry a badge count; older builds couldn't clear it.
+    badge: {
+        type: Boolean,
+        default: false,
+    },
     lastSeenAt: {
         type: Date,
         default: Date.now,

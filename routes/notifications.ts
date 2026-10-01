@@ -67,10 +67,25 @@ function parsePushPlatform(value: unknown): 'ios' | 'android' {
     return value as 'ios' | 'android';
 }
 
+// Optional. App builds that keep the iOS app-icon badge up to date send
+// `badge: true`, and their pushes then carry the badge count.
+function parsePushBadge(value: unknown): boolean {
+    if (value === undefined || value === null) {
+        return false;
+    }
+
+    if (typeof value !== 'boolean') {
+        throw new ValidationError("We couldn't set up notifications for this device. Please try again.");
+    }
+
+    return value;
+}
+
 router.post('/push/register', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
     const userId = req.user!.userId;
     const token = parsePushToken(req.body?.token);
     const platform = parsePushPlatform(req.body?.platform);
+    const badge = parsePushBadge(req.body?.badge);
 
     // Moderation deactivates a banned/suspended user's token; a still-valid
     // access token must not be able to switch pushes back on.
@@ -84,6 +99,7 @@ router.post('/push/register', authenticateUser, asyncHandler(async (req: AuthReq
         userId,
         token,
         platform,
+        badge,
     });
 
     res.json({ success: true });

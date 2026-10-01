@@ -1,13 +1,13 @@
 import mongoose from 'mongoose';
 import { Message } from '../models/Message.js';
 import { Notification } from '../models/Notification.js';
-import { PushToken } from '../models/PushToken.js';
 import { NotFoundError, ValidationError, ErrorCode } from '../utils/errors.js';
 import { validateObjectId } from '../utils/validation.js';
 import { sanitizePlainText } from '../utils/sanitize.js';
 import { recordModerationAction } from './auditService.js';
 import { rememberBannedIdentities, forgetBannedIdentities } from './bannedIdentityService.js';
 import { deleteFromR2, extractKeyFromUrl } from './r2Service.js';
+import { deactivatePushTokensForUser } from './pushNotificationService.js';
 import { emitMessageRemoved, disconnectUser } from '../server/socket.js';
 import { User } from '../models/User.js';
 import logger from '../utils/logger.js';
@@ -149,7 +149,7 @@ function sanitizeReason(reason: unknown): string {
 // A banned/suspended user must stop receiving pushes right away; the app
 // re-registers its token after the next successful sign-in.
 async function deactivatePushTokens(userId: mongoose.Types.ObjectId): Promise<void> {
-    await PushToken.updateMany({ userId }, { $set: { isActive: false, failureReason: 'account_blocked' } });
+    await deactivatePushTokensForUser(userId.toString(), 'account_blocked');
 }
 
 function parseSuspendedUntil(value: unknown): Date | null {

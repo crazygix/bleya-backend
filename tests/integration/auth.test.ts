@@ -1,6 +1,7 @@
 import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import jwt from 'jsonwebtoken';
 import { connectTestDb, clearTestDb, disconnectTestDb } from '../helpers/testDb.js';
 import { getTestAgent, resetTestApp } from '../helpers/testApp.js';
 import { createTestUser, authHeader, makeProviderTestToken } from '../helpers/auth.js';
@@ -8,6 +9,7 @@ import { stopRateLimiterCleanupForTests } from '../../middleware/rateLimiter.js'
 import { config } from '../../config/index.js';
 import { UserIdentity } from '../../models/UserIdentity.js';
 import { User } from '../../models/User.js';
+import { PushToken } from '../../models/PushToken.js';
 
 function parseAndroidIntentRedirect(location: string): { params: URLSearchParams; intent: string } {
     assert.ok(location);
@@ -21,6 +23,40 @@ function parseAndroidIntentRedirect(location: string): { params: URLSearchParams
         params: new URLSearchParams(urlPart.slice('intent://callback?'.length)),
         intent: `#Intent;${intentPart}`,
     };
+}
+
+function googleSignIn(sub: string) {
+    return getTestAgent()
+        .post('/v1/auth/provider-sign-in')
+        .send({
+            provider: 'google',
+            idToken: makeProviderTestToken({ sub, email: `${sub}@example.com`, email_verified: true }),
+        })
+        .expect(200);
+}
+
+function registerPushToken(accessToken: string, token: string) {
+    return getTestAgent()
+        .post('/v1/notifications/push/register')
+        .set({ Authorization: `Bearer ${accessToken}` })
+        .send({ token, platform: 'ios' })
+        .expect(200);
+}
+
+// Supertest types Set-Cookie as one string; at runtime it's a list.
+function cookieList(setCookie: string | string[] | undefined): string[] {
+    return ([] as string[]).concat(setCookie ?? []);
+}
+
+function logout(setCookie: string | string[]) {
+    return getTestAgent()
+        .post('/v1/auth/logout')
+        .set('Cookie', cookieList(setCookie))
+        .expect(200);
+}
+
+function clearsRefreshCookie(setCookie: string | string[] | undefined): boolean {
+    return cookieList(setCookie).some((cookie) => cookie.startsWith('refreshToken=;'));
 }
 
 describe('Auth API', () => {
@@ -346,6 +382,92 @@ describe('Auth API', () => {
                 .expect(200);
 
             assert.equal(res.body.success, true);
+        });
+
+        it('switches off the account\'s push token', async () => {
+            const session = await googleSignIn('google-logout-1');
+            await registerPushToken(session.body.token, 'device-1');
+
+            const res = await logout(session.headers['set-cookie']);
+
+            assert.ok(clearsRefreshCookie(res.headers['set-cookie']));
+            const stored = await PushToken.findOne({ token: 'device-1' }).lean();
+            assert.equal(stored?.isActive, false);
+            assert.equal(stored?.failureReason, 'logged_out');
+        });
+
+        it('switches off pushes when the access token has already expired', async () => {
+            const session = await googleSignIn('google-logout-2');
+            await registerPushToken(session.body.token, 'device-2');
+            const user = await User.findOne({}).select('_id').lean();
+            const expiredToken = jwt.sign(
+                { userId: user!._id.toString(), exp: Math.floor(Date.now() / 1000) - 60 },
+                config.jwtSecret,
+                { algorithm: 'HS256' }
+            );
+
+            // The app's own clean-up call needs a valid access token.
+            await getTestAgent()
+                .post('/v1/notifications/push/unregister')
+                .set({ Authorization: `Bearer ${expiredToken}` })
+                .send({ token: 'device-2' })
+                .expect(401);
+
+            await getTestAgent()
+                .post('/v1/auth/logout')
+                .set('Cookie', cookieList(session.headers['set-cookie']))
+                .set({ Authorization: `Bearer ${expiredToken}` })
+                .expect(200);
+
+            const stored = await PushToken.findOne({ token: 'device-2' }).lean();
+            assert.equal(stored?.isActive, false);
+            assert.equal(stored?.failureReason, 'logged_out');
+        });
+
+        it('leaves pushes on for a cookie from a replaced session', async () => {
+            const replacedSession = await googleSignIn('google-logout-3');
+            const currentSession = await googleSignIn('google-logout-3');
+            await registerPushToken(currentSession.body.token, 'device-3');
+
+            await logout(replacedSession.headers['set-cookie']);
+
+            const stored = await PushToken.findOne({ token: 'device-3' }).lean();
+            assert.equal(stored?.isActive, true);
+            await getTestAgent()
+                .post('/v1/auth/refresh')
+                .set('Cookie', cookieList(currentSession.headers['set-cookie']))
+                .expect(200);
+        });
+
+        it('switches pushes back on when the user signs in and registers again', async () => {
+            const firstSession = await googleSignIn('google-logout-4');
+            await registerPushToken(firstSession.body.token, 'device-4');
+            await logout(firstSession.headers['set-cookie']);
+            assert.equal((await PushToken.findOne({ token: 'device-4' }).lean())?.isActive, false);
+
+            const nextSession = await googleSignIn('google-logout-4');
+            await registerPushToken(nextSession.body.token, 'device-4');
+
+            const stored = await PushToken.findOne({ token: 'device-4' }).lean();
+            assert.equal(stored?.isActive, true);
+            assert.equal(stored?.failureReason, '');
+        });
+
+        it('still ends the session when switching off pushes fails', async (t) => {
+            const session = await googleSignIn('google-logout-5');
+            await registerPushToken(session.body.token, 'device-5');
+            t.mock.method(PushToken, 'updateMany', async () => {
+                throw new Error('database unavailable');
+            });
+
+            const res = await logout(session.headers['set-cookie']);
+
+            assert.equal(res.body.success, true);
+            assert.ok(clearsRefreshCookie(res.headers['set-cookie']));
+            await getTestAgent()
+                .post('/v1/auth/refresh')
+                .set('Cookie', cookieList(session.headers['set-cookie']))
+                .expect(401);
         });
     });
 });

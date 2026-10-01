@@ -1,17 +1,24 @@
 import mongoose from 'mongoose';
 import { App, cert, getApps, initializeApp } from 'firebase-admin/app';
-import { getMessaging, Message } from 'firebase-admin/messaging';
+import { getMessaging, Aps, Message } from 'firebase-admin/messaging';
 import { config } from '../config/index.js';
 import { PushToken } from '../models/PushToken.js';
+import { NotificationService } from './NotificationService.js';
+import { countUnreadDirectRoomsForUser } from './roomService.js';
+import { getActiveBlockPairUserIds } from './blockService.js';
 import logger from '../utils/logger.js';
 
 export type PushPlatform = 'ios' | 'android';
 export type PushNotificationType = 'message' | 'reply';
+export type PushTokenDeactivationReason = 'logged_out' | 'account_blocked';
 
 interface RegisterPushTokenInput {
     userId: string;
     token: string;
     platform: PushPlatform;
+    // The app keeps the iOS app-icon badge up to date and wants the count in
+    // its pushes.
+    badge?: boolean;
 }
 
 interface UnregisterPushTokenInput {
@@ -54,10 +61,18 @@ interface StoredPushToken {
     userId: mongoose.Types.ObjectId;
     token: string;
     platform: PushPlatform;
+    badge?: boolean;
 }
 
 // FCM's sendEach takes at most 500 messages per call; more fails the whole call.
 const FCM_MAX_BATCH_SIZE = 500;
+
+// Badge counts stop at 99.
+const MAX_APP_BADGE = 99;
+
+// Each badge count takes a few small queries, so a push to a big room counts
+// this many recipients at a time.
+const BADGE_COUNT_CONCURRENCY = 10;
 
 let firebaseApp: App | null = null;
 let pushMessagingClient: PushMessagingClient | null = null;
@@ -172,6 +187,56 @@ function buildDataPayload(
     return payload;
 }
 
+// Only app builds that keep the iOS app-icon badge up to date register with
+// `badge: true`. Android launchers show their own notification dots.
+function wantsAppBadge(token: StoredPushToken): boolean {
+    return token.platform === 'ios' && token.badge === true;
+}
+
+// The iOS app-icon badge: unread Activity items plus DM chats with unread
+// messages, the same number the app shows. City rooms don't count.
+async function countAppBadge(userId: string): Promise<number> {
+    const blockedUserIds = await getActiveBlockPairUserIds(userId);
+    const [unreadActivity, unreadDirectRooms] = await Promise.all([
+        NotificationService.countUnread(userId, blockedUserIds),
+        countUnreadDirectRoomsForUser(userId, blockedUserIds),
+    ]);
+
+    return Math.min(unreadActivity + unreadDirectRooms, MAX_APP_BADGE);
+}
+
+// Badge counts for the given recipients, a few at a time. A recipient whose
+// count fails still gets the push, just without a badge.
+async function countAppBadges(userIds: string[]): Promise<Map<string, number>> {
+    const badgeByUserId = new Map<string, number>();
+
+    for (let start = 0; start < userIds.length; start += BADGE_COUNT_CONCURRENCY) {
+        const batchUserIds = userIds.slice(start, start + BADGE_COUNT_CONCURRENCY);
+        const results = await Promise.allSettled(batchUserIds.map((userId) => countAppBadge(userId)));
+
+        results.forEach((result, index) => {
+            const userId = batchUserIds[index];
+            if (result.status === 'fulfilled') {
+                badgeByUserId.set(userId, result.value);
+                return;
+            }
+
+            logger.warn('push.badge_count.failed', {
+                userId,
+                error: result.reason instanceof Error ? result.reason.message : String(result.reason),
+            });
+        });
+    }
+
+    return badgeByUserId;
+}
+
+// iOS plays a sound only when the push names one. Without a badge the icon's
+// badge stays as it is.
+function buildAps(badge: number | undefined): Aps {
+    return badge === undefined ? { sound: 'default' } : { sound: 'default', badge };
+}
+
 function isInvalidTokenError(code?: string): boolean {
     return code === 'messaging/registration-token-not-registered'
         || code === 'messaging/invalid-registration-token';
@@ -251,6 +316,9 @@ export async function registerPushToken(input: RegisterPushTokenInput): Promise<
                 token: normalizedToken,
                 platform: input.platform,
                 isActive: true,
+                // Set on every registration: an app build without badge
+                // support that registers next must not receive badge counts.
+                badge: input.badge === true,
                 lastSeenAt: now,
                 failureReason: '',
             },
@@ -278,6 +346,25 @@ export async function unregisterPushToken(input: UnregisterPushTokenInput): Prom
     );
 }
 
+// Stops all pushes to an account, e.g. at logout or when it's banned. Each
+// account has one push token, the one its latest sign-in registered. The next
+// registration after signing in switches it back on.
+export async function deactivatePushTokensForUser(
+    userId: string,
+    reason: PushTokenDeactivationReason
+): Promise<void> {
+    await PushToken.updateMany(
+        { userId: new mongoose.Types.ObjectId(userId) },
+        {
+            $set: {
+                isActive: false,
+                lastFailureAt: new Date(),
+                failureReason: reason,
+            },
+        }
+    );
+}
+
 export async function sendPushNotifications(input: SendPushNotificationsInput): Promise<void> {
     if (input.recipients.length === 0) {
         return;
@@ -297,7 +384,7 @@ export async function sendPushNotifications(input: SendPushNotificationsInput): 
         userId: { $in: recipientUserIds },
         isActive: true,
     })
-        .select('_id userId token platform')
+        .select('_id userId token platform badge')
         .lean<StoredPushToken[]>();
 
     if (tokens.length === 0) {
@@ -305,12 +392,19 @@ export async function sendPushNotifications(input: SendPushNotificationsInput): 
     }
 
     const recipientByUserId = new Map(input.recipients.map((recipient) => [recipient.userId, recipient]));
+    const badgeUserIds = new Set(
+        tokens
+            .filter((token) => wantsAppBadge(token) && recipientByUserId.has(token.userId.toString()))
+            .map((token) => token.userId.toString())
+    );
+    const badgeByUserId = await countAppBadges([...badgeUserIds]);
     const presentation = buildNotificationPresentation(input);
     const messages: Message[] = [];
     const tokensInSendOrder: StoredPushToken[] = [];
 
     for (const token of tokens) {
-        const recipient = recipientByUserId.get(token.userId.toString());
+        const userId = token.userId.toString();
+        const recipient = recipientByUserId.get(userId);
         if (!recipient) {
             continue;
         }
@@ -321,9 +415,14 @@ export async function sendPushNotifications(input: SendPushNotificationsInput): 
             data: buildDataPayload(input, recipient),
             android: {
                 priority: 'high',
-                notification: { channelId: 'bleya_messages' },
+                // Android 8+ plays the bleya_messages channel's sound. Android 7
+                // has no channels and plays the sound named here.
+                notification: { channelId: 'bleya_messages', sound: 'default' },
             },
-            apns: { headers: { 'apns-priority': '10' } },
+            apns: {
+                headers: { 'apns-priority': '10' },
+                payload: { aps: buildAps(wantsAppBadge(token) ? badgeByUserId.get(userId) : undefined) },
+            },
         });
         tokensInSendOrder.push(token);
     }
