@@ -9,7 +9,7 @@ import { rememberBannedIdentities, forgetBannedIdentities } from './bannedIdenti
 import { deleteFromR2, extractKeyFromUrl } from './r2Service.js';
 import { deactivatePushTokensForUser } from './pushNotificationService.js';
 import { emitMessageRemoved, disconnectUser } from '../server/socket.js';
-import { User } from '../models/User.js';
+import { User, REFRESH_SESSION_FIELDS } from '../models/User.js';
 import logger from '../utils/logger.js';
 
 export interface MessageModerationResult {
@@ -170,11 +170,11 @@ function parseSuspendedUntil(value: unknown): Date | null {
     return date;
 }
 
-// Applies a ban or suspension and ends the refresh session. The session's hash
-// moves to revokedRefreshTokenHash, so a refresh with it is answered with the
-// reason instead of a bare 401 (see authService.refreshAccessToken). Values are
-// $literal because an aggregation pipeline reads strings starting with '$' as
-// field paths.
+// Applies a ban or suspension and ends the refresh session, previous token
+// included. The current token's hash moves to revokedRefreshTokenHash, so a
+// refresh with it is answered with the reason instead of a bare 401 (see
+// authService.refreshAccessToken). Values are $literal because an aggregation
+// pipeline reads strings starting with '$' as field paths.
 async function applyEnforcement(
     id: mongoose.Types.ObjectId,
     fields: { status: 'banned' | 'suspended'; enforcementReason: string; suspendedUntil: Date | null }
@@ -188,7 +188,7 @@ async function applyEnforcement(
                 revokedRefreshTokenHash: { $ifNull: ['$refreshTokenHash', '$revokedRefreshTokenHash'] },
             },
         },
-        { $unset: ['refreshTokenHash', 'refreshTokenExpiresAt'] },
+        { $unset: [...REFRESH_SESSION_FIELDS] },
     ]);
 }
 

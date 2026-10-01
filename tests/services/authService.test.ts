@@ -1,7 +1,9 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
-import { createAuthService } from '../../services/authService.js';
+import { config } from '../../config/index.js';
+import { createAuthService, hashRefreshToken } from '../../services/authService.js';
 import type { UserRepository } from '../../repositories/userRepository.js';
 import type { UserIdentityRepository } from '../../repositories/userIdentityRepository.js';
 import type { PasskeyCredentialRepository } from '../../repositories/passkeyCredentialRepository.js';
@@ -35,7 +37,9 @@ function fakeUserRepo(overrides: Partial<UserRepository> = {}): UserRepository {
         create: async (data = {}) => createMockUser(data) as any,
         updateLastLogin: async () => {},
         findByUsernameLean: async () => null,
-        findOneAndUpdateByRefreshToken: async () => null,
+        rotateRefreshToken: async () => null,
+        reissueFromPreviousRefreshToken: async () => null,
+        findByRecentPreviousRefreshToken: async () => null,
         clearRefreshToken: async () => null,
         findEnforcementByRevokedRefreshToken: async () => null,
         addToJoinedRooms: async () => ({ modifiedCount: 0 }),
@@ -279,17 +283,145 @@ describe('authService (mocked)', () => {
     });
 });
 
+function serviceWithUserRepo(overrides: Partial<UserRepository>) {
+    return createAuthService({
+        userRepo: fakeUserRepo(overrides),
+        userIdentityRepo: fakeUserIdentityRepo(),
+        passkeyCredentialRepo: fakePasskeyCredentialRepo(),
+        authChallengeRepo: fakeAuthChallengeRepo(),
+        providerIdentityService: fakeProviderIdentityService(),
+        passkeyService: fakePasskeyService(),
+    });
+}
+
+function accessTokenUserId(token: string): string {
+    return (jwt.verify(token, config.jwtSecret) as { userId: string }).userId;
+}
+
+function assertBlocked(message: string) {
+    return (error: any) => {
+        assert.equal(error.statusCode, 403);
+        assert.equal(error.code, 'USER_BLOCKED');
+        assert.equal(error.message, message);
+        return true;
+    };
+}
+
+describe('authService.refreshAccessToken', () => {
+    const DAY_MS = 24 * 60 * 60 * 1000;
+    const userId = new mongoose.Types.ObjectId();
+    const activeUser = { _id: userId, status: 'active' };
+
+    it('replaces the current token and keeps it as the previous one for 7 days', async () => {
+        let rotation: Parameters<UserRepository['rotateRefreshToken']> | undefined;
+        let lookedFurther = false;
+        const svc = serviceWithUserRepo({
+            rotateRefreshToken: async (...args) => {
+                rotation = args;
+                return activeUser;
+            },
+            reissueFromPreviousRefreshToken: async () => {
+                lookedFurther = true;
+                return null;
+            },
+            findByRecentPreviousRefreshToken: async () => {
+                lookedFurther = true;
+                return null;
+            },
+        });
+
+        const result = await svc.refreshAccessToken('current-token');
+
+        assert.ok(rotation);
+        const [hash, now, next, previousValidUntil] = rotation;
+        assert.equal(hash, hashRefreshToken('current-token'));
+        assert.ok(result.refreshToken);
+        assert.equal(next.hash, hashRefreshToken(result.refreshToken));
+        assert.equal(previousValidUntil.getTime() - now.getTime(), 7 * DAY_MS);
+        assert.equal(accessTokenUserId(result.accessToken), userId.toString());
+        assert.equal(lookedFurther, false);
+    });
+
+    it('issues a new token for the previous one once its successor is over 30 s old', async () => {
+        let reissue: Parameters<UserRepository['reissueFromPreviousRefreshToken']> | undefined;
+        const svc = serviceWithUserRepo({
+            reissueFromPreviousRefreshToken: async (...args) => {
+                reissue = args;
+                return activeUser;
+            },
+        });
+
+        const result = await svc.refreshAccessToken('previous-token');
+
+        assert.ok(reissue);
+        const [hash, now, next, issuedBefore] = reissue;
+        assert.equal(hash, hashRefreshToken('previous-token'));
+        assert.equal(now.getTime() - issuedBefore.getTime(), 30_000);
+        assert.ok(result.refreshToken);
+        assert.equal(next.hash, hashRefreshToken(result.refreshToken));
+        assert.equal(accessTokenUserId(result.accessToken), userId.toString());
+    });
+
+    it('gives the previous token only an access token within 30 s of its successor', async () => {
+        let lookup: Parameters<UserRepository['findByRecentPreviousRefreshToken']> | undefined;
+        const svc = serviceWithUserRepo({
+            findByRecentPreviousRefreshToken: async (...args) => {
+                lookup = args;
+                return activeUser;
+            },
+        });
+
+        const result = await svc.refreshAccessToken('previous-token');
+
+        assert.ok(lookup);
+        const [hash, now, issuedAfter] = lookup;
+        assert.equal(hash, hashRefreshToken('previous-token'));
+        assert.equal(now.getTime() - issuedAfter.getTime(), 30_000);
+        assert.equal(result.refreshToken, undefined);
+        assert.equal(accessTokenUserId(result.accessToken), userId.toString());
+    });
+
+    it('ends the session and says why when a reissue finds a banned account', async () => {
+        let issuedHash = '';
+        let clearedHash = '';
+        const svc = serviceWithUserRepo({
+            reissueFromPreviousRefreshToken: async (_hash, _now, next) => {
+                issuedHash = next.hash;
+                return { _id: userId, status: 'banned', enforcementReason: 'spam' };
+            },
+            clearRefreshToken: async (hash) => {
+                clearedHash = hash;
+                return userId.toString();
+            },
+        });
+
+        await assert.rejects(
+            svc.refreshAccessToken('previous-token'),
+            assertBlocked('Your account has been banned. Reason: spam')
+        );
+        assert.ok(issuedHash);
+        assert.equal(clearedHash, issuedHash);
+    });
+
+    it('ends the session and says why when the previous token belongs to a suspended account', async () => {
+        let clearedHash = '';
+        const svc = serviceWithUserRepo({
+            findByRecentPreviousRefreshToken: async () => ({ _id: userId, status: 'suspended', suspendedUntil: null }),
+            clearRefreshToken: async (hash) => {
+                clearedHash = hash;
+                return userId.toString();
+            },
+        });
+
+        await assert.rejects(svc.refreshAccessToken('previous-token'), assertBlocked('Your account is suspended.'));
+        assert.equal(clearedHash, hashRefreshToken('previous-token'));
+    });
+});
+
 describe('authService.refreshAccessToken for a session ended by moderation', () => {
     function serviceWithRevokedSession(state: Awaited<ReturnType<UserRepository['findEnforcementByRevokedRefreshToken']>>) {
-        return createAuthService({
-            userRepo: fakeUserRepo({
-                findEnforcementByRevokedRefreshToken: async () => state,
-            }),
-            userIdentityRepo: fakeUserIdentityRepo(),
-            passkeyCredentialRepo: fakePasskeyCredentialRepo(),
-            authChallengeRepo: fakeAuthChallengeRepo(),
-            providerIdentityService: fakeProviderIdentityService(),
-            passkeyService: fakePasskeyService(),
+        return serviceWithUserRepo({
+            findEnforcementByRevokedRefreshToken: async () => state,
         });
     }
 

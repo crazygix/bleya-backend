@@ -222,6 +222,13 @@ const corsOrigins = isProduction
 const r2PublicBaseUrl = normalizeUrl(process.env.R2_PUBLIC_BASE_URL || '');
 const accessTokenTtl = '1h';
 const refreshTokenTtlDays = 365;
+// Each refresh replaces the refresh token, and the replaced one stays usable
+// until its successor is first used, for at most previousRefreshTokenTtlMs.
+// Within refreshTokenReuseWindowMs of the replacement it gets only a new access
+// token (two refreshes sent at once); after that it gets a new refresh token
+// too (the response with the successor never arrived).
+const refreshTokenReuseWindowMs = 30_000;
+const previousRefreshTokenTtlMs = 7 * 24 * 60 * 60 * 1000;
 const googleAllowedAudiences = parseList(process.env.GOOGLE_ALLOWED_AUDIENCES);
 const appleAllowedAudiences = parseList(process.env.APPLE_ALLOWED_AUDIENCES);
 const appleAndroidRedirectPath = parsePathEnv(
@@ -267,6 +274,8 @@ export const config = {
 
   accessTokenTtl,
   refreshTokenTtlDays,
+  refreshTokenReuseWindowMs,
+  previousRefreshTokenTtlMs,
 
   authProviders: {
     googleAllowedAudiences,

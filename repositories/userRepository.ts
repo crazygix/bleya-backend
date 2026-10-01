@@ -1,7 +1,17 @@
 import mongoose from 'mongoose';
-import { User } from '../models/User.js';
+import { User, REFRESH_SESSION_FIELDS } from '../models/User.js';
 import type { EnforcementState } from '../utils/enforcement.js';
 import type { LeanFullUser, LeanUser, LeanJoinedRoomsUser } from '../types/lean.js';
+
+// The owner of a refresh token, with what a refresh needs to decide whether the
+// account may keep its session.
+export type RefreshSessionUser = { _id: mongoose.Types.ObjectId } & EnforcementState;
+
+// A refresh token being issued: the hash that is stored and when it expires.
+export interface IssuedRefreshToken {
+    hash: string;
+    expiresAt: Date;
+}
 
 export interface UserRepository {
     findById(id: string): Promise<mongoose.Document | null>;
@@ -12,13 +22,33 @@ export interface UserRepository {
     create(data?: Record<string, unknown>): Promise<mongoose.Document>;
     updateLastLogin(userId: string, lastLogin: Date): Promise<void>;
     findByUsernameLean(username: string): Promise<{ _id: mongoose.Types.ObjectId } | null>;
-    findOneAndUpdateByRefreshToken(
+    // Replaces the unexpired current token `hash` with `next`, keeping `hash`
+    // as the previous token until `previousValidUntil`.
+    rotateRefreshToken(
         hash: string,
-        expiresAfter: Date,
-        update: Record<string, unknown>
-    ): Promise<({ _id: mongoose.Types.ObjectId } & EnforcementState) | null>;
-    // Returns the id of the user whose session was cleared, if any.
-    clearRefreshToken(hash: string): Promise<string | null>;
+        now: Date,
+        next: IssuedRefreshToken,
+        previousValidUntil: Date
+    ): Promise<RefreshSessionUser | null>;
+    // Replaces the current token with `next` for a holder of the unexpired
+    // previous token `hash`, when the current one was issued at or before
+    // `issuedBefore`. The previous token and its expiry stay as they are.
+    reissueFromPreviousRefreshToken(
+        hash: string,
+        now: Date,
+        next: IssuedRefreshToken,
+        issuedBefore: Date
+    ): Promise<RefreshSessionUser | null>;
+    // The owner of the unexpired previous token `hash`, when the current one
+    // was issued after `issuedAfter`.
+    findByRecentPreviousRefreshToken(
+        hash: string,
+        now: Date,
+        issuedAfter: Date
+    ): Promise<RefreshSessionUser | null>;
+    // Ends the session `hash` belongs to, as its current or unexpired previous
+    // token. Returns the id of the user whose session was cleared, if any.
+    clearRefreshToken(hash: string, now: Date): Promise<string | null>;
     // Enforcement state of the user whose session a ban/suspension ended.
     findEnforcementByRevokedRefreshToken(hash: string): Promise<EnforcementState | null>;
     addToJoinedRooms(userId: string, roomId: mongoose.Types.ObjectId): Promise<{ modifiedCount: number }>;
@@ -26,6 +56,18 @@ export interface UserRepository {
     existsWithRoom(userId: string, roomId: mongoose.Types.ObjectId): Promise<boolean>;
     findByIds(ids: mongoose.Types.ObjectId[], select: string): Promise<LeanUser[]>;
     findJoinedUserIds(roomId: mongoose.Types.ObjectId): Promise<string[]>;
+}
+
+const REFRESH_SESSION_USER_PROJECTION = { _id: 1, status: 1, suspendedUntil: 1, enforcementReason: 1 };
+
+function toRefreshSessionUser(doc: RefreshSessionUser | null): RefreshSessionUser | null {
+    if (!doc) return null;
+    return {
+        _id: doc._id,
+        status: doc.status,
+        suspendedUntil: doc.suspendedUntil,
+        enforcementReason: doc.enforcementReason,
+    };
 }
 
 export class MongoUserRepository implements UserRepository {
@@ -63,29 +105,62 @@ export class MongoUserRepository implements UserRepository {
         return User.findOne({ username }).select('_id').lean<{ _id: mongoose.Types.ObjectId } | null>();
     }
 
-    async findOneAndUpdateByRefreshToken(
-        hash: string,
-        expiresAfter: Date,
-        update: Record<string, unknown>
-    ): Promise<({ _id: mongoose.Types.ObjectId } & EnforcementState) | null> {
+    async rotateRefreshToken(hash: string, now: Date, next: IssuedRefreshToken, previousValidUntil: Date) {
         const doc = await User.findOneAndUpdate(
-            { refreshTokenHash: hash, refreshTokenExpiresAt: { $gt: expiresAfter } },
-            update,
-            { new: true, projection: { _id: 1, status: 1, suspendedUntil: 1, enforcementReason: 1 } }
-        ).lean<{ _id: mongoose.Types.ObjectId } & EnforcementState | null>();
-        if (!doc) return null;
-        return {
-            _id: doc._id,
-            status: doc.status,
-            suspendedUntil: doc.suspendedUntil,
-            enforcementReason: doc.enforcementReason,
-        };
+            { refreshTokenHash: hash, refreshTokenExpiresAt: { $gt: now } },
+            {
+                $set: {
+                    refreshTokenHash: next.hash,
+                    refreshTokenExpiresAt: next.expiresAt,
+                    refreshTokenIssuedAt: now,
+                    previousRefreshTokenHash: hash,
+                    previousRefreshTokenExpiresAt: previousValidUntil,
+                },
+            },
+            { new: true, projection: REFRESH_SESSION_USER_PROJECTION }
+        ).lean<RefreshSessionUser | null>();
+        return toRefreshSessionUser(doc);
     }
 
-    async clearRefreshToken(hash: string) {
+    async reissueFromPreviousRefreshToken(hash: string, now: Date, next: IssuedRefreshToken, issuedBefore: Date) {
         const doc = await User.findOneAndUpdate(
-            { refreshTokenHash: hash },
-            { $unset: { refreshTokenHash: '', refreshTokenExpiresAt: '' } },
+            {
+                previousRefreshTokenHash: hash,
+                previousRefreshTokenExpiresAt: { $gt: now },
+                refreshTokenIssuedAt: { $lte: issuedBefore },
+            },
+            {
+                $set: {
+                    refreshTokenHash: next.hash,
+                    refreshTokenExpiresAt: next.expiresAt,
+                    refreshTokenIssuedAt: now,
+                },
+            },
+            { new: true, projection: REFRESH_SESSION_USER_PROJECTION }
+        ).lean<RefreshSessionUser | null>();
+        return toRefreshSessionUser(doc);
+    }
+
+    async findByRecentPreviousRefreshToken(hash: string, now: Date, issuedAfter: Date) {
+        const doc = await User.findOne({
+            previousRefreshTokenHash: hash,
+            previousRefreshTokenExpiresAt: { $gt: now },
+            refreshTokenIssuedAt: { $gt: issuedAfter },
+        })
+            .select(REFRESH_SESSION_USER_PROJECTION)
+            .lean<RefreshSessionUser | null>();
+        return toRefreshSessionUser(doc);
+    }
+
+    async clearRefreshToken(hash: string, now: Date) {
+        const doc = await User.findOneAndUpdate(
+            {
+                $or: [
+                    { refreshTokenHash: hash },
+                    { previousRefreshTokenHash: hash, previousRefreshTokenExpiresAt: { $gt: now } },
+                ],
+            },
+            { $unset: Object.fromEntries(REFRESH_SESSION_FIELDS.map((field) => [field, ''])) },
             { projection: { _id: 1 } }
         ).lean<{ _id: mongoose.Types.ObjectId } | null>();
         return doc ? doc._id.toString() : null;

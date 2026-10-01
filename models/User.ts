@@ -1,6 +1,17 @@
 import mongoose from 'mongoose';
 import { isValidUsername } from '../utils/username.js';
 
+// Every field of a user's refresh session. Ending the session (logout, a ban or
+// a suspension) clears all of them, so neither the current nor the previous
+// token can renew it.
+export const REFRESH_SESSION_FIELDS = [
+    'refreshTokenHash',
+    'refreshTokenExpiresAt',
+    'refreshTokenIssuedAt',
+    'previousRefreshTokenHash',
+    'previousRefreshTokenExpiresAt',
+] as const;
+
 const userSchema = new mongoose.Schema({
     refreshTokenHash: {
         type: String,
@@ -9,6 +20,23 @@ const userSchema = new mongoose.Schema({
         select: false,
     },
     refreshTokenExpiresAt: {
+        type: Date,
+        select: false,
+    },
+    // When the current refresh token was issued.
+    refreshTokenIssuedAt: {
+        type: Date,
+        select: false,
+    },
+    // The token the current one replaced. If the response carrying the new
+    // token never reached the app, the app still holds this one, so it stays
+    // usable until the current token is first used (which replaces it), and
+    // never past previousRefreshTokenExpiresAt.
+    previousRefreshTokenHash: {
+        type: String,
+        select: false,
+    },
+    previousRefreshTokenExpiresAt: {
         type: Date,
         select: false,
     },
@@ -103,6 +131,9 @@ userSchema.index(
     { unique: true, partialFilterExpression: { username: { $gt: '' } } },
 );
 
+// Every token refresh and logout looks a user up by one of these hashes.
+userSchema.index({ refreshTokenHash: 1 }, { sparse: true });
+userSchema.index({ previousRefreshTokenHash: 1 }, { sparse: true });
 userSchema.index({ revokedRefreshTokenHash: 1 }, { sparse: true });
 
 // Index for efficient room member queries (finding users by joinedRooms)

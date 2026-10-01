@@ -6,9 +6,14 @@ import { isValidUsername, normalizeUsernameInput } from '../utils/username.js';
 import { assertCleanText, containsBlockedTerm } from '../utils/contentFilter.js';
 import { describeEnforcementForUser, type EnforcementState } from '../utils/enforcement.js';
 import { config } from '../config/index.js';
+import logger from '../utils/logger.js';
 import { captureAppleRefreshToken } from './appleAuthService.js';
 import { type UserProfileResponse, toUserProfileResponse } from './userService.js';
-import { type UserRepository, userRepository as defaultUserRepo } from '../repositories/userRepository.js';
+import {
+    type RefreshSessionUser,
+    type UserRepository,
+    userRepository as defaultUserRepo,
+} from '../repositories/userRepository.js';
 import {
     type UserIdentityRepository,
     userIdentityRepository as defaultUserIdentityRepo,
@@ -38,6 +43,8 @@ import type {
 
 const ACCESS_TOKEN_TTL = config.accessTokenTtl as jwt.SignOptions['expiresIn'];
 const REFRESH_TOKEN_TTL_DAYS = config.refreshTokenTtlDays;
+const REFRESH_TOKEN_REUSE_WINDOW_MS = config.refreshTokenReuseWindowMs;
+const PREVIOUS_REFRESH_TOKEN_TTL_MS = config.previousRefreshTokenTtlMs;
 
 export type AuthProvider = 'google' | 'apple';
 
@@ -49,7 +56,9 @@ export interface AuthSessionResult {
 
 export interface RefreshResult {
     accessToken: string;
-    refreshToken: string;
+    // Set when a new refresh token was issued, which the route sends as the
+    // cookie. Absent when the presented token stays in use.
+    refreshToken?: string;
 }
 
 export interface AuthSecurityStatus {
@@ -100,6 +109,9 @@ type AuthUserDocument = mongoose.Document & EnforcementState & {
     lastLogin: Date;
     refreshTokenHash?: string;
     refreshTokenExpiresAt?: Date;
+    refreshTokenIssuedAt?: Date;
+    previousRefreshTokenHash?: string;
+    previousRefreshTokenExpiresAt?: Date;
     revokedRefreshTokenHash?: string;
 };
 
@@ -200,10 +212,16 @@ export function createAuthService(deps: AuthServiceDeps) {
         const refreshToken = generateRefreshToken();
         user.refreshTokenHash = hashRefreshToken(refreshToken);
         user.refreshTokenExpiresAt = getRefreshExpiryDate();
-        // A new session replaces any session a past ban or suspension ended.
-        // markModified: the field isn't loaded (select: false), so assigning
-        // undefined alone wouldn't be saved as a change.
+        user.refreshTokenIssuedAt = now;
+        // A new session replaces the old one entirely, including its previous
+        // token and any session a past ban or suspension ended. These fields
+        // aren't loaded (select: false); markModified makes sure each one is
+        // saved as removed.
+        user.previousRefreshTokenHash = undefined;
+        user.previousRefreshTokenExpiresAt = undefined;
         user.revokedRefreshTokenHash = undefined;
+        user.markModified('previousRefreshTokenHash');
+        user.markModified('previousRefreshTokenExpiresAt');
         user.markModified('revokedRefreshTokenHash');
         user.lastLogin = now;
         await user.save();
@@ -456,45 +474,74 @@ export function createAuthService(deps: AuthServiceDeps) {
         return issueSessionForUser(user);
     }
 
-    async function refreshAccessToken(currentRefreshToken: string): Promise<RefreshResult> {
-        const hashed = hashRefreshToken(currentRefreshToken);
-        const now = new Date();
-        const newRefresh = generateRefreshToken();
-        const newRefreshHash = hashRefreshToken(newRefresh);
-        const newExpiry = getRefreshExpiryDate();
-
-        const user = await userRepo.findOneAndUpdateByRefreshToken(
-            hashed,
-            now,
-            { $set: { refreshTokenHash: newRefreshHash, refreshTokenExpiresAt: newExpiry } }
-        );
-
-        if (!user) {
-            // A session ended by a ban or suspension: say why (403) rather
-            // than a bare 401, so the app can show the reason.
-            const revoked = await userRepo.findEnforcementByRevokedRefreshToken(hashed);
-            if (revoked) {
-                assertAccountMayStartSession(revoked);
-            }
-            throw new UnauthorizedError('Invalid or expired refresh token');
-        }
-
-        // Moderation normally clears the refresh token, but check anyway so no
-        // path can renew a banned or suspended session.
-        if (describeEnforcementForUser(user)) {
-            await userRepo.clearRefreshToken(newRefreshHash);
+    // Moderation normally clears the refresh session, but check anyway so no
+    // path can renew a banned or suspended session. `sessionTokenHash` is either
+    // token of the session, current or previous.
+    async function assertSessionMayContinue(user: RefreshSessionUser, sessionTokenHash: string, now: Date): Promise<void> {
+        if (describeEnforcementForUser(user, now)) {
+            await userRepo.clearRefreshToken(sessionTokenHash, now);
             assertAccountMayStartSession(user);
         }
-
-        const accessToken = signAccessToken({ userId: user._id.toString() });
-        return { accessToken, refreshToken: newRefresh };
     }
 
+    // Every refresh replaces the refresh token. The replaced one stays usable
+    // until its successor is first used (at most PREVIOUS_REFRESH_TOKEN_TTL_MS),
+    // so a response lost on its way to the app doesn't end the session.
+    async function refreshAccessToken(presentedRefreshToken: string): Promise<RefreshResult> {
+        const hashed = hashRefreshToken(presentedRefreshToken);
+        const now = new Date();
+        const reuseWindowStart = new Date(now.getTime() - REFRESH_TOKEN_REUSE_WINDOW_MS);
+        const nextRefreshToken = generateRefreshToken();
+        const next = { hash: hashRefreshToken(nextRefreshToken), expiresAt: getRefreshExpiryDate() };
+
+        // The current token: replace it.
+        const rotated = await userRepo.rotateRefreshToken(
+            hashed,
+            now,
+            next,
+            new Date(now.getTime() + PREVIOUS_REFRESH_TOKEN_TTL_MS)
+        );
+        if (rotated) {
+            await assertSessionMayContinue(rotated, next.hash, now);
+            return { accessToken: signAccessToken({ userId: rotated._id.toString() }), refreshToken: nextRefreshToken };
+        }
+
+        // The previous token, with its successor issued over 30 s ago and still
+        // unused: the response carrying the successor never arrived. Issue a
+        // new one. The previous token stays, so another lost response recovers
+        // the same way.
+        const reissued = await userRepo.reissueFromPreviousRefreshToken(hashed, now, next, reuseWindowStart);
+        if (reissued) {
+            await assertSessionMayContinue(reissued, next.hash, now);
+            logger.info('auth.refresh.previous_token_reissued', { userId: reissued._id.toString() });
+            return { accessToken: signAccessToken({ userId: reissued._id.toString() }), refreshToken: nextRefreshToken };
+        }
+
+        // The previous token, with its successor issued in the last 30 s: most
+        // likely two refreshes sent at once. It gets only an access token, and
+        // the response that issued the successor sets the cookie.
+        const reused = await userRepo.findByRecentPreviousRefreshToken(hashed, now, reuseWindowStart);
+        if (reused) {
+            await assertSessionMayContinue(reused, hashed, now);
+            logger.info('auth.refresh.previous_token_reused', { userId: reused._id.toString() });
+            return { accessToken: signAccessToken({ userId: reused._id.toString() }) };
+        }
+
+        // A session ended by a ban or suspension: say why (403) rather
+        // than a bare 401, so the app can show the reason.
+        const revoked = await userRepo.findEnforcementByRevokedRefreshToken(hashed);
+        if (revoked) {
+            assertAccountMayStartSession(revoked);
+        }
+        throw new UnauthorizedError('Invalid or expired refresh token');
+    }
+
+    // Ends the session of a current or unexpired previous refresh token.
     // Returns the id of the user whose session ended, so callers can also drop
     // that user's live sockets.
     async function logout(refreshToken: string): Promise<string | null> {
         const hashed = hashRefreshToken(refreshToken);
-        return userRepo.clearRefreshToken(hashed);
+        return userRepo.clearRefreshToken(hashed, new Date());
     }
 
     async function checkUsernameAvailability(username: unknown): Promise<boolean> {

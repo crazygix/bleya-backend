@@ -59,6 +59,44 @@ function clearsRefreshCookie(setCookie: string | string[] | undefined): boolean 
     return cookieList(setCookie).some((cookie) => cookie.startsWith('refreshToken=;'));
 }
 
+// The refresh cookie a response issued, as a `refreshToken=<value>` pair, or
+// null when it issued none.
+function issuedRefreshCookie(setCookie: string | string[] | undefined): string | null {
+    const pair = cookieList(setCookie)
+        .map((cookie) => cookie.split(';', 1)[0])
+        .find((cookie) => cookie.startsWith('refreshToken=') && cookie !== 'refreshToken=');
+    return pair ?? null;
+}
+
+function refresh(cookie: string) {
+    return getTestAgent()
+        .post('/v1/auth/refresh')
+        .set('Cookie', cookie);
+}
+
+async function signIn(sub: string): Promise<string> {
+    const res = await googleSignIn(sub);
+    const cookie = issuedRefreshCookie(res.headers['set-cookie']);
+    assert.ok(cookie);
+    return cookie;
+}
+
+// Refreshes successfully and returns the refresh cookie that was issued.
+async function rotate(cookie: string): Promise<string> {
+    const res = await refresh(cookie).expect(200);
+    assert.ok(res.body.token);
+    const next = issuedRefreshCookie(res.headers['set-cookie']);
+    assert.ok(next);
+    return next;
+}
+
+// As if the current refresh token had been issued that long ago.
+async function backdateCurrentRefreshToken(ms: number): Promise<void> {
+    await User.updateMany({}, { $set: { refreshTokenIssuedAt: new Date(Date.now() - ms) } });
+}
+
+const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+
 describe('Auth API', () => {
     before(async () => {
         await connectTestDb();
@@ -317,6 +355,119 @@ describe('Auth API', () => {
                 .post('/v1/auth/refresh')
                 .expect(401);
         });
+
+        it('gives the previous token only an access token within 30 s of its successor', async () => {
+            const original = await signIn('google-refresh-1');
+            const successor = await rotate(original);
+
+            const res = await refresh(original).expect(200);
+
+            assert.equal(res.headers['set-cookie'], undefined);
+            const user = await User.findOne({}).select('_id').lean();
+            const { userId } = jwt.verify(res.body.token, config.jwtSecret) as { userId: string };
+            assert.equal(userId, user!._id.toString());
+            await rotate(successor);
+        });
+
+        it('issues a new refresh token for the previous one after 30 s', async () => {
+            const original = await signIn('google-refresh-2');
+            // The response carrying this one never reaches the app.
+            const lost = await rotate(original);
+            await backdateCurrentRefreshToken(60_000);
+
+            const reissued = await rotate(original);
+
+            assert.notEqual(reissued, original);
+            assert.notEqual(reissued, lost);
+            assert.ok(clearsRefreshCookie((await refresh(lost).expect(401)).headers['set-cookie']));
+            await rotate(reissued);
+            // Using the new token ends the previous one.
+            await refresh(original).expect(401);
+        });
+
+        it('recovers again when the reissued response is lost too', async () => {
+            const original = await signIn('google-refresh-3');
+            await rotate(original);
+            const firstRotation = await User.findOne({}).select('+previousRefreshTokenExpiresAt').lean();
+            await backdateCurrentRefreshToken(60_000);
+            await rotate(original);
+            await backdateCurrentRefreshToken(60_000);
+
+            await rotate(original);
+
+            // The 7 days still count from the first rotation.
+            const stored = await User.findOne({}).select('+previousRefreshTokenExpiresAt').lean();
+            assert.ok(firstRotation?.previousRefreshTokenExpiresAt);
+            assert.equal(
+                stored?.previousRefreshTokenExpiresAt?.getTime(),
+                firstRotation.previousRefreshTokenExpiresAt.getTime()
+            );
+        });
+
+        it('lets two refreshes with the same cookie succeed at once', async () => {
+            const original = await signIn('google-refresh-4');
+
+            const responses = await Promise.all([
+                refresh(original).expect(200),
+                refresh(original).expect(200),
+            ]);
+
+            for (const res of responses) {
+                assert.ok(res.body.token);
+            }
+            const issued = responses
+                .map((res) => issuedRefreshCookie(res.headers['set-cookie']))
+                .filter((cookie): cookie is string => cookie !== null);
+            assert.equal(issued.length, 1);
+            await rotate(issued[0]);
+        });
+
+        it('stops accepting the previous token 7 days after it was replaced', async () => {
+            const original = await signIn('google-refresh-5');
+            const successor = await rotate(original);
+            const stored = await User.findOne({})
+                .select('+refreshTokenIssuedAt +previousRefreshTokenExpiresAt')
+                .lean();
+            assert.equal(
+                stored!.previousRefreshTokenExpiresAt!.getTime() - stored!.refreshTokenIssuedAt!.getTime(),
+                SEVEN_DAYS_MS
+            );
+
+            const replacedAt = Date.now() - SEVEN_DAYS_MS - 60_000;
+            await User.updateMany({}, {
+                $set: {
+                    refreshTokenIssuedAt: new Date(replacedAt),
+                    previousRefreshTokenExpiresAt: new Date(replacedAt + SEVEN_DAYS_MS),
+                },
+            });
+
+            const res = await refresh(original).expect(401);
+
+            assert.ok(clearsRefreshCookie(res.headers['set-cookie']));
+            // Logging out with it doesn't end the session either.
+            await logout(original);
+            await rotate(successor);
+        });
+
+        it('ends both tokens of the old session on a new sign-in', async () => {
+            const original = await signIn('google-refresh-6');
+            const successor = await rotate(original);
+
+            const next = await signIn('google-refresh-6');
+
+            await refresh(original).expect(401);
+            await refresh(successor).expect(401);
+            await backdateCurrentRefreshToken(60_000);
+            await refresh(original).expect(401);
+            await rotate(next);
+        });
+
+        it('looks up both refresh tokens by index', async () => {
+            const indexes = await User.collection.indexes();
+            for (const field of ['refreshTokenHash', 'previousRefreshTokenHash']) {
+                assert.ok(indexes.some((index) => index.key[field] === 1 && index.sparse), field);
+            }
+        });
     });
 
     describe('POST /v1/auth/set-username', () => {
@@ -422,6 +573,33 @@ describe('Auth API', () => {
             const stored = await PushToken.findOne({ token: 'device-2' }).lean();
             assert.equal(stored?.isActive, false);
             assert.equal(stored?.failureReason, 'logged_out');
+        });
+
+        it('ends the session when logging out with the previous token', async () => {
+            const session = await googleSignIn('google-logout-6');
+            await registerPushToken(session.body.token, 'device-6');
+            const original = issuedRefreshCookie(session.headers['set-cookie']);
+            assert.ok(original);
+            const successor = await rotate(original);
+
+            const res = await logout(original);
+
+            assert.ok(clearsRefreshCookie(res.headers['set-cookie']));
+            await refresh(successor).expect(401);
+            await refresh(original).expect(401);
+            const stored = await PushToken.findOne({ token: 'device-6' }).lean();
+            assert.equal(stored?.isActive, false);
+            assert.equal(stored?.failureReason, 'logged_out');
+        });
+
+        it('ends the previous token too when logging out with the current one', async () => {
+            const original = await signIn('google-logout-7');
+            const successor = await rotate(original);
+
+            await logout(successor);
+
+            await refresh(original).expect(401);
+            await refresh(successor).expect(401);
         });
 
         it('leaves pushes on for a cookie from a replaced session', async () => {

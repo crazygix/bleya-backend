@@ -129,7 +129,11 @@ router.post('/refresh', refreshLimiter, asyncHandler(async (req: express.Request
 
     try {
         const result = await authService.refreshAccessToken(refreshToken);
-        setRefreshCookie(res, result.refreshToken);
+        // No new refresh token means the presented one stays in use, so the
+        // cookie the app holds is left as it is.
+        if (result.refreshToken) {
+            setRefreshCookie(res, result.refreshToken);
+        }
         res.json({ token: result.accessToken });
     } catch (error) {
         // Only a rejected session (invalid/expired token, or a banned account)

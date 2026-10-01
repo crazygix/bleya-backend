@@ -124,6 +124,32 @@ describe('Moderation and enforcement', () => {
             assert.equal(stored?.refreshTokenHash, undefined);
         });
 
+        it('also ends the previous refresh token', async () => {
+            const res = await googleSignIn('google-banned-6').expect(200);
+            const original = res.headers['set-cookie'];
+            const rotated = await getTestAgent().post('/v1/auth/refresh').set('Cookie', original).expect(200);
+            const successor = rotated.headers['set-cookie'];
+            assert.ok(successor);
+            const user = await User.findOne({}).select('_id').lean();
+
+            await getTestAgent()
+                .post(`/v1/admin/users/${user!._id}/ban`)
+                .set(admin())
+                .send({ reason: 'spam' })
+                .expect(200);
+
+            await getTestAgent().post('/v1/auth/refresh').set('Cookie', original).expect(401);
+            const refresh = await getTestAgent().post('/v1/auth/refresh').set('Cookie', successor).expect(403);
+            assert.equal(refresh.body.error.message, 'Your account has been banned. Reason: spam');
+
+            const stored = await User.findById(user!._id)
+                .select('+refreshTokenIssuedAt +previousRefreshTokenHash +previousRefreshTokenExpiresAt')
+                .lean();
+            assert.equal(stored?.refreshTokenIssuedAt, undefined);
+            assert.equal(stored?.previousRefreshTokenHash, undefined);
+            assert.equal(stored?.previousRefreshTokenExpiresAt, undefined);
+        });
+
         it('explains a suspension on refresh', async () => {
             const res = await googleSignIn('google-suspended-2').expect(200);
             const cookie = res.headers['set-cookie'];
