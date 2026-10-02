@@ -89,8 +89,14 @@ Store consoles (mostly non-code):
 - [ ] Apple: App Privacy "nutrition" labels; age rating (17+); screenshots; description; support URL.
 - [ ] Play: Data Safety form; content-rating questionnaire; target audience; screenshots; description;
   web account-deletion URL = https://bleyachat.com/delete-account.
-- [ ] Play App Signing: after the Play app exists, copy its App Signing SHA-256 and confirm/replace the
-  `C6:40…` fingerprint in the website's `assetlinks.json`.
+- [ ] Play App Signing: copy the App signing key certificate SHA-256 (Play Console → Test and release →
+  App integrity). First set `PASSKEY_EXPECTED_ORIGINS` in Railway, without the local debug key's origin:
+  `https://bleyachat.com,android:apk-key-hash:<Play app signing key>,android:apk-key-hash:frIBwEielUZ40bb-OLsXTEDf8VZHels3kCH9_ojSUtM`
+  (the last one is the upload key). An origin is `android:apk-key-hash:` plus the certificate's SHA-256 in
+  base64url without padding:
+  `FP='AA:BB:…'; echo "android:apk-key-hash:$(echo "$FP" | tr -d ':' | xxd -r -p | base64 | tr '+/' '-_' | tr -d '=')"`
+  Startup logs `config.passkey_origins` while the list looks wrong. Then deploy the website's `assetlinks.json`
+  with the Play key in place of the local debug key `C6:40…`.
 - [ ] Review notes (both stores): persistent-identity city rooms (not anonymous random chat) + we act
   on reports within ~24h.
 

@@ -20,6 +20,7 @@ import { trustProxy } from '../utils/trustedProxy.js';
 import logger from '../utils/logger.js';
 import {
     config,
+    findPasskeyOriginProblems,
     MIN_ADMIN_API_KEY_LENGTH,
     nodeEnvWasUnset,
     validateAppleAuthConfig,
@@ -125,6 +126,14 @@ function reportConfigGaps(): void {
     if (!isAppleRevocationConfigured()) {
         logger.error('apple.revocation.unconfigured', {
             note: 'Sign in with Apple tokens are not revoked on account deletion (App Store Guideline 5.1.1(v)). Set APPLE_REVOKE_CLIENT_ID, APPLE_TEAM_ID, APPLE_KEY_ID and APPLE_PRIVATE_KEY.',
+        });
+    }
+
+    const passkeyOriginProblems = findPasskeyOriginProblems(config.passkey.expectedOrigins, config.passkey.rpId);
+    if (passkeyOriginProblems.length > 0) {
+        logger.warn('config.passkey_origins', {
+            problems: passkeyOriginProblems,
+            note: `PASSKEY_EXPECTED_ORIGINS needs https://${config.passkey.rpId} plus android:apk-key-hash:<SHA-256 in base64url, no padding> for each Android signing certificate (Play app signing key and upload key).`,
         });
     }
 }

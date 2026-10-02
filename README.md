@@ -51,7 +51,9 @@ Set these at minimum in `.env.local`:
 - `ANDROID_PACKAGE_NAME`
 - `PASSKEY_RP_ID`
 - `PASSKEY_RP_NAME`
-- `PASSKEY_EXPECTED_ORIGINS`
+- `PASSKEY_EXPECTED_ORIGINS`: comma-separated exact origins, no quotes or trailing slash: `https://<PASSKEY_RP_ID>` for iOS plus `android:apk-key-hash:<hash>` for each certificate the Android app is signed with (in production the Play app signing key and the upload key). `<hash>` is the certificate's SHA-256 in base64url without padding:
+  `FP='AA:BB:…'; echo "android:apk-key-hash:$(echo "$FP" | tr -d ':' | xxd -r -p | base64 | tr '+/' '-_' | tr -d '=')"`
+  Empty means `https://<PASSKEY_RP_ID>` only. Production startup logs `config.passkey_origins` when the list looks wrong.
 - `FIREBASE_PROJECT_ID`
 - `FIREBASE_CLIENT_EMAIL`
 - `FIREBASE_PRIVATE_KEY`

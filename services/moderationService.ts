@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 import { Message } from '../models/Message.js';
 import { Notification } from '../models/Notification.js';
+import { Room } from '../models/Room.js';
 import { NotFoundError, ValidationError, ErrorCode } from '../utils/errors.js';
 import { validateObjectId } from '../utils/validation.js';
 import { sanitizePlainText } from '../utils/sanitize.js';
@@ -8,9 +9,11 @@ import { recordModerationAction } from './auditService.js';
 import { rememberBannedIdentities, forgetBannedIdentities } from './bannedIdentityService.js';
 import { deleteFromR2, extractKeyFromUrl } from './r2Service.js';
 import { deactivatePushTokensForUser } from './pushNotificationService.js';
+import { getRoomSummaryRecipientIds } from './roomService.js';
 import { emitMessageRemoved, disconnectUser } from '../server/socket.js';
 import { User, REFRESH_SESSION_FIELDS } from '../models/User.js';
 import logger from '../utils/logger.js';
+import type { LeanMessage, LeanRoom } from '../types/lean.js';
 
 export interface MessageModerationResult {
     id: string;
@@ -25,19 +28,93 @@ async function recomputeReplyCount(parentMessageId: mongoose.Types.ObjectId): Pr
     await Message.updateOne({ _id: parentMessageId }, { $set: { replyCount: count } });
 }
 
+type RemovedMessage = Pick<LeanMessage, '_id' | 'roomId' | 'userId' | 'parentMessageId' | 'createdAt'>;
+
 // Reply notifications quote the reply and its thread root, so removed content
-// must take its notifications with it.
-async function deleteNotificationsForMessages(messageIds: mongoose.Types.ObjectId[]): Promise<void> {
+// must take its notifications with it. Returns who lost a notification, by
+// removed message id, so their Activity can drop it live too.
+async function deleteNotificationsForMessages(
+    messageIds: mongoose.Types.ObjectId[]
+): Promise<Map<string, Set<string>>> {
+    const recipientsByMessageId = new Map<string, Set<string>>();
     if (messageIds.length === 0) {
-        return;
+        return recipientsByMessageId;
     }
 
-    await Notification.deleteMany({
+    const quotingRemovedContent = {
         $or: [
             { message: { $in: messageIds } },
             { thread: { $in: messageIds } },
         ],
-    });
+    };
+    const notifications = await Notification.find(quotingRemovedContent)
+        .select('recipient message thread')
+        .lean<Array<{
+            recipient: mongoose.Types.ObjectId;
+            message: mongoose.Types.ObjectId;
+            thread: mongoose.Types.ObjectId;
+        }>>();
+    await Notification.deleteMany(quotingRemovedContent);
+
+    const removedIds = new Set(messageIds.map((id) => id.toString()));
+    for (const notification of notifications) {
+        for (const quoted of [notification.message, notification.thread]) {
+            const quotedId = quoted.toString();
+            if (!removedIds.has(quotedId)) {
+                continue;
+            }
+            const recipients = recipientsByMessageId.get(quotedId) ?? new Set<string>();
+            recipients.add(notification.recipient.toString());
+            recipientsByMessageId.set(quotedId, recipients);
+        }
+    }
+
+    return recipientsByMessageId;
+}
+
+// Everyone whose chat list shows the room, so a removed top-level message may
+// be their preview of it: a DM's participants or a city room's members, the
+// same people room_summary_updated goes to.
+async function getRoomMemberIds(roomId: mongoose.Types.ObjectId): Promise<string[]> {
+    const room = await Room.findById(roomId)
+        .select('type participants')
+        .lean<Pick<LeanRoom, 'type' | 'participants'> | null>();
+    if (!room) {
+        return [];
+    }
+
+    return getRoomSummaryRecipientIds(
+        roomId.toString(),
+        room.type || 'public',
+        (room.participants || []).map((participant) => participant.toString())
+    );
+}
+
+// Drops a removed message live, in one emit: from its room's open screens,
+// from the chat lists of the room's members when it is top-level, and from the
+// Activity of everyone whose notification went with it. Called once the
+// removal and the notification clean-up are saved.
+function announceMessageRemoval(
+    message: RemovedMessage,
+    roomMemberIds: readonly string[],
+    notificationRecipients: ReadonlyMap<string, ReadonlySet<string>>
+): void {
+    const messageId = message._id.toString();
+    const parentMessageId = message.parentMessageId ? message.parentMessageId.toString() : null;
+
+    emitMessageRemoved(
+        {
+            messageId,
+            roomId: message.roomId.toString(),
+            parentMessageId,
+            userId: message.userId.toString(),
+            createdAt: message.createdAt.getTime(),
+        },
+        [
+            ...(parentMessageId === null ? roomMemberIds : []),
+            ...(notificationRecipients.get(messageId) ?? []),
+        ]
+    );
 }
 
 export async function deleteMessage(
@@ -54,8 +131,11 @@ export async function deleteMessage(
 
     const deleteReason = sanitizeReason(reason);
 
-    const roomId = (message.roomId as mongoose.Types.ObjectId).toString();
+    const roomObjectId = message.roomId as mongoose.Types.ObjectId;
+    const roomId = roomObjectId.toString();
     const parentMessageId = (message.parentMessageId as mongoose.Types.ObjectId | null) || null;
+    // Read before the message changes, so a failed lookup changes nothing.
+    const roomMemberIds = parentMessageId ? [] : await getRoomMemberIds(roomObjectId);
 
     if (!message.deletedAt) {
         message.deletedAt = new Date();
@@ -68,14 +148,9 @@ export async function deleteMessage(
         }
     }
 
-    await deleteNotificationsForMessages([id]);
+    const notificationRecipients = await deleteNotificationsForMessages([id]);
 
-    // Drop it from connected clients in the room in real time.
-    emitMessageRemoved(roomId, {
-        messageId: id.toString(),
-        roomId,
-        parentMessageId: parentMessageId ? parentMessageId.toString() : null,
-    });
+    announceMessageRemoval(message, roomMemberIds, notificationRecipients);
 
     await recordModerationAction({
         actorLabel,
@@ -392,11 +467,21 @@ export async function removeUserMessages(
     }
 
     const messages = await Message.find(filter)
-        .select('_id roomId parentMessageId')
-        .lean<Array<{ _id: mongoose.Types.ObjectId; roomId: mongoose.Types.ObjectId; parentMessageId?: mongoose.Types.ObjectId | null }>>();
+        .select('_id roomId userId parentMessageId createdAt')
+        .lean<RemovedMessage[]>();
 
     if (messages.length === 0) {
         return { id: id.toString(), removed: 0 };
+    }
+
+    // Members of each room with a removed top-level message, read before
+    // anything changes, as in deleteMessage.
+    const roomMemberIdsByRoomId = new Map<string, string[]>();
+    for (const message of messages) {
+        const roomId = message.roomId.toString();
+        if (!message.parentMessageId && !roomMemberIdsByRoomId.has(roomId)) {
+            roomMemberIdsByRoomId.set(roomId, await getRoomMemberIds(message.roomId));
+        }
     }
 
     const deleteReason = sanitizeReason(reason);
@@ -416,14 +501,15 @@ export async function removeUserMessages(
         await recomputeReplyCount(parentId);
     }
 
-    await deleteNotificationsForMessages(messageIds);
+    const notificationRecipients = await deleteNotificationsForMessages(messageIds);
 
+    // One event per removed message.
     for (const message of messages) {
-        emitMessageRemoved(message.roomId.toString(), {
-            messageId: message._id.toString(),
-            roomId: message.roomId.toString(),
-            parentMessageId: message.parentMessageId ? message.parentMessageId.toString() : null,
-        });
+        announceMessageRemoval(
+            message,
+            roomMemberIdsByRoomId.get(message.roomId.toString()) ?? [],
+            notificationRecipients
+        );
     }
 
     await recordModerationAction({

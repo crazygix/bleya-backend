@@ -435,3 +435,57 @@ export function validatePushConfig(): { complete: boolean; missing: string[] } {
     missing,
   };
 }
+
+const ANDROID_PASSKEY_ORIGIN_PREFIX = 'android:apk-key-hash:';
+// A signing certificate's SHA-256 (32 bytes) in base64url without padding.
+const APK_KEY_HASH = /^[A-Za-z0-9_-]{43}$/;
+// The same SHA-256 as consoles and keytool print it, with or without colons.
+const HEX_CERTIFICATE_FINGERPRINT = /^[0-9A-Fa-f]{2}(:?[0-9A-Fa-f]{2}){31}$/;
+
+function describeAndroidPasskeyOriginProblem(origin: string): string | null {
+  if (!origin.startsWith(ANDROID_PASSKEY_ORIGIN_PREFIX)) {
+    return `${origin} must start with ${ANDROID_PASSKEY_ORIGIN_PREFIX}`;
+  }
+
+  const hash = origin.slice(ANDROID_PASSKEY_ORIGIN_PREFIX.length);
+  if (APK_KEY_HASH.test(hash)) {
+    return null;
+  }
+  if (HEX_CERTIFICATE_FINGERPRINT.test(hash)) {
+    return `${origin} holds the hex fingerprint; it must be converted to base64url without padding.`;
+  }
+  if (/[=+/]/.test(hash)) {
+    return `${origin} must be base64url without padding: no trailing '=', and '-' and '_' instead of '+' and '/'.`;
+  }
+  return `${origin} must hold the signing certificate's SHA-256 in base64url without padding (43 characters).`;
+}
+
+/**
+ * Lists what looks wrong with the passkey origins (PASSKEY_EXPECTED_ORIGINS).
+ * They are matched exactly: without https://<rpId> passkeys fail on iOS,
+ * without an Android origin they fail in the Android app, and an Android origin
+ * that isn't android:apk-key-hash:<the signing certificate's SHA-256 in
+ * base64url, no padding> never matches. An empty list means https://<rpId>
+ * only, as in passkeyService.
+ */
+export function findPasskeyOriginProblems(origins: string[], rpId: string): string[] {
+  const websiteOrigin = `https://${rpId}`;
+  const effectiveOrigins = origins.length > 0 ? origins : [websiteOrigin];
+  const androidOrigins = effectiveOrigins.filter((origin) => origin.startsWith('android:'));
+  const problems: string[] = [];
+
+  if (!effectiveOrigins.includes(websiteOrigin)) {
+    problems.push(`${websiteOrigin} is missing, so passkeys fail on iOS.`);
+  }
+  if (androidOrigins.length === 0) {
+    problems.push(`No ${ANDROID_PASSKEY_ORIGIN_PREFIX} origin is listed, so passkeys fail in the Android app.`);
+  }
+  for (const origin of androidOrigins) {
+    const problem = describeAndroidPasskeyOriginProblem(origin);
+    if (problem) {
+      problems.push(problem);
+    }
+  }
+
+  return problems;
+}

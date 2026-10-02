@@ -305,14 +305,33 @@ async function emitRoomSummaryUpdate(
 // (e.g. in tests), so all helpers below are no-ops until then.
 let ioRef: SocketIOServer | null = null;
 
-// Push a removal so connected clients drop a moderated message immediately.
-// parentMessageId is set when the removed message is a thread reply, and is null
-// for a top-level message (whose open thread view should then close).
-export function emitMessageRemoved(
-    roomId: string,
-    payload: { messageId: string; roomId: string; parentMessageId: string | null }
-): void {
-    ioRef?.to(roomId).emit('message_removed', payload);
+// A moderated message that was removed. parentMessageId is set when it is a
+// thread reply, and is null for a top-level message (whose open thread view
+// should then close). userId is its author and createdAt its creation time in
+// ms, the same values message and chat-list payloads carry.
+export interface MessageRemovedPayload {
+    messageId: string;
+    roomId: string;
+    parentMessageId: string | null;
+    userId: string;
+    createdAt: number;
+}
+
+// Push a removal so connected clients drop a moderated message immediately:
+// sockets in its room, plus every socket of `alsoToUserIds` (chat lists and
+// Activity outside the room). It must stay a single emit, so a socket that is
+// in several of these rooms still gets it once: the app lowers a parent's
+// reply count on every delivery.
+export function emitMessageRemoved(payload: MessageRemovedPayload, alsoToUserIds: Iterable<string> = []): void {
+    if (!ioRef) {
+        return;
+    }
+
+    const targets = new Set<string>([payload.roomId]);
+    for (const userId of alsoToUserIds) {
+        targets.add(`user:${userId}`);
+    }
+    ioRef.to([...targets]).emit('message_removed', payload);
 }
 
 // Force-disconnect all of a user's live sockets (used when banning/suspending).
