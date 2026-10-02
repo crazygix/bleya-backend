@@ -1,4 +1,4 @@
-import { describe, it, before, after, beforeEach } from 'node:test';
+import { describe, it, before, after, beforeEach, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import mongoose from 'mongoose';
 import type { Message as PushMessage } from 'firebase-admin/messaging';
@@ -11,6 +11,7 @@ import { Message } from '../../models/Message.js';
 import { Notification } from '../../models/Notification.js';
 import { UserBlock } from '../../models/UserBlock.js';
 import { NotificationService } from '../../services/NotificationService.js';
+import logger from '../../utils/logger.js';
 import {
     deactivatePushTokensForUser,
     registerPushToken,
@@ -143,6 +144,89 @@ async function recordQueries(run: () => Promise<void>): Promise<string[]> {
         mongoose.set('debug', false);
     }
     return queries.sort();
+}
+
+// `count` iPhones whose app builds asked for the badge, each with its own mix
+// of unread items from one friend: iPhone i has i % 4 unread Activity items
+// (the last one has 120) and an unread DM chat when i % 3 is 0. Those with
+// i % 10 === 7 blocked the friend, so nothing counts for them. The friend also
+// posts in the city room, which never counts. Returns each one's badge.
+async function iphonesWithUnreadItems(count: number): Promise<Array<{ userId: string; token: string; badge: number }>> {
+    const friend = await createTestUser({ username: 'friend' });
+    const users = await User.insertMany(Array.from({ length: count }, () => ({})));
+    const city = await publicRoom(friend._id, ...users.map((user) => user._id));
+    const cityPost = await Message.create({ roomId: city, userId: friend._id, text: 'city news' });
+    const reply = await Message.create({ roomId: city, userId: friend._id, text: 'reply', parentMessageId: cityPost._id });
+
+    const unreadItems = (i: number) => (i === count - 1 ? 120 : i % 4);
+    const hasUnreadDm = (i: number) => i % 3 === 0;
+    const blockedFriend = (i: number) => i % 10 === 7;
+
+    await Notification.insertMany(users.flatMap((user, i) => Array.from({ length: unreadItems(i) }, () => ({
+        recipient: user._id,
+        sender: friend._id,
+        type: 'reply',
+        room: city,
+        message: reply._id,
+        thread: cityPost._id,
+    }))));
+
+    const dmUsers = users.filter((_, i) => hasUnreadDm(i));
+    const dms = await Room.insertMany(dmUsers.map((user) => ({
+        name: 'Direct',
+        type: 'private',
+        participants: [user._id, friend._id],
+        participantsHash: [user._id.toString(), friend._id.toString()].sort().join('_'),
+    })));
+    await User.bulkWrite(dms.map((dm, index) => ({
+        updateOne: { filter: { _id: dmUsers[index]._id }, update: { $addToSet: { joinedRooms: dm._id } } },
+    })));
+    await Message.insertMany(dms.map((dm) => ({ roomId: dm._id, userId: friend._id, text: 'unread' })));
+
+    await UserBlock.insertMany(users.filter((_, i) => blockedFriend(i)).map((user) => ({
+        blockerUserId: user._id,
+        blockedUserId: friend._id,
+    })));
+    await PushToken.insertMany(users.map((user, i) => ({
+        userId: user._id,
+        token: `token-${i}`,
+        platform: 'ios',
+        badge: true,
+    })));
+
+    return users.map((user, i) => ({
+        userId: user._id.toString(),
+        token: `token-${i}`,
+        badge: blockedFriend(i) ? 0 : Math.min(unreadItems(i) + (hasUnreadDm(i) ? 1 : 0), 99),
+    }));
+}
+
+// Watches the Activity count, which runs once per chunk of recipients, and
+// makes it fail for the chunk that includes `failFor`.
+function watchBadgeChunks(t: TestContext, failFor?: string) {
+    const countUnreadByRecipient = NotificationService.countUnreadByRecipient.bind(NotificationService);
+    const watched = { chunks: [] as string[][], failedChunk: [] as string[], mostAtOnce: 0 };
+    let running = 0;
+    t.mock.method(NotificationService, 'countUnreadByRecipient', async (blockedUserIdsByRecipient: Map<string, string[]>) => {
+        const chunk = [...blockedUserIdsByRecipient.keys()];
+        watched.chunks.push(chunk);
+        running += 1;
+        watched.mostAtOnce = Math.max(watched.mostAtOnce, running);
+        try {
+            if (failFor !== undefined && chunk.includes(failFor)) {
+                watched.failedChunk = chunk;
+                throw new Error('database unavailable');
+            }
+            return await countUnreadByRecipient(blockedUserIdsByRecipient);
+        } finally {
+            running -= 1;
+        }
+    });
+    return watched;
+}
+
+function chunkSizes(chunks: string[][]): number[] {
+    return chunks.map((chunk) => chunk.length).sort((a, b) => a - b);
 }
 
 describe('pushNotificationService', () => {
@@ -453,7 +537,7 @@ describe('pushNotificationService', () => {
         }
     });
 
-    it('counts the badges of a whole push in one set of queries', async () => {
+    it('counts the badges of up to 100 recipients in one set of queries', async () => {
         const friend = await createTestUser({ username: 'friend' });
         const users = await Promise.all(['one', 'two', 'three'].map((username) => createTestUser({ username })));
         const city = await publicRoom(friend._id, ...users.map((user) => user._id));
@@ -549,6 +633,63 @@ describe('pushNotificationService', () => {
         assert.deepEqual(pushFor(sent, 'token-me').apns, SOUND_ONLY_APNS);
         const stored = await PushToken.findOne({ userId: me._id }).lean();
         assert.ok(stored?.lastSuccessAt);
+    });
+
+    it('counts a push to more than 100 iPhones in chunks of 100, two at a time, with the same badges', async (t) => {
+        const phones = await iphonesWithUnreadItems(207);
+        // Two of them are an Android phone and an iPhone build that didn't ask
+        // for the badge, so 205 recipients are counted.
+        await PushToken.updateOne({ token: phones[3].token }, { platform: 'android' });
+        await PushToken.updateOne({ token: phones[6].token }, { badge: false });
+        const noBadge = new Set([phones[3].token, phones[6].token]);
+        const watched = watchBadgeChunks(t);
+
+        const sent = recordPushes();
+        await sendPushNotifications(pushTo(phones.map(({ userId }) => userId)));
+
+        assert.deepEqual(chunkSizes(watched.chunks), [5, 100, 100]);
+        assert.ok(watched.mostAtOnce <= 2, `${watched.mostAtOnce} chunks were counted at once`);
+        assert.equal(sent.length, phones.length);
+        assert.deepEqual(
+            phones.map(({ token }) => pushFor(sent, token).apns?.payload?.aps.badge),
+            phones.map(({ token, badge }) => (noBadge.has(token) ? undefined : badge))
+        );
+        for (const token of noBadge) {
+            assert.deepEqual(pushFor(sent, token).apns, SOUND_ONLY_APNS);
+        }
+
+        for (const { userId, token } of phones) {
+            const alone = recordPushes();
+            await sendPushNotifications(pushTo([userId]));
+            assert.deepEqual(pushFor(alone, token).apns, pushFor(sent, token).apns, `${token} pushed alone`);
+        }
+    });
+
+    it('still sends every push when one chunk\'s count fails, and only that chunk goes without a badge', async (t) => {
+        const phones = await iphonesWithUnreadItems(205);
+        const watched = watchBadgeChunks(t, phones[150].userId);
+        const warn = t.mock.method(logger, 'warn', () => undefined);
+
+        const sent = recordPushes();
+        await sendPushNotifications(pushTo(phones.map(({ userId }) => userId)));
+
+        const failed = new Set(watched.failedChunk);
+        assert.ok(failed.has(phones[150].userId));
+        assert.deepEqual(chunkSizes(watched.chunks), [5, 100, 100]);
+        assert.equal(sent.length, phones.length);
+        assert.deepEqual(
+            phones.map(({ token }) => pushFor(sent, token).apns?.payload?.aps.badge),
+            phones.map(({ userId, badge }) => (failed.has(userId) ? undefined : badge))
+        );
+        for (const { userId, token } of phones) {
+            if (failed.has(userId)) {
+                assert.deepEqual(pushFor(sent, token).apns, SOUND_ONLY_APNS, `${token} has no badge`);
+            }
+        }
+        // The log names how many recipients lost their badge, not who.
+        assert.deepEqual(warn.mock.calls.map((call) => call.arguments), [
+            ['push.badge_count.failed', { chunkSize: failed.size, error: 'database unavailable' }],
+        ]);
     });
 
     it('switches off only the given account\'s pushes', async () => {

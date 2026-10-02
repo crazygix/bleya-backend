@@ -70,6 +70,12 @@ const FCM_MAX_BATCH_SIZE = 500;
 // Badge counts stop at 99.
 const MAX_APP_BADGE = 99;
 
+// Badges are counted for up to 100 recipients at a time, two chunks at once.
+// One count for every recipient of a large city-room push could run past the
+// 3-second query limit and leave all of its pushes without a badge.
+const BADGE_COUNT_CHUNK_SIZE = 100;
+const BADGE_COUNT_CONCURRENCY = 2;
+
 let firebaseApp: App | null = null;
 let pushMessagingClient: PushMessagingClient | null = null;
 
@@ -189,15 +195,9 @@ function wantsAppBadge(token: StoredPushToken): boolean {
     return token.platform === 'ios' && token.badge === true;
 }
 
-// The iOS app-icon badge for each given recipient: unread Activity items plus
-// DM chats with unread messages, the same number the app shows. City rooms
-// don't count. All recipients of a push are counted together, in one batch of
-// queries. If counting fails, the pushes still go out, just without a badge.
-async function countAppBadges(userIds: string[]): Promise<Map<string, number>> {
-    if (userIds.length === 0) {
-        return new Map();
-    }
-
+// The badges of one chunk of recipients, in one batch of queries. If counting
+// fails, their pushes still go out, just without a badge.
+async function countChunkAppBadges(userIds: string[]): Promise<Map<string, number>> {
     try {
         const blockedUserIdsByUserId = await getActiveBlockPairUserIdsByUser(userIds);
         const [unreadActivityByUserId, unreadDirectRoomsByUserId] = await Promise.all([
@@ -211,11 +211,38 @@ async function countAppBadges(userIds: string[]): Promise<Map<string, number>> {
         }));
     } catch (error) {
         logger.warn('push.badge_count.failed', {
-            recipientCount: userIds.length,
+            chunkSize: userIds.length,
             error: error instanceof Error ? error.message : String(error),
         });
         return new Map();
     }
+}
+
+// The iOS app-icon badge for each given recipient: unread Activity items plus
+// DM chats with unread messages, the same number the app shows. City rooms
+// don't count. Recipients are counted in chunks, so a failed chunk only costs
+// its own recipients their badge.
+async function countAppBadges(userIds: string[]): Promise<Map<string, number>> {
+    const chunks: string[][] = [];
+    for (let start = 0; start < userIds.length; start += BADGE_COUNT_CHUNK_SIZE) {
+        chunks.push(userIds.slice(start, start + BADGE_COUNT_CHUNK_SIZE));
+    }
+
+    const badgeByUserId = new Map<string, number>();
+    let nextChunk = 0;
+    // Each worker takes the next chunk once it's done with its last one.
+    const countRemainingChunks = async (): Promise<void> => {
+        while (nextChunk < chunks.length) {
+            const chunk = chunks[nextChunk];
+            nextChunk += 1;
+            for (const [userId, badge] of await countChunkAppBadges(chunk)) {
+                badgeByUserId.set(userId, badge);
+            }
+        }
+    };
+    await Promise.all(Array.from({ length: BADGE_COUNT_CONCURRENCY }, countRemainingChunks));
+
+    return badgeByUserId;
 }
 
 // iOS plays a sound only when the push names one. Without a badge the icon's
