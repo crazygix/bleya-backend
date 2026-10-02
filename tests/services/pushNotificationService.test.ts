@@ -104,6 +104,47 @@ async function replyNotification(
     });
 }
 
+// `count` unread Activity items for `recipient`, all for one reply from `sender`.
+async function unreadReplyNotifications(
+    recipient: mongoose.Types.ObjectId,
+    sender: mongoose.Types.ObjectId,
+    roomId: mongoose.Types.ObjectId,
+    count: number
+): Promise<void> {
+    const thread = await Message.create({ roomId, userId: recipient, text: 'thread' });
+    const reply = await Message.create({ roomId, userId: sender, text: 'reply', parentMessageId: thread._id });
+    await Notification.insertMany(Array.from({ length: count }, () => ({
+        recipient,
+        sender,
+        type: 'reply',
+        room: roomId,
+        message: reply._id,
+        thread: thread._id,
+    })));
+}
+
+async function markRoomRead(
+    userId: mongoose.Types.ObjectId,
+    roomId: mongoose.Types.ObjectId,
+    lastReadAt: Date
+): Promise<void> {
+    await User.updateOne({ _id: userId }, { $push: { roomReadPointers: { roomId, lastReadAt } } });
+}
+
+// The database operations `run` makes, as sorted `collection.method` entries.
+async function recordQueries(run: () => Promise<void>): Promise<string[]> {
+    const queries: string[] = [];
+    mongoose.set('debug', (collectionName: string, methodName: string) => {
+        queries.push(`${collectionName}.${methodName}`);
+    });
+    try {
+        await run();
+    } finally {
+        mongoose.set('debug', false);
+    }
+    return queries.sort();
+}
+
 describe('pushNotificationService', () => {
     before(async () => {
         await connectTestDb();
@@ -315,6 +356,133 @@ describe('pushNotificationService', () => {
         assert.equal(pushFor(sent, 'token-me').apns?.payload?.aps.badge, 99);
     });
 
+    it('gives every recipient of one push the badge they would get if pushed alone', async () => {
+        const now = Date.now();
+        const minutesAgo = (minutes: number) => new Date(now - minutes * 60_000);
+        const [ana, ben, cleo, dan, eve, finn, troll, stalker] = await Promise.all(
+            ['ana', 'ben', 'cleo', 'dan', 'eve', 'finn', 'troll', 'stalker'].map((username) => createTestUser({ username }))
+        );
+
+        // Blocks in both directions, and one between two recipients of the push.
+        await UserBlock.create([
+            { blockerUserId: ana._id, blockedUserId: troll._id },
+            { blockerUserId: stalker._id, blockedUserId: ben._id },
+            { blockerUserId: cleo._id, blockedUserId: ben._id },
+        ]);
+
+        // Activity. A block only hides the blocked pair's items: troll's replies
+        // still count for cleo.
+        const city = await publicRoom(ana._id, ben._id, cleo._id, dan._id, eve._id, finn._id, troll._id, stalker._id);
+        await replyNotification(ana._id, ben._id, city);
+        await replyNotification(ana._id, ben._id, city);
+        await replyNotification(ana._id, ben._id, city, { read: true });
+        await replyNotification(ana._id, troll._id, city);
+        await replyNotification(ben._id, ana._id, city);
+        await replyNotification(ben._id, ana._id, city, { isDismissed: true });
+        await replyNotification(ben._id, stalker._id, city);
+        await replyNotification(ben._id, cleo._id, city);
+        await replyNotification(cleo._id, troll._id, city);
+        await replyNotification(cleo._id, troll._id, city);
+        await replyNotification(cleo._id, ben._id, city);
+        await replyNotification(cleo._id, ana._id, city, { replyRemoved: true });
+        await unreadReplyNotifications(dan._id, ana._id, city, 120);
+        await replyNotification(eve._id, ana._id, city);
+        await replyNotification(finn._id, ana._id, city);
+        await Message.create([
+            { roomId: city, userId: troll._id, text: 'city news' },
+            { roomId: city, userId: eve._id, text: 'more city news' },
+        ]);
+
+        // ana and ben are both pushed. Each has read up to a different point,
+        // and neither one's own message counts for them: ben's message is
+        // unread for ana, and ben has read ana's.
+        const anaBen = await directRoom(ana._id, ben._id);
+        await Message.create([
+            { roomId: anaBen, userId: ana._id, text: 'hi ben', createdAt: minutesAgo(30) },
+            { roomId: anaBen, userId: ben._id, text: 'hi ana', createdAt: minutesAgo(10) },
+        ]);
+        await markRoomRead(ana._id, anaBen, minutesAgo(40));
+        await markRoomRead(ben._id, anaBen, minutesAgo(20));
+        const anaTroll = await directRoom(ana._id, troll._id);
+        await Message.create({ roomId: anaTroll, userId: troll._id, text: 'from a blocked user' });
+        // ana hid her chat with cleo; cleo still has ana's message unread.
+        const anaCleo = await directRoom(ana._id, cleo._id);
+        await Message.create([
+            { roomId: anaCleo, userId: cleo._id, text: 'hi ana', createdAt: minutesAgo(15) },
+            { roomId: anaCleo, userId: ana._id, text: 'hi cleo', createdAt: minutesAgo(14) },
+        ]);
+        await User.updateOne({ _id: ana._id }, { $addToSet: { hiddenDirectRooms: anaCleo } });
+        const benStalker = await directRoom(ben._id, stalker._id);
+        await Message.create({ roomId: benStalker, userId: stalker._id, text: 'from someone who blocked ben' });
+        const benCleo = await directRoom(ben._id, cleo._id);
+        await Message.create([
+            { roomId: benCleo, userId: ben._id, text: 'hi cleo' },
+            { roomId: benCleo, userId: cleo._id, text: 'hi ben' },
+        ]);
+        const benEve = await directRoom(ben._id, eve._id);
+        await Message.create({ roomId: benEve, userId: eve._id, text: 'hi ben' });
+        const cleoFinn = await directRoom(cleo._id, finn._id);
+        await Message.create({ roomId: cleoFinn, userId: finn._id, text: 'hi cleo' });
+
+        for (const user of [ana, ben, cleo, dan]) {
+            await registerPushToken({ userId: user._id.toString(), token: `token-${user.username}`, platform: 'ios', badge: true });
+        }
+        await registerPushToken({ userId: eve._id.toString(), token: 'token-eve', platform: 'ios' });
+        await registerPushToken({ userId: finn._id.toString(), token: 'token-finn', platform: 'android', badge: true });
+
+        const recipients = [ana, ben, cleo, dan, eve, finn];
+        const sent = recordPushes();
+        await sendPushNotifications(pushTo(recipients.map((user) => user._id.toString())));
+
+        // ana: 2 Activity items + her DM with ben. ben: 1 + his DM with eve.
+        // cleo: 2 + her DMs with ana and finn. dan: 120, capped. eve's build
+        // didn't ask for a badge, and finn is on Android.
+        const badges = Object.fromEntries(recipients.map((user) => [
+            user.username,
+            pushFor(sent, `token-${user.username}`).apns?.payload?.aps.badge,
+        ]));
+        assert.deepEqual(badges, { ana: 3, ben: 2, cleo: 4, dan: 99, eve: undefined, finn: undefined });
+        assert.deepEqual(pushFor(sent, 'token-eve').apns, SOUND_ONLY_APNS);
+        assert.deepEqual(pushFor(sent, 'token-finn').apns, SOUND_ONLY_APNS);
+
+        for (const user of recipients) {
+            const token = `token-${user.username}`;
+            const alone = recordPushes();
+            await sendPushNotifications(pushTo([user._id.toString()]));
+            assert.deepEqual(pushFor(alone, token).apns, pushFor(sent, token).apns, `${user.username} pushed alone`);
+        }
+    });
+
+    it('counts the badges of a whole push in one set of queries', async () => {
+        const friend = await createTestUser({ username: 'friend' });
+        const users = await Promise.all(['one', 'two', 'three'].map((username) => createTestUser({ username })));
+        const city = await publicRoom(friend._id, ...users.map((user) => user._id));
+        for (const user of users) {
+            await replyNotification(user._id, friend._id, city);
+            const dm = await directRoom(user._id, friend._id);
+            await Message.create({ roomId: dm, userId: friend._id, text: 'unread' });
+            await registerPushToken({ userId: user._id.toString(), token: `token-${user.username}`, platform: 'ios', badge: true });
+        }
+        // Recipients with different block pairs still share the queries.
+        await UserBlock.create({ blockerUserId: users[0]._id, blockedUserId: users[1]._id });
+
+        recordPushes();
+        const forOne = await recordQueries(() => sendPushNotifications(pushTo([users[0]._id.toString()])));
+        const sent = recordPushes();
+        const forAll = await recordQueries(() => sendPushNotifications(pushTo(users.map((user) => user._id.toString()))));
+
+        // One of each lookup, the same for three recipients as for one.
+        assert.deepEqual(
+            forOne.filter((query) => !query.startsWith('pushtokens.')),
+            ['messages.aggregate', 'notifications.aggregate', 'rooms.find', 'userblocks.find', 'users.find']
+        );
+        assert.deepEqual(forAll, forOne);
+        assert.deepEqual(
+            users.map((user) => pushFor(sent, `token-${user.username}`).apns?.payload?.aps.badge),
+            [2, 2, 2]
+        );
+    });
+
     it('sends no badge to app builds that did not ask for it, or to Android', async () => {
         const olderIphone = await createTestUser({ username: 'older' });
         const android = await createTestUser({ username: 'android' });
@@ -371,7 +539,7 @@ describe('pushNotificationService', () => {
     it('still sends the push, without a badge, when the count fails', async (t) => {
         const me = await createTestUser({ username: 'myself' });
         await registerPushToken({ userId: me._id.toString(), token: 'token-me', platform: 'ios', badge: true });
-        t.mock.method(NotificationService, 'countUnread', async () => {
+        t.mock.method(NotificationService, 'countUnreadByRecipient', async () => {
             throw new Error('database unavailable');
         });
 

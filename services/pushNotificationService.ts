@@ -4,8 +4,8 @@ import { getMessaging, Aps, Message } from 'firebase-admin/messaging';
 import { config } from '../config/index.js';
 import { PushToken } from '../models/PushToken.js';
 import { NotificationService } from './NotificationService.js';
-import { countUnreadDirectRoomsForUser } from './roomService.js';
-import { getActiveBlockPairUserIds } from './blockService.js';
+import { countUnreadDirectRoomsByUser } from './roomService.js';
+import { getActiveBlockPairUserIdsByUser } from './blockService.js';
 import logger from '../utils/logger.js';
 
 export type PushPlatform = 'ios' | 'android';
@@ -69,10 +69,6 @@ const FCM_MAX_BATCH_SIZE = 500;
 
 // Badge counts stop at 99.
 const MAX_APP_BADGE = 99;
-
-// Each badge count takes a few small queries, so a push to a big room counts
-// this many recipients at a time.
-const BADGE_COUNT_CONCURRENCY = 10;
 
 let firebaseApp: App | null = null;
 let pushMessagingClient: PushMessagingClient | null = null;
@@ -193,42 +189,33 @@ function wantsAppBadge(token: StoredPushToken): boolean {
     return token.platform === 'ios' && token.badge === true;
 }
 
-// The iOS app-icon badge: unread Activity items plus DM chats with unread
-// messages, the same number the app shows. City rooms don't count.
-async function countAppBadge(userId: string): Promise<number> {
-    const blockedUserIds = await getActiveBlockPairUserIds(userId);
-    const [unreadActivity, unreadDirectRooms] = await Promise.all([
-        NotificationService.countUnread(userId, blockedUserIds),
-        countUnreadDirectRoomsForUser(userId, blockedUserIds),
-    ]);
-
-    return Math.min(unreadActivity + unreadDirectRooms, MAX_APP_BADGE);
-}
-
-// Badge counts for the given recipients, a few at a time. A recipient whose
-// count fails still gets the push, just without a badge.
+// The iOS app-icon badge for each given recipient: unread Activity items plus
+// DM chats with unread messages, the same number the app shows. City rooms
+// don't count. All recipients of a push are counted together, in one batch of
+// queries. If counting fails, the pushes still go out, just without a badge.
 async function countAppBadges(userIds: string[]): Promise<Map<string, number>> {
-    const badgeByUserId = new Map<string, number>();
-
-    for (let start = 0; start < userIds.length; start += BADGE_COUNT_CONCURRENCY) {
-        const batchUserIds = userIds.slice(start, start + BADGE_COUNT_CONCURRENCY);
-        const results = await Promise.allSettled(batchUserIds.map((userId) => countAppBadge(userId)));
-
-        results.forEach((result, index) => {
-            const userId = batchUserIds[index];
-            if (result.status === 'fulfilled') {
-                badgeByUserId.set(userId, result.value);
-                return;
-            }
-
-            logger.warn('push.badge_count.failed', {
-                userId,
-                error: result.reason instanceof Error ? result.reason.message : String(result.reason),
-            });
-        });
+    if (userIds.length === 0) {
+        return new Map();
     }
 
-    return badgeByUserId;
+    try {
+        const blockedUserIdsByUserId = await getActiveBlockPairUserIdsByUser(userIds);
+        const [unreadActivityByUserId, unreadDirectRoomsByUserId] = await Promise.all([
+            NotificationService.countUnreadByRecipient(blockedUserIdsByUserId),
+            countUnreadDirectRoomsByUser(blockedUserIdsByUserId),
+        ]);
+
+        return new Map(userIds.map((userId) => {
+            const unread = (unreadActivityByUserId.get(userId) ?? 0) + (unreadDirectRoomsByUserId.get(userId) ?? 0);
+            return [userId, Math.min(unread, MAX_APP_BADGE)];
+        }));
+    } catch (error) {
+        logger.warn('push.badge_count.failed', {
+            recipientCount: userIds.length,
+            error: error instanceof Error ? error.message : String(error),
+        });
+        return new Map();
+    }
 }
 
 // iOS plays a sound only when the push names one. Without a badge the icon's

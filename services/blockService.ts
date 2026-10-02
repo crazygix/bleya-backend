@@ -82,22 +82,33 @@ export async function unblockUser(currentUserId: string, targetUserId: string): 
 // neither party sees the other's messages, members entry, or notifications, so
 // every visibility surface excludes this set rather than just the blocker's own.
 export async function getActiveBlockPairUserIds(userId: string): Promise<string[]> {
-    const userObjectId = new mongoose.Types.ObjectId(userId);
+    const blockPairUserIdsByUserId = await getActiveBlockPairUserIdsByUser([userId]);
+    return blockPairUserIdsByUserId.get(userId) ?? [];
+}
 
+// The same for several users in one query, keyed by userId. Every given user
+// has an entry, empty when they have no block pairs.
+export async function getActiveBlockPairUserIdsByUser(userIds: string[]): Promise<Map<string, string[]>> {
+    const otherUserIdsByUserId = new Map(userIds.map((userId) => [userId, new Set<string>()]));
+    if (otherUserIdsByUserId.size === 0) {
+        return new Map();
+    }
+
+    const userObjectIds = [...otherUserIdsByUserId.keys()].map((userId) => new mongoose.Types.ObjectId(userId));
     const blocks = await UserBlock.find({
         isActive: true,
         $or: [
-            { blockerUserId: userObjectId },
-            { blockedUserId: userObjectId },
+            { blockerUserId: { $in: userObjectIds } },
+            { blockedUserId: { $in: userObjectIds } },
         ],
     }).select('blockerUserId blockedUserId').lean<LeanUserBlock[]>();
 
-    const otherUserIds = new Set<string>();
     for (const block of blocks) {
         const blockerId = block.blockerUserId.toString();
         const blockedId = block.blockedUserId.toString();
-        otherUserIds.add(blockerId === userId ? blockedId : blockerId);
+        otherUserIdsByUserId.get(blockerId)?.add(blockedId);
+        otherUserIdsByUserId.get(blockedId)?.add(blockerId);
     }
 
-    return [...otherUserIds];
+    return new Map([...otherUserIdsByUserId].map(([userId, otherUserIds]) => [userId, [...otherUserIds]]));
 }

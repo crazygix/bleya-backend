@@ -178,9 +178,18 @@ describe('Socket rooms', () => {
         socket.on('room_joined', (payload: { room: { id: string } }) => events.push(`room_joined ${payload.room.id}`));
         socket.on('error', (payload: SocketErrorPayload) => errors.push(payload));
 
-        // Success: room_joined first, then the acknowledgement.
-        const joined = await emitWithAck(socket, 'join_room', { roomId: open.id });
-        events.push(`ack ${JSON.stringify(joined)}`);
+        // Success: room_joined first, then the acknowledgement. Both are
+        // recorded as they arrive, so this is the order the server sent them.
+        await new Promise<void>((resolve, reject) => {
+            socket.timeout(3000).emit('join_room', { roomId: open.id }, (error: Error | null, joined: Ack) => {
+                if (error) {
+                    reject(error);
+                    return;
+                }
+                events.push(`ack ${JSON.stringify(joined)}`);
+                resolve();
+            });
+        });
         assert.deepEqual(events, [`room_joined ${open.id}`, 'ack {"ok":true}']);
 
         // A refusal goes to the acknowledgement only.
