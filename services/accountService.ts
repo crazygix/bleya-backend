@@ -9,6 +9,7 @@ import { UserIdentity } from '../models/UserIdentity.js';
 import { revokeRefreshToken } from './appleAuthService.js';
 import { AuthChallenge } from '../models/AuthChallenge.js';
 import { PushToken } from '../models/PushToken.js';
+import { AnalyticsEvent } from '../models/AnalyticsEvent.js';
 import { Report } from '../models/Report.js';
 import { deleteFromR2, extractKeyFromUrl } from './r2Service.js';
 import { disconnectUser } from '../server/socket.js';
@@ -295,6 +296,7 @@ export interface DeleteAccountResult {
         identities: number;
         authChallenges: number;
         pushTokens: number;
+        analyticsEvents: number;
     };
 }
 
@@ -391,6 +393,7 @@ export async function deleteUserAccount(userId: string): Promise<DeleteAccountRe
     const identitiesResult = await UserIdentity.deleteMany({ userId: userObjectId });
     const challengesResult = await AuthChallenge.deleteMany({ userId: userObjectId });
     const pushTokensResult = await PushToken.deleteMany({ userId: userObjectId });
+    const analyticsResult = await AnalyticsEvent.deleteMany({ userId: userObjectId });
 
     // External storage: profile image. deleteFromR2 logs and swallows its own errors.
     if (user.profileImageUrl) {
@@ -413,6 +416,7 @@ export async function deleteUserAccount(userId: string): Promise<DeleteAccountRe
         identities: identitiesResult.deletedCount ?? 0,
         authChallenges: challengesResult.deletedCount ?? 0,
         pushTokens: pushTokensResult.deletedCount ?? 0,
+        analyticsEvents: analyticsResult.deletedCount ?? 0,
     };
 
     logger.info('account.deleted', { userId, ...removed });

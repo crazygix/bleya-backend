@@ -373,6 +373,21 @@ export const config = {
     retentionDays: parseNumberEnv('AUDIT_LOG_RETENTION_DAYS', 730),
   },
 
+  // Product analytics (AnalyticsEvent): sign-in outcomes and the events the
+  // app reports. Each event is deleted automatically this long after it
+  // happened; dashboards only need recent history.
+  analytics: {
+    retentionDays: parseNumberEnv('ANALYTICS_RETENTION_DAYS', 90),
+  },
+
+  // Operator alerts (new reports, moderation actions) are sent by a Telegram
+  // bot to one chat (a private chat with the bot, or a group it was added to).
+  // Both are needed; empty = alerts off.
+  alerts: {
+    telegramBotToken: process.env.TELEGRAM_BOT_TOKEN?.trim() || '',
+    telegramChatId: process.env.TELEGRAM_CHAT_ID?.trim() || '',
+  },
+
   // Proactive content filtering at post time. blockedTerms extends the built-in
   // text blocklist (comma-separated CONTENT_BLOCKLIST). imageModeration plugs in
   // an image-safety provider; empty = disabled (uploads allowed).

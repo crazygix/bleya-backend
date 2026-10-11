@@ -54,6 +54,13 @@ export interface AuthSessionResult {
     hasPasskey: boolean;
 }
 
+// What a sign-in returns to the route: the session plus what analytics needs.
+export interface SignInResult extends AuthSessionResult {
+    refreshToken: string;
+    userId: string;
+    isNewUser: boolean;
+}
+
 export interface RefreshResult {
     accessToken: string;
     // Set when a new refresh token was issued, which the route sends as the
@@ -247,11 +254,13 @@ export function createAuthService(deps: AuthServiceDeps) {
         return user;
     }
 
-    async function resolveUserForVerifiedIdentity(identity: VerifiedIdentityProfile): Promise<AuthUserDocument> {
+    async function resolveUserForVerifiedIdentity(
+        identity: VerifiedIdentityProfile
+    ): Promise<{ user: AuthUserDocument; isNewUser: boolean }> {
         const existingIdentity = await userIdentityRepo.findByProviderIdentity(identity.provider, identity.providerUserId);
         if (existingIdentity) {
             await userIdentityRepo.updateLastUsed(existingIdentity._id!.toString());
-            return loadUser(existingIdentity.userId.toString());
+            return { user: await loadUser(existingIdentity.userId.toString()), isNewUser: false };
         }
 
         // A banned (or still-suspended) account that was deleted can't come back
@@ -271,7 +280,7 @@ export function createAuthService(deps: AuthServiceDeps) {
             isPrivateRelay: identity.isPrivateRelay,
         });
 
-        return user;
+        return { user, isNewUser: true };
     }
 
     async function verifyProviderIdentity(input: {
@@ -296,9 +305,9 @@ export function createAuthService(deps: AuthServiceDeps) {
         rawNonce?: unknown;
         platform?: unknown;
         authorizationCode?: unknown;
-    }): Promise<AuthSessionResult & { refreshToken: string }> {
+    }): Promise<SignInResult> {
         const identity = await verifyProviderIdentity(input);
-        const user = await resolveUserForVerifiedIdentity(identity);
+        const { user, isNewUser } = await resolveUserForVerifiedIdentity(identity);
 
         // Capture the Apple refresh token (if the client sent an authorization
         // code) so it can be revoked on account deletion. Best-effort no-op
@@ -310,7 +319,8 @@ export function createAuthService(deps: AuthServiceDeps) {
             identity.audience
         );
 
-        return issueSessionForUser(user);
+        const session = await issueSessionForUser(user);
+        return { ...session, userId: user._id.toString(), isNewUser };
     }
 
     async function getSecurityStatus(userId: string): Promise<AuthSecurityStatus> {
@@ -432,7 +442,7 @@ export function createAuthService(deps: AuthServiceDeps) {
         };
     }
 
-    async function finishPasskeyAuthentication(challengeId: unknown, response: unknown): Promise<AuthSessionResult & { refreshToken: string }> {
+    async function finishPasskeyAuthentication(challengeId: unknown, response: unknown): Promise<SignInResult> {
         const normalizedChallengeId = validateChallengeId(challengeId);
         const credentialResponse = validateAuthenticationResponse(response);
         const challengeDoc = await authChallengeRepo.findById(normalizedChallengeId);
@@ -471,7 +481,8 @@ export function createAuthService(deps: AuthServiceDeps) {
         await authChallengeRepo.deleteById(normalizedChallengeId);
 
         const user = await loadUser(authenticator.userId.toString());
-        return issueSessionForUser(user);
+        const session = await issueSessionForUser(user);
+        return { ...session, userId: user._id.toString(), isNewUser: false };
     }
 
     // Moderation normally clears the refresh session, but check anyway so no

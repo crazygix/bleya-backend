@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import { config } from '../config/index.js';
 import { ModerationAction, ModerationTargetType } from '../models/ModerationAction.js';
 import logger from '../utils/logger.js';
+import { sendAlert } from './alertService.js';
 import { retainUntilAfter } from '../utils/retention.js';
 
 export interface RecordActionInput {
@@ -38,6 +39,10 @@ export async function recordModerationAction(input: RecordActionInput): Promise<
             error: error instanceof Error ? error.message : 'unknown',
         });
     }
+
+    // Alerted even when the audit write failed: the action itself happened.
+    const reason = input.reason ? `\nReason: ${input.reason.slice(0, 300)}` : '';
+    sendAlert(`🔨 ${input.action} on ${input.targetType} ${input.targetId.toString()} by ${input.actorLabel}${reason}`);
 }
 
 export interface ListActionsQuery {

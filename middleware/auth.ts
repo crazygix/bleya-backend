@@ -41,6 +41,29 @@ export const authenticateUser = (
     }
 };
 
+// For endpoints that also serve signed-out callers: sets req.user when the
+// request carries a valid access token, and otherwise carries on without one
+// (an invalid or expired token is not an error here).
+export const identifyUserIfPresent = (
+    req: AuthRequest,
+    _res: Response,
+    next: NextFunction
+) => {
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+        try {
+            const decoded = jwt.verify(authHeader.split(' ')[1], config.jwtSecret, { algorithms: ['HS256'] });
+            const userId = typeof decoded === 'object' && decoded !== null ? (decoded as { userId?: unknown }).userId : undefined;
+            if (typeof userId === 'string' && /^[0-9a-fA-F]{24}$/.test(userId)) {
+                req.user = { userId };
+            }
+        } catch {
+            // Treated as signed out.
+        }
+    }
+    next();
+};
+
 export interface AdminRequest extends Request {
     admin?: {
         actor: string;

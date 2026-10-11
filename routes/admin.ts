@@ -16,6 +16,7 @@ import {
 } from '../services/moderationService.js';
 import { exportUserData, deleteUserAccount } from '../services/accountService.js';
 import { recordModerationAction } from '../services/auditService.js';
+import { getAnalyticsSummary } from '../services/analyticsService.js';
 import { validateObjectId } from '../utils/validation.js';
 
 const router = express.Router();
@@ -126,6 +127,15 @@ router.delete('/users/:id', asyncHandler(async (req: AdminRequest, res: express.
         reason: typeof req.body?.reason === 'string' ? req.body.reason.slice(0, 500) : '',
         metadata: { removed: result.removed },
     });
+    res.json(result);
+}));
+
+// --- Analytics ---------------------------------------------------------------
+
+// Counts for the last `days` days (default 7, max 90): sign-ins, new users,
+// messages per city, reports, moderation actions, and a daily series.
+router.get('/analytics', asyncHandler(async (req: AdminRequest, res: express.Response) => {
+    const result = await getAnalyticsSummary({ days: req.query.days });
     res.json(result);
 }));
 

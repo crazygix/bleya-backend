@@ -6,6 +6,7 @@ import { AppError, UnauthorizedError } from '../utils/errors.js';
 import { config } from '../config/index.js';
 import * as authService from '../services/authService.js';
 import { deactivatePushTokensForUser } from '../services/pushNotificationService.js';
+import { SignInMethod, trackSignInFailed, trackSignInSucceeded } from '../services/analyticsService.js';
 import { disconnectUser } from '../server/socket.js';
 import logger from '../utils/logger.js';
 
@@ -51,14 +52,35 @@ function buildAndroidAppleRedirect(body: Record<string, unknown>): string {
     return `intent://callback?${params.toString()}#Intent;package=${config.authProviders.androidPackageName};scheme=signinwithapple;end`;
 }
 
+// Records the outcome of a sign-in for analytics, then passes the result or
+// error through unchanged.
+async function trackSignIn(
+    method: SignInMethod,
+    platform: unknown,
+    signIn: () => Promise<authService.SignInResult>
+): Promise<authService.SignInResult> {
+    try {
+        const result = await signIn();
+        trackSignInSucceeded({ method, platform, userId: result.userId, isNewUser: result.isNewUser });
+        return result;
+    } catch (error) {
+        trackSignInFailed({ method, platform, error });
+        throw error;
+    }
+}
+
+function providerMethod(value: unknown): SignInMethod {
+    return value === 'google' || value === 'apple' ? value : 'unknown';
+}
+
 router.post('/provider-sign-in', providerSignInLimiter, asyncHandler(async (req: express.Request, res: express.Response) => {
-    const result = await authService.providerSignIn({
+    const result = await trackSignIn(providerMethod(req.body.provider), req.body.platform, () => authService.providerSignIn({
         provider: req.body.provider,
         idToken: req.body.idToken,
         rawNonce: req.body.rawNonce,
         platform: req.body.platform,
         authorizationCode: req.body.authorizationCode,
-    });
+    }));
 
     setRefreshCookie(res, result.refreshToken);
     res.json({
@@ -103,7 +125,9 @@ router.post('/passkeys/authentication/options', passkeyAuthenticationLimiter, as
 }));
 
 router.post('/passkeys/authentication/verify', passkeyAuthenticationLimiter, asyncHandler(async (req: express.Request, res: express.Response) => {
-    const result = await authService.finishPasskeyAuthentication(req.body.challengeId, req.body.response);
+    const result = await trackSignIn('passkey', req.body.platform, () => (
+        authService.finishPasskeyAuthentication(req.body.challengeId, req.body.response)
+    ));
     setRefreshCookie(res, result.refreshToken);
     res.json({
         token: result.token,
