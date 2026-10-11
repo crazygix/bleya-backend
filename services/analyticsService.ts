@@ -6,7 +6,7 @@ import { Room } from '../models/Room.js';
 import { Report } from '../models/Report.js';
 import { ModerationAction } from '../models/ModerationAction.js';
 import { config } from '../config/index.js';
-import { AppError, ErrorCode, ValidationError } from '../utils/errors.js';
+import { AppError, ErrorCode, ValidationError, errorDetails } from '../utils/errors.js';
 import { DAY_MS, retainUntilAfter } from '../utils/retention.js';
 import logger from '../utils/logger.js';
 
@@ -44,7 +44,7 @@ export function trackEvent(input: TrackEventInput): void {
     }).catch((error: unknown) => {
         logger.error('analytics.track_failed', {
             name: input.name,
-            error: error instanceof Error ? error.message : 'unknown',
+            error: errorDetails(error),
         });
     });
 }

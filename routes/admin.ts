@@ -18,9 +18,9 @@ import { exportUserData, deleteUserAccount } from '../services/accountService.js
 import { recordModerationAction } from '../services/auditService.js';
 import { getAnalyticsSummary } from '../services/analyticsService.js';
 import { isModerationAlertingConfigured, sendModerationAlert } from '../services/alertService.js';
-import { flushClientErrorDigest } from '../utils/clientErrorDigest.js';
 import logger from '../utils/logger.js';
 import { validateObjectId } from '../utils/validation.js';
+import { errorDetails } from '../utils/errors.js';
 
 const router = express.Router();
 
@@ -144,22 +144,20 @@ router.get('/analytics', asyncHandler(async (req: AdminRequest, res: express.Res
 
 // --- Alerts --------------------------------------------------------------------
 
-// Sends a test message to the moderation chat, raises a test error (which goes
-// to the errors chat like any real one), and sends the client-error digest
-// collected so far, so the Telegram setup can be checked end to end.
+// Sends a test message to the moderation chat and raises a test error (which
+// goes to the errors chat like any real one), so the Telegram setup can be
+// checked end to end.
 router.post('/alerts/test', asyncHandler(async (req: AdminRequest, res: express.Response) => {
     sendModerationAlert(`✅ Test alert from ${req.admin!.actor}: moderation alerts work.`);
     logger.error('admin.alerts.test', {
-        error: new Error('Test error from POST /v1/admin/alerts/test: error alerts work.'),
+        error: errorDetails(new Error('Test error from POST /v1/admin/alerts/test: error alerts work.')),
         actor: req.admin!.actor,
     });
-    await flushClientErrorDigest();
     res.json({
         moderationChat: isModerationAlertingConfigured(),
         errorsChat: config.alerts.sendErrors
             && config.alerts.telegramBotToken.length > 0
             && config.alerts.errorsChatId.length > 0,
-        clientErrorDigestMinutes: config.alerts.clientErrorDigestMinutes,
     });
 }));
 

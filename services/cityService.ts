@@ -5,6 +5,7 @@ import { uploadToR2 } from './r2Service.js';
 import { ICity } from '../models/City.js';
 import { Room } from '../models/Room.js';
 import logger from '../utils/logger.js';
+import { errorDetails } from '../utils/errors.js';
 
 // A city whose image lookup found nothing (or failed) is tried again after this.
 const IMAGE_RETRY_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
@@ -55,7 +56,7 @@ async function loadCityImageInBackground(city: ICity): Promise<void> {
         }
     } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
-        logger.error('city.image.load_failed', { cityId: city._id, error: error.message });
+        logger.error('city.image.load_failed', { cityId: city._id, error: errorDetails(error) });
     } finally {
         inFlightCityIds.delete(city._id);
     }
@@ -129,7 +130,7 @@ async function fetchAndStoreImage(city: ICity): Promise<void> {
         logger.info(`✓ Fetched image for ${city.name}`);
     } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
-        logger.error(`Failed to fetch image for ${city.name}`, { error: error.message, stack: error.stack });
+        logger.error(`Failed to fetch image for ${city.name}`, { error: errorDetails(error) });
     }
 }
 

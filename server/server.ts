@@ -8,6 +8,7 @@ import { createApp } from './app.js';
 import logger from '../utils/logger.js';
 import { flushErrorReports } from '../utils/errorReporter.js';
 import { config } from '../config/index.js';
+import { errorDetails } from '../utils/errors.js';
 
 export { createApp } from './app.js';
 
@@ -197,7 +198,7 @@ function registerShutdownHandlers(server: http.Server, io: SocketIOServer | null
         } catch (error) {
             logger.error('server.shutdown.failed', {
                 signal,
-                error: error instanceof Error ? error.message : String(error),
+                error: errorDetails(error),
             });
             process.exit(1);
         }

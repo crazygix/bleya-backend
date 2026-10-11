@@ -95,3 +95,13 @@ export class TooManyRequestsError extends AppError {
     super(ErrorCode.TOO_MANY_REQUESTS, message, 429);
   }
 }
+
+// A caught value as plain, loggable fields. Error objects serialize to {} in
+// the logs, and a message alone doesn't say where it failed; the stack does
+// (and goes into the Telegram error report).
+export function errorDetails(error: unknown): { name: string; message: string; stack?: string } {
+  if (error instanceof Error) {
+    return { name: error.name, message: error.message, stack: error.stack };
+  }
+  return { name: 'NonError', message: String(error) };
+}

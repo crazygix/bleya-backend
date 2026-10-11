@@ -4,6 +4,7 @@ import {
 } from './pushNotificationService.js';
 import type { CreateMessageResult } from './messageService.js';
 import logger from '../utils/logger.js';
+import { errorDetails } from '../utils/errors.js';
 
 export interface MessagePresenceResolver {
     isUserActiveInRoom(userId: string, roomId: string): boolean;
@@ -99,7 +100,7 @@ export function createMessageDeliveryService(deps: MessageDeliveryServiceDeps) {
             });
         } catch (error) {
             logger.error('message_delivery.reply_notification_create.failed', {
-                error: error instanceof Error ? error.message : String(error),
+                error: errorDetails(error),
                 messageId: message.messageData.id,
                 roomId: message.roomId,
             });

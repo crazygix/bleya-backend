@@ -1,6 +1,7 @@
 import { S3Client, PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { config } from '../config/index.js';
 import logger from '../utils/logger.js';
+import { errorDetails } from '../utils/errors.js';
 
 let r2Client: S3Client | null = null;
 
@@ -80,7 +81,7 @@ export async function uploadToR2(
     } catch (error) {
         logger.error('r2.upload.failed', {
             key,
-            error: error instanceof Error ? error.message : String(error),
+            error: errorDetails(error),
         });
         throw new Error('Failed to upload file to R2');
     }

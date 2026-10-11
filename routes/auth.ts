@@ -2,7 +2,7 @@ import express from 'express';
 import { authenticateUser, AuthRequest } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { createRateLimiter } from '../middleware/rateLimiter.js';
-import { AppError, UnauthorizedError } from '../utils/errors.js';
+import { AppError, UnauthorizedError, errorDetails } from '../utils/errors.js';
 import { config } from '../config/index.js';
 import * as authService from '../services/authService.js';
 import { deactivatePushTokensForUser } from '../services/pushNotificationService.js';
@@ -196,7 +196,7 @@ router.post('/logout', asyncHandler(async (req: express.Request, res: express.Re
             } catch (error) {
                 logger.error('auth.logout.push_deactivation_failed', {
                     userId,
-                    error: error instanceof Error ? error.message : String(error),
+                    error: errorDetails(error),
                 });
             }
         }

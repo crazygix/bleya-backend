@@ -4,6 +4,7 @@ import { ModerationAction, ModerationTargetType } from '../models/ModerationActi
 import logger from '../utils/logger.js';
 import { sendModerationAlert } from './alertService.js';
 import { retainUntilAfter } from '../utils/retention.js';
+import { errorDetails } from '../utils/errors.js';
 
 export interface RecordActionInput {
     actorLabel: string;
@@ -36,7 +37,7 @@ export async function recordModerationAction(input: RecordActionInput): Promise<
         logger.error('audit.record_failed', {
             action: input.action,
             targetType: input.targetType,
-            error: error instanceof Error ? error.message : 'unknown',
+            error: errorDetails(error),
         });
     }
 

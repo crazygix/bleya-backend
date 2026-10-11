@@ -16,7 +16,7 @@ import {
 } from '../services/roomService.js';
 import { sendPushNotifications } from '../services/pushNotificationService.js';
 import { buildSocketCors } from '../utils/cors.js';
-import { ErrorCode, AppError, ValidationError } from '../utils/errors.js';
+import { ErrorCode, AppError, ValidationError, errorDetails } from '../utils/errors.js';
 import { validateObjectId } from '../utils/validation.js';
 import { describeEnforcementForUser, type EnforcementState } from '../utils/enforcement.js';
 import { config } from '../config/index.js';
@@ -398,7 +398,7 @@ export function setupSocketIO(server: HTTPServer) {
             // out) during a database blip.
             logger.error('socket.handshake.enforcement_lookup_failed', {
                 userId,
-                error: error instanceof Error ? error.message : String(error),
+                error: errorDetails(error),
             });
             return next(new Error(SERVER_UNAVAILABLE_ERROR));
         }
@@ -514,7 +514,7 @@ export function setupSocketIO(server: HTTPServer) {
                 if (!(error instanceof AppError || error instanceof RoomJoinSupersededError)) {
                     logger.error('socket.join_room.failed', {
                         userId: user.userId,
-                        error: error instanceof Error ? error.message : String(error),
+                        error: errorDetails(error),
                     });
                 }
 
@@ -586,7 +586,7 @@ export function setupSocketIO(server: HTTPServer) {
                     logger.error('socket.open_thread.failed', {
                         userId: user.userId,
                         roomId: user.roomId,
-                        error: error instanceof Error ? error.message : String(error),
+                        error: errorDetails(error),
                     });
                 }
 
@@ -708,7 +708,7 @@ export function setupSocketIO(server: HTTPServer) {
                         userId: user.userId,
                         roomId: result.roomId,
                         messageId: result.messageData.id,
-                        error: error instanceof Error ? error.message : String(error),
+                        error: errorDetails(error),
                     });
                 }
 
@@ -725,7 +725,7 @@ export function setupSocketIO(server: HTTPServer) {
                 logger.error('socket.send_message.failed', {
                     userId: user.userId,
                     roomId,
-                    error: error instanceof Error ? error.message : String(error),
+                    error: errorDetails(error),
                 });
                 fail(ErrorCode.INTERNAL_ERROR, "We couldn't send that message. Please try again.");
             }

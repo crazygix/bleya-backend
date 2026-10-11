@@ -9,8 +9,7 @@ Three pieces, all free:
    Atlas Charts on the collections for interactive charts.
 3. **Telegram moderation chat**: every new report, user block and moderator
    action (ban, suspension, message removal, report status change…).
-4. **Telegram errors chat**: every server error as a copyable debug report,
-   plus an hourly digest of client errors (4xx).
+4. **Telegram errors chat**: every server error as a copyable debug report.
 
 ## What is recorded
 
@@ -112,8 +111,8 @@ the dashboard.
    `TELEGRAM_MODERATION_CHAT_ID` and `TELEGRAM_ERRORS_CHAT_ID`.
 4. Set them on Railway, redeploy, then check everything end to end:
    `curl -X POST https://api.bleyachat.com/v1/admin/alerts/test -H "x-admin-key: $ADMIN_API_KEY"`
-   You should get a ✅ in the moderation group and a 🔥 test error (plus a
-   client-error digest, if there were any) in the errors group.
+   You should get a ✅ in the moderation group and a 🔥 test error in the
+   errors group.
 
 Moderation alerts carry the report reason, ids and the moderator's reason,
 never message text or other user content. A block alert also says how many
@@ -141,25 +140,7 @@ The code is in `utils/errorReporter.ts`, called from `utils/logger.ts`.
 
 ## Client errors (4xx)
 
-A 4xx is the server rejecting a request: an expired token, invalid input, a
-rate limit, a banned user. One at a time they're normal, so they are not sent
-individually. Every `CLIENT_ERROR_DIGEST_MINUTES` (default 60) the errors chat
-gets a digest grouped by route, status and error code, with a sample message,
-a sample `requestId` and the clients (user agents) that hit it. Nothing is
-sent when there were none.
-
-How to read it:
-
-- **Fix the app** when a route fails that the app should never get wrong:
-  `400 VALIDATION_ERROR` / `INVALID_INPUT` on a request the app builds itself,
-  `404` on an id the app just got from the API, `401` repeating for one route
-  (token not refreshed before the call), `404 (no matching route)` with an app
-  user agent (wrong URL).
-- **Fix the backend** when the app is right and the rule is wrong: a
-  validation that rejects legitimate input, a rate limit real users hit
-  (`429`), an error message users can't act on.
-- **Ignore**: `(no matching route)` from scanners (`/wp-login.php`…), the odd
-  expired token, and `403 USER_BLOCKED` (a banned user trying).
-
-The code is in `utils/clientErrorDigest.ts`, fed by
-`middleware/httpRequestLogger.ts`.
+Not sent to Telegram. A 4xx is the server rejecting a request (expired token,
+invalid input, rate limit, banned user); they are mostly expected, so they
+are only logged (as `request.error` warnings and `http.request.finish` with the
+status) and can be searched in the Railway logs.

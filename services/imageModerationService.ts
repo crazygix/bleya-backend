@@ -1,5 +1,6 @@
 import { config } from '../config/index.js';
 import logger from '../utils/logger.js';
+import { errorDetails } from '../utils/errors.js';
 
 // Image-safety check for uploaded images (profile pictures today; reusable for
 // any upload): the image half of Apple 1.2's "filter objectionable material".
@@ -77,7 +78,7 @@ export async function moderateImage(buffer: Buffer, mimeType: string): Promise<I
     } catch (error) {
         // Fail-open: don't block uploads on a moderation-provider outage; log it.
         logger.error('image_moderation.error', {
-            error: error instanceof Error ? error.message : 'unknown',
+            error: errorDetails(error),
         });
         return { allowed: true };
     }

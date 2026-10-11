@@ -1,5 +1,6 @@
 import { IImageService, CityImageQuery, ImageSearchResult } from './IImageService.js';
 import logger from '../../utils/logger.js';
+import { errorDetails } from '../../utils/errors.js';
 
 interface PexelsPhoto {
     id: number;
@@ -125,7 +126,7 @@ export class PexelsImageService implements IImageService {
             };
         } catch (error) {
             const err = error instanceof Error ? error : new Error(String(error));
-            logger.error('Pexels API request failed', { error: err.message, stack: err.stack });
+            logger.error('Pexels API request failed', { error: errorDetails(err) });
             return null;
         }
     }

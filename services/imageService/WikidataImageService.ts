@@ -1,6 +1,7 @@
 import { IImageService, ImageSearchResult, CityImageQuery } from './IImageService.js';
 import { config } from '../../config/index.js';
 import logger from '../../utils/logger.js';
+import { errorDetails } from '../../utils/errors.js';
 
 interface WikidataBinding {
     city?: { value: string };
@@ -77,7 +78,7 @@ export class WikidataImageService implements IImageService {
             };
         } catch (error) {
             const err = error instanceof Error ? error : new Error(String(error));
-            logger.error('Wikidata image search failed', { error: err.message, stack: err.stack });
+            logger.error('Wikidata image search failed', { error: errorDetails(err) });
             return null;
         }
     }

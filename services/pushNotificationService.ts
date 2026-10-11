@@ -7,6 +7,7 @@ import { NotificationService } from './NotificationService.js';
 import { countUnreadDirectRoomsByUser } from './roomService.js';
 import { getActiveBlockPairUserIdsByUser } from './blockService.js';
 import logger from '../utils/logger.js';
+import { errorDetails } from '../utils/errors.js';
 
 export type PushPlatform = 'ios' | 'android';
 export type PushNotificationType = 'message' | 'reply';
@@ -457,7 +458,7 @@ export async function sendPushNotifications(input: SendPushNotificationsInput): 
             logger.error('push.send.batch_failed', {
                 type: input.type,
                 batchSize: batchMessages.length,
-                error: error instanceof Error ? error.message : String(error),
+                error: errorDetails(error),
             });
         }
     }

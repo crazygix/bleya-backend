@@ -2,6 +2,7 @@ import jwt from 'jsonwebtoken';
 import { config } from '../config/index.js';
 import { UserIdentity } from '../models/UserIdentity.js';
 import logger from '../utils/logger.js';
+import { errorDetails } from '../utils/errors.js';
 
 // Sign in with Apple server-to-server: exchange the authorization code captured
 // at sign-in for a refresh token, and revoke that token when the account is
@@ -62,7 +63,7 @@ async function postForm(url: string, params: Record<string, string>): Promise<Re
             body: new URLSearchParams(params),
         });
     } catch (error) {
-        logger.error('apple.request_error', { url, error: error instanceof Error ? error.message : 'unknown' });
+        logger.error('apple.request_error', { url, error: errorDetails(error) });
         return null;
     }
 }
@@ -120,7 +121,7 @@ export async function captureAppleRefreshToken(
             );
         }
     } catch (error) {
-        logger.error('apple.capture_failed', { error: error instanceof Error ? error.message : 'unknown' });
+        logger.error('apple.capture_failed', { error: errorDetails(error) });
     }
 }
 
