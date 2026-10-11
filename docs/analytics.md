@@ -9,6 +9,7 @@ Three pieces, all free:
    Atlas Charts on the collections for interactive charts.
 3. **Telegram alerts** for every new report and every moderation action (ban,
    suspension, message removal, report status change…).
+4. **Telegram error alerts** for every error the server logs in production.
 
 ## What is recorded
 
@@ -110,3 +111,24 @@ the dashboard.
 
 Alerts carry the report reason, the target's id and the moderator's reason,
 never message text or other user content.
+
+## Production errors in Telegram
+
+Every `logger.error` (unhandled request errors and 500s, socket failures, push
+failures, unhandled rejections, crashes…) is also sent by the same bot, with
+the request (`GET /v1/rooms/:id`), the error, the top stack frames and the
+logged fields such as `requestId` and `userId`; search the Railway logs for
+the `requestId` for the full picture.
+
+- Chat: `TELEGRAM_ERRORS_CHAT_ID`, or `TELEGRAM_CHAT_ID` when unset. A separate
+  group for errors keeps them apart from report and ban alerts.
+- On by default when `NODE_ENV=production`; set `ERROR_ALERTS_ENABLED=true` or
+  `false` to override (e.g. to try it from a local run).
+- No floods: an error that keeps happening (same event, error and route, ids
+  and numbers ignored) is sent once, then summarized every 10 minutes as
+  "happened N more times" while it continues. At most 15 messages a minute;
+  extra ones are counted and mentioned in the next message.
+- 4xx client errors are logged as warnings, so they never alert.
+- On a crash the server waits up to 3 s for the alert to go out before exiting.
+
+The code is in `utils/errorReporter.ts`, called from `utils/logger.ts`.

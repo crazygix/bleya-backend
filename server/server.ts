@@ -6,6 +6,7 @@ import type { Server as SocketIOServer } from 'socket.io';
 import { setupSocketIO } from './socket.js';
 import { createApp } from './app.js';
 import logger from '../utils/logger.js';
+import { flushErrorReports } from '../utils/errorReporter.js';
 import { config } from '../config/index.js';
 
 export { createApp } from './app.js';
@@ -28,6 +29,7 @@ let shutdownHandlersRegistered = false;
 // (railway.toml). Stay under that so in-flight requests finish and clients get
 // a clean socket close instead of a dropped connection.
 const SHUTDOWN_TIMEOUT_MS = 10_000;
+const FATAL_ALERT_FLUSH_MS = 3_000;
 
 function handleFatalError(error: Error, eventName: string, exitOnFatalError: boolean): void {
     logger.error(eventName, {
@@ -39,7 +41,8 @@ function handleFatalError(error: Error, eventName: string, exitOnFatalError: boo
     });
 
     if (exitOnFatalError) {
-        process.exit(1);
+        // Give the error alert a moment to reach Telegram before exiting.
+        void flushErrorReports(FATAL_ALERT_FLUSH_MS).finally(() => process.exit(1));
     }
 }
 

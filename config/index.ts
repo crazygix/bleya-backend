@@ -386,6 +386,11 @@ export const config = {
   alerts: {
     telegramBotToken: process.env.TELEGRAM_BOT_TOKEN?.trim() || '',
     telegramChatId: process.env.TELEGRAM_CHAT_ID?.trim() || '',
+    // Every logger.error is also sent to this chat (defaults to the alerts
+    // chat), so production errors can be fixed as they happen. On by default
+    // in production only.
+    errorsChatId: process.env.TELEGRAM_ERRORS_CHAT_ID?.trim() || process.env.TELEGRAM_CHAT_ID?.trim() || '',
+    sendErrors: parseBooleanEnv('ERROR_ALERTS_ENABLED', isProduction),
   },
 
   // Proactive content filtering at post time. blockedTerms extends the built-in
