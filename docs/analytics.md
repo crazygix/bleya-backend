@@ -7,9 +7,10 @@ Three pieces, all free:
    reach the backend).
 2. **Dashboards**: `GET /v1/admin/analytics` for a quick summary, and MongoDB
    Atlas Charts on the collections for interactive charts.
-3. **Telegram alerts** for every new report and every moderation action (ban,
-   suspension, message removal, report status change…).
-4. **Telegram error alerts** for every error the server logs in production.
+3. **Telegram moderation chat**: every new report, user block and moderator
+   action (ban, suspension, message removal, report status change…).
+4. **Telegram errors chat**: every server error as a copyable debug report,
+   plus an hourly digest of client errors (4xx).
 
 ## What is recorded
 
@@ -100,35 +101,65 @@ In Atlas: **Charts → Add dashboard → Add chart**, pick the cluster and the
 Dashboards refresh on their own and support filters (date range, city) on
 the dashboard.
 
-## Telegram alerts
+## Telegram setup
 
 1. In Telegram, talk to **@BotFather** → `/newbot` → copy the token into
    `TELEGRAM_BOT_TOKEN`.
-2. Send any message to your new bot (or add it to a group and post there).
-3. Open `https://api.telegram.org/bot<token>/getUpdates` and copy
-   `result[].message.chat.id` into `TELEGRAM_CHAT_ID` (group ids are negative).
-4. Set both on Railway and redeploy.
+2. Create two groups, e.g. "Bleya moderation" and "Bleya errors", and add the
+   bot to both. Post any message in each.
+3. Open `https://api.telegram.org/bot<token>/getUpdates` and copy each
+   group's `message.chat.id` (negative numbers) into
+   `TELEGRAM_MODERATION_CHAT_ID` and `TELEGRAM_ERRORS_CHAT_ID`.
+4. Set them on Railway, redeploy, then check everything end to end:
+   `curl -X POST https://api.bleyachat.com/v1/admin/alerts/test -H "x-admin-key: $ADMIN_API_KEY"`
+   You should get a ✅ in the moderation group and a 🔥 test error (plus a
+   client-error digest, if there were any) in the errors group.
 
-Alerts carry the report reason, the target's id and the moderator's reason,
-never message text or other user content.
+Moderation alerts carry the report reason, ids and the moderator's reason,
+never message text or other user content. A block alert also says how many
+users block that person now.
 
-## Production errors in Telegram
+## Production errors
 
 Every `logger.error` (unhandled request errors and 500s, socket failures, push
-failures, unhandled rejections, crashes…) is also sent by the same bot, with
-the request (`GET /v1/rooms/:id`), the error, the top stack frames and the
-logged fields such as `requestId` and `userId`; search the Railway logs for
-the `requestId` for the full picture.
+failures, unhandled rejections, crashes…) is sent to the errors chat as a
+`<pre>` block: tap it to copy, and paste it to Claude to debug. It holds the
+event, time, environment, the commit that was running
+(`RAILWAY_GIT_COMMIT_SHA`), the request, `requestId` / `userId`, the error and
+code, the other logged fields, and the stack trace with `.ts` source lines (the
+server runs with `--enable-source-maps`). The `requestId` finds the full
+request in the Railway logs.
 
-- Chat: `TELEGRAM_ERRORS_CHAT_ID`, or `TELEGRAM_CHAT_ID` when unset. A separate
-  group for errors keeps them apart from report and ban alerts.
-- On by default when `NODE_ENV=production`; set `ERROR_ALERTS_ENABLED=true` or
-  `false` to override (e.g. to try it from a local run).
+- On by default (`ERROR_ALERTS_ENABLED=false` turns it off).
 - No floods: an error that keeps happening (same event, error and route, ids
   and numbers ignored) is sent once, then summarized every 10 minutes as
   "happened N more times" while it continues. At most 15 messages a minute;
   extra ones are counted and mentioned in the next message.
-- 4xx client errors are logged as warnings, so they never alert.
 - On a crash the server waits up to 3 s for the alert to go out before exiting.
 
 The code is in `utils/errorReporter.ts`, called from `utils/logger.ts`.
+
+## Client errors (4xx)
+
+A 4xx is the server rejecting a request: an expired token, invalid input, a
+rate limit, a banned user. One at a time they're normal, so they are not sent
+individually. Every `CLIENT_ERROR_DIGEST_MINUTES` (default 60) the errors chat
+gets a digest grouped by route, status and error code, with a sample message,
+a sample `requestId` and the clients (user agents) that hit it. Nothing is
+sent when there were none.
+
+How to read it:
+
+- **Fix the app** when a route fails that the app should never get wrong:
+  `400 VALIDATION_ERROR` / `INVALID_INPUT` on a request the app builds itself,
+  `404` on an id the app just got from the API, `401` repeating for one route
+  (token not refreshed before the call), `404 (no matching route)` with an app
+  user agent (wrong URL).
+- **Fix the backend** when the app is right and the rule is wrong: a
+  validation that rejects legitimate input, a rate limit real users hit
+  (`429`), an error message users can't act on.
+- **Ignore**: `(no matching route)` from scanners (`/wp-login.php`…), the odd
+  expired token, and `403 USER_BLOCKED` (a banned user trying).
+
+The code is in `utils/clientErrorDigest.ts`, fed by
+`middleware/httpRequestLogger.ts`.

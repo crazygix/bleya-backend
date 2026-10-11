@@ -5,6 +5,7 @@ import { UserBlock } from '../models/UserBlock.js';
 import { AppError, NotFoundError, ValidationError, ErrorCode } from '../utils/errors.js';
 import { validateObjectId } from '../utils/validation.js';
 import logger from '../utils/logger.js';
+import { alertUserBlocked } from './alertService.js';
 import type { LeanRoom, LeanUser, LeanUserBlock } from '../types/lean.js';
 
 export interface DirectBlockState {
@@ -257,6 +258,9 @@ export async function blockDirectUser(
         roomId: room._id.toString(),
         alreadyBlocked,
     });
+    if (!alreadyBlocked) {
+        alertUserBlocked({ blockerUserId: currentUserId, blockedUserId: otherUserId, via: 'direct chat' });
+    }
 
     return {
         message: alreadyBlocked ? 'User already blocked.' : 'User blocked.',

@@ -10,7 +10,7 @@
     "node": ">=22.0.0 <23.0.0"
   },
   "scripts": {
-    "start": "node dist/server/server.js",
+    "start": "node --enable-source-maps dist/server/server.js",
     "dev": "nodemon",
     "test": "npm run build && NODE_ENV=test node --test --test-concurrency=1 dist/tests/**/*.test.js",
     "test:isolated": "npm run build && node scripts/run-tests-isolated.mjs",

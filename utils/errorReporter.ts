@@ -1,5 +1,5 @@
 import { config } from '../config/index.js';
-import { sendTelegramMessage } from './telegram.js';
+import { escapeTelegramHtml, sendTelegramMessage, telegramPreBlock } from './telegram.js';
 
 // Sends every error the server logs (logger.error) to the Telegram errors chat,
 // so production errors can be fixed as they happen. An error that repeats is
@@ -18,7 +18,7 @@ const FLUSH_INTERVAL_MS = 60 * 1000;
 const RATE_WINDOW_MS = 60 * 1000;
 const MAX_SENDS_PER_MINUTE = 15;
 const MAX_TRACKED_ERRORS = 500;
-const MAX_STACK_FRAMES = 6;
+const MAX_STACK_FRAMES = 12;
 const MAX_FIELD_LENGTH = 300;
 
 interface TrackedError {
@@ -29,9 +29,20 @@ interface TrackedError {
 
 export interface ErrorReporterOptions {
     enabled: () => boolean;
-    send: (text: string) => Promise<boolean>;
+    // Receives Telegram HTML.
+    send: (html: string) => Promise<boolean>;
     now?: () => number;
     environment?: string;
+    commit?: string;
+    // Stack paths are shown relative to this (the app root).
+    rootDir?: string;
+}
+
+export interface ReportMeta {
+    environment: string;
+    commit: string;
+    rootDir: string;
+    time: Date;
 }
 
 function describeError(value: unknown): { name: string; message: string; stack?: string } | null {
@@ -77,29 +88,55 @@ function stringifyField(value: unknown): string {
     return text.length > MAX_FIELD_LENGTH ? `${text.slice(0, MAX_FIELD_LENGTH)}…` : text;
 }
 
-export function formatErrorReport(event: string, context: ErrorContext | undefined, environment: string): string {
-    const lines = [`🔥 ${event} · ${environment}`];
+// App frames, with paths relative to the app root. Node internals and
+// dependencies are dropped unless nothing else is left.
+export function cleanStack(stack: string | undefined, rootDir: string): string[] {
+    const frames = (stack ?? '')
+        .split('\n')
+        .map((frame) => frame.trim())
+        .filter((frame) => frame.startsWith('at '))
+        .map((frame) => frame.replace(/file:\/\//g, '').split(`${rootDir}/`).join(''));
+    const appFrames = frames.filter((frame) => !frame.includes('node:internal') && !frame.includes('node_modules'));
+    return (appFrames.length > 0 ? appFrames : frames).slice(0, MAX_STACK_FRAMES);
+}
+
+/**
+ * The error as a self-contained debug report (plain text): everything needed
+ * to find and fix it from the message alone, including the commit that was
+ * running and the source stack (the server runs with source maps).
+ */
+export function formatErrorReport(event: string, context: ErrorContext | undefined, meta: ReportMeta): string {
     const error = describeError(context?.error);
+    const errorFields = context?.error && typeof context.error === 'object' ? context.error as Record<string, unknown> : {};
+    const lines = [
+        'Bleya backend error',
+        `event: ${event}`,
+        `time: ${meta.time.toISOString()}`,
+        `env: ${meta.environment}`,
+        `commit: ${meta.commit}`,
+    ];
 
     if (typeof context?.method === 'string' && typeof context?.path === 'string') {
-        lines.push(`${context.method} ${context.path}`);
+        lines.push(`request: ${context.method} ${context.path}`);
     }
     if (error) {
-        lines.push(`${error.name}: ${error.message}`);
-        const frames = (error.stack ?? '')
-            .split('\n')
-            .slice(1)
-            .map((frame) => frame.trim())
-            .filter((frame) => frame.startsWith('at '))
-            .slice(0, MAX_STACK_FRAMES);
-        lines.push(...frames);
+        lines.push(`error: ${error.name}: ${error.message}`);
+    }
+    if (errorFields.code !== undefined || errorFields.statusCode !== undefined) {
+        lines.push(`code: ${stringifyField(errorFields.code)} (status ${stringifyField(errorFields.statusCode)})`);
+    }
+    if (errorFields.details !== undefined) {
+        lines.push(`details: ${stringifyField(errorFields.details)}`);
     }
 
     const details = Object.entries(context ?? {})
         .filter(([key, value]) => !['error', 'method', 'path'].includes(key) && value !== undefined)
         .map(([key, value]) => `${key}: ${stringifyField(value)}`);
-    if (details.length > 0) {
-        lines.push('', ...details);
+    lines.push(...details);
+
+    const frames = cleanStack(error?.stack, meta.rootDir);
+    if (frames.length > 0) {
+        lines.push('stack:', ...frames.map((frame) => `  ${frame}`));
     }
 
     return lines.join('\n');
@@ -108,6 +145,8 @@ export function formatErrorReport(event: string, context: ErrorContext | undefin
 export function createErrorReporter(options: ErrorReporterOptions) {
     const now = options.now ?? Date.now;
     const environment = options.environment ?? config.nodeEnv;
+    const commit = options.commit ?? 'unknown';
+    const rootDir = options.rootDir ?? process.cwd();
     const tracked = new Map<string, TrackedError>();
     const sentAt: number[] = [];
     const pending = new Set<Promise<unknown>>();
@@ -122,7 +161,7 @@ export function createErrorReporter(options: ErrorReporterOptions) {
         return sentAt.length < MAX_SENDS_PER_MINUTE;
     }
 
-    function deliver(text: string): void {
+    function deliver(headerHtml: string, text: string): void {
         if (!underRateLimit()) {
             droppedByRateLimit += 1;
             return;
@@ -135,7 +174,7 @@ export function createErrorReporter(options: ErrorReporterOptions) {
             droppedByRateLimit = 0;
         }
 
-        const sending = options.send(body).then((ok) => {
+        const sending = options.send(telegramPreBlock(headerHtml, body)).then((ok) => {
             if (!ok) {
                 onSendFailed?.();
             }
@@ -170,7 +209,10 @@ export function createErrorReporter(options: ErrorReporterOptions) {
             suppressed: 0,
             summary: error ? `${event}: ${error.name}: ${error.message}` : event,
         });
-        deliver(formatErrorReport(event, context, environment));
+        deliver(
+            `🔥 <b>${escapeTelegramHtml(event)}</b> · ${escapeTelegramHtml(environment)}`,
+            formatErrorReport(event, context, { environment, commit, rootDir, time: new Date(now()) })
+        );
     }
 
     // Sends the "happened N more times" summaries that are due, and forgets
@@ -185,7 +227,10 @@ export function createErrorReporter(options: ErrorReporterOptions) {
                 continue;
             }
             const minutes = Math.round((now() - entry.lastSentAt) / 60_000);
-            deliver(`🔁 ${entry.summary}\nhappened ${entry.suppressed} more time(s) in the last ${minutes} min · ${environment}`);
+            deliver(
+                `🔁 <b>Still happening</b> · ${escapeTelegramHtml(environment)}`,
+                `${entry.summary}\nhappened ${entry.suppressed} more time(s) in the last ${minutes} min (commit ${commit})`
+            );
             entry.lastSentAt = now();
             entry.suppressed = 0;
         }
@@ -212,8 +257,9 @@ const defaultReporter = createErrorReporter({
         && !config.isTest
         && config.alerts.telegramBotToken.length > 0
         && config.alerts.errorsChatId.length > 0,
-    send: async (text) => (await sendTelegramMessage(config.alerts.errorsChatId, text)) === 200,
+    send: async (html) => (await sendTelegramMessage(config.alerts.errorsChatId, html, { html: true })) === 200,
     environment: process.env.RAILWAY_ENVIRONMENT_NAME || config.nodeEnv,
+    commit: process.env.RAILWAY_GIT_COMMIT_SHA || 'unknown',
 });
 
 setInterval(() => defaultReporter.flushRepeats(), FLUSH_INTERVAL_MS).unref();

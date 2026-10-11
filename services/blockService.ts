@@ -4,6 +4,7 @@ import { User } from '../models/User.js';
 import { ValidationError, NotFoundError, ErrorCode } from '../utils/errors.js';
 import { validateObjectId } from '../utils/validation.js';
 import logger from '../utils/logger.js';
+import { alertUserBlocked } from './alertService.js';
 import type { LeanUserBlock } from '../types/lean.js';
 
 // User-level block (not tied to a DM room) so a user can be blocked from a public
@@ -50,6 +51,9 @@ export async function blockUser(currentUserId: string, targetUserId: string): Pr
         blockedUserId: targetId.toString(),
         alreadyBlocked,
     });
+    if (!alreadyBlocked) {
+        alertUserBlocked({ blockerUserId: currentUserId, blockedUserId: targetId.toString(), via: 'profile' });
+    }
 
     return { blocked: true, alreadyBlocked };
 }

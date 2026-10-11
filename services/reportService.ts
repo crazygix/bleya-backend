@@ -7,7 +7,7 @@ import { validateObjectId } from '../utils/validation.js';
 import { retainUntilAfter } from '../utils/retention.js';
 import { sanitizePlainText } from '../utils/sanitize.js';
 import { recordModerationAction } from './auditService.js';
-import { sendAlert } from './alertService.js';
+import { sendModerationAlert } from './alertService.js';
 import { config } from '../config/index.js';
 import logger from '../utils/logger.js';
 
@@ -119,7 +119,7 @@ export async function createReport(
     });
 
     const target = messageId ? 'a message' : reportedUserId ? 'a user' : 'a room';
-    sendAlert(`🚩 New report: ${input.reason} on ${target}\nReport ${report._id.toString()}`);
+    sendModerationAlert(`🚩 New report: ${input.reason} on ${target}\nReport ${report._id.toString()}`);
 
     return {
         id: report._id.toString(),

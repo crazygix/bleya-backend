@@ -380,17 +380,19 @@ export const config = {
     retentionDays: parseNumberEnv('ANALYTICS_RETENTION_DAYS', 90),
   },
 
-  // Operator alerts (new reports, moderation actions) are sent by a Telegram
-  // bot to one chat (a private chat with the bot, or a group it was added to).
-  // Both are needed; empty = alerts off.
+  // Telegram alerts from one bot to two chats (a private chat with the bot or
+  // a group it was added to): moderation (new reports, user blocks, moderator
+  // actions) and errors (every logger.error, plus a periodic digest of client
+  // errors). A chat left empty turns its alerts off.
   alerts: {
     telegramBotToken: process.env.TELEGRAM_BOT_TOKEN?.trim() || '',
-    telegramChatId: process.env.TELEGRAM_CHAT_ID?.trim() || '',
-    // Every logger.error is also sent to this chat (defaults to the alerts
-    // chat), so production errors can be fixed as they happen. On by default
-    // in production only.
-    errorsChatId: process.env.TELEGRAM_ERRORS_CHAT_ID?.trim() || process.env.TELEGRAM_CHAT_ID?.trim() || '',
-    sendErrors: parseBooleanEnv('ERROR_ALERTS_ENABLED', isProduction),
+    moderationChatId: process.env.TELEGRAM_MODERATION_CHAT_ID?.trim() || '',
+    errorsChatId: process.env.TELEGRAM_ERRORS_CHAT_ID?.trim() || '',
+    sendErrors: parseBooleanEnv('ERROR_ALERTS_ENABLED', !isTest),
+    // How often the 4xx digest is sent; 0 turns it off.
+    clientErrorDigestMinutes: process.env.CLIENT_ERROR_DIGEST_MINUTES?.trim() === '0'
+      ? 0
+      : parseNumberEnv('CLIENT_ERROR_DIGEST_MINUTES', 60),
   },
 
   // Proactive content filtering at post time. blockedTerms extends the built-in

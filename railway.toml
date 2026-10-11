@@ -3,8 +3,9 @@ builder = "nixpacks"
 
 [deploy]
 # Run node directly (not through npm) so SIGTERM reaches the server and it can
-# shut down gracefully (server/server.ts).
-startCommand = "node dist/server/server.js"
+# shut down gracefully (server/server.ts). Source maps make error stacks (and
+# the Telegram error alerts) point at the .ts source lines.
+startCommand = "node --enable-source-maps dist/server/server.js"
 healthcheckPath = "/health"
 healthcheckTimeout = 300
 restartPolicyType = "on_failure"

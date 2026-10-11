@@ -2,6 +2,7 @@ import { NextFunction, Request, Response } from 'express';
 import crypto from 'crypto';
 import { HttpLogBodyMode, config } from '../config/index.js';
 import logger from '../utils/logger.js';
+import { recordClientError } from '../utils/clientErrorDigest.js';
 import { getLoggablePath, getPathname } from '../utils/requestPath.js';
 import { getClientIp } from '../utils/trustedProxy.js';
 
@@ -283,6 +284,20 @@ export function httpRequestLogger(req: Request, res: Response, next: NextFunctio
       }
 
       logger.info('http.request.finish', baseContext);
+
+      if (statusCode >= 400 && statusCode < 500) {
+        const apiError = (responseBody as { error?: { code?: unknown; message?: unknown } } | undefined)?.error;
+        recordClientError({
+          method: req.method,
+          path: requestPath,
+          routeMatched: Boolean(req.route),
+          statusCode,
+          code: typeof apiError?.code === 'string' ? apiError.code : undefined,
+          message: typeof apiError?.message === 'string' ? apiError.message : undefined,
+          requestId,
+          userAgent: req.get('user-agent'),
+        });
+      }
     } catch (error) {
       try {
         logger.warn('http.request.log_failed', {

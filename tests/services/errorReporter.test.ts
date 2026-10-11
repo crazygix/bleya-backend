@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { createErrorReporter, errorFingerprint, formatErrorReport } from '../../utils/errorReporter.js';
+import { cleanStack, createErrorReporter, errorFingerprint, formatErrorReport } from '../../utils/errorReporter.js';
 
 function setup(options: { enabled?: boolean; sendResult?: boolean } = {}) {
     let clock = 1_000_000;
@@ -33,18 +33,60 @@ function requestError(message: string, path = '/v1/rooms/0123456789abcdef0123456
 }
 
 describe('errorReporter', () => {
-    it('formats the event, request, error, top stack frames and other fields', () => {
-        const text = formatErrorReport('request.error', { ...requestError('boom'), userId: 'u1' }, 'production');
+    it('formats a self-contained debug report with app stack frames only', () => {
+        const text = formatErrorReport(
+            'request.error',
+            {
+                method: 'GET',
+                path: '/v1/rooms/0123456789abcdef01234567',
+                requestId: 'req-1',
+                userId: 'u1',
+                error: {
+                    name: 'TypeError',
+                    message: 'boom',
+                    code: 'INTERNAL_ERROR',
+                    statusCode: 500,
+                    stack: [
+                        'TypeError: boom',
+                        '    at getRoom (/app/services/roomService.ts:120:5)',
+                        '    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)',
+                        '    at Query.exec (/app/node_modules/mongoose/lib/query.js:1:1)',
+                        '    at file:///app/routes/rooms.ts:40:9',
+                    ].join('\n'),
+                },
+            },
+            { environment: 'production', commit: 'abc123', rootDir: '/app', time: new Date(Date.UTC(2026, 9, 11, 12, 0, 0)) }
+        );
         assert.equal(text, [
-            '🔥 request.error · production',
-            'GET /v1/rooms/0123456789abcdef01234567',
-            'TypeError: boom',
-            'at handler (dist/routes/rooms.js:10:5)',
-            'at next (x.js:1:1)',
-            '',
+            'Bleya backend error',
+            'event: request.error',
+            'time: 2026-10-11T12:00:00.000Z',
+            'env: production',
+            'commit: abc123',
+            'request: GET /v1/rooms/0123456789abcdef01234567',
+            'error: TypeError: boom',
+            'code: INTERNAL_ERROR (status 500)',
             'requestId: req-1',
             'userId: u1',
+            'stack:',
+            '  at getRoom (services/roomService.ts:120:5)',
+            '  at routes/rooms.ts:40:9',
         ].join('\n'));
+    });
+
+    it('keeps dependency frames when there are no app frames', () => {
+        assert.deepEqual(
+            cleanStack('Error: x\n    at a (/app/node_modules/x.js:1:1)', '/app'),
+            ['at a (node_modules/x.js:1:1)']
+        );
+    });
+
+    it('sends the report as a copyable <pre> block with HTML escaped', () => {
+        const { reporter, sent } = setup();
+        reporter.report('request.error', { error: { name: 'Error', message: 'a < b & c' } });
+        assert.match(sent[0], /^🔥 <b>request\.error<\/b> · production\n<pre>Bleya backend error\n/);
+        assert.match(sent[0], /error: Error: a &lt; b &amp; c/);
+        assert.match(sent[0], /<\/pre>$/);
     });
 
     it('groups occurrences that differ only in ids and numbers', () => {
@@ -71,7 +113,7 @@ describe('errorReporter', () => {
         advance(10 * 60 * 1000);
         reporter.flushRepeats();
         assert.equal(sent.length, 2);
-        assert.match(sent[1], /^🔁 request\.error: TypeError: boom\nhappened 2 more time\(s\) in the last 10 min/);
+        assert.match(sent[1], /^🔁 <b>Still happening<\/b> · production\n<pre>request\.error: TypeError: boom\nhappened 2 more time\(s\) in the last 10 min/);
 
         advance(10 * 60 * 1000);
         reporter.flushRepeats();
