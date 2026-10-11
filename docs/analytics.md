@@ -1,6 +1,8 @@
 # Analytics and alerts
 
-All of it lives in the backend and the database; nothing goes to a third party.
+Events, activity records and daily totals stay in our database. Telegram receives
+alerts (moderation and error reports, which can contain account IDs) and the
+daily digest (counts only); app crashes go to Firebase Crashlytics.
 
 1. **Events** (`analyticsevents`): sign-in outcomes, content the filter
    rejected, and what the app reports (app opened, sign-ins that never reach
@@ -23,7 +25,9 @@ All of it lives in the backend and the database; nothing goes to a third party.
 | `X-Install-Id` | random UUID | counting sign-in attempts per person (see below) |
 
 The install id is created on first launch and kept in a file in the app's own
-storage, so uninstalling removes it; it isn't tied to the device or the account.
+storage, so uninstalling removes it (on iOS a restored device backup brings it
+back). It isn't derived from the device, but it is stored on events next to the
+account ID while the user is signed in, and it stays the same after signing out.
 The socket handshake carries the same headers. Builds from before the headers
 count as `unknown`. Code: `utils/clientContext.ts`.
 
@@ -32,7 +36,7 @@ count as `unknown`. Code: `utils/clientContext.ts`.
 | Event | Source | Props |
 | --- | --- | --- |
 | `sign_in.succeeded` | server (`routes/auth.ts`) | `method` (google/apple/passkey), `isNewUser` |
-| `sign_in.failed` | server (`routes/auth.ts`) | `method`, `reason` (API error code), `detail` (server message) |
+| `sign_in.failed` | server (`routes/auth.ts`) | `method`, `reason` (API error code), `detail` (server message; for `USER_BLOCKED` it includes the suspension end date and the moderator's reason) |
 | `moderation.content_blocked` | server | `surface` (message/username/bio/profile_photo), `kind` (text/image) |
 | `client.app.opened` | app | – |
 | `client.sign_in.started` | app | `provider` |
@@ -139,7 +143,9 @@ report.
    stats" if the digest should go elsewhere), add the bot and post any message
    in each. In each group turn on **Auto-delete messages → 1 month** (group
    settings): the privacy policy says internal alerts are deleted after one
-   month.
+   month. Auto-delete isn't retroactive: in groups that already exist, delete
+   the messages older than a month (or clear the history) once after turning
+   it on.
 3. Open `https://api.telegram.org/bot<token>/getUpdates` and copy each group's
    `message.chat.id` (negative numbers) into `TELEGRAM_MODERATION_CHAT_ID`,
    `TELEGRAM_ERRORS_CHAT_ID` and, optionally, `TELEGRAM_DIGEST_CHAT_ID`.
@@ -200,7 +206,9 @@ status) and can be searched in the Railway logs.
 Events and activity records are tied to the account when the user is signed in,
 deleted `ANALYTICS_RETENTION_DAYS` (default 90) after they happen, deleted with
 the account, and included in the data export (`usage` in
-`GET /v1/users/me/export`). The daily totals hold no personal data. The App
+`GET /v1/users/me/export`). Events from before sign-in carry only the install
+ID: they are not exported or deleted with the account and expire after
+`ANALYTICS_RETENTION_DAYS`. The daily totals hold no IDs. The App
 Store and Google Play privacy answers (bleya-mobile
 `docs/store-privacy-answers.md`), the iOS privacy manifest and the privacy
 policy (bleyachat.com/privacy) describe this collection, the install id and
