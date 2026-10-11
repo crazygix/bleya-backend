@@ -10,6 +10,7 @@ import { revokeRefreshToken } from './appleAuthService.js';
 import { AuthChallenge } from '../models/AuthChallenge.js';
 import { PushToken } from '../models/PushToken.js';
 import { AnalyticsEvent } from '../models/AnalyticsEvent.js';
+import { UserActivity } from '../models/UserActivity.js';
 import { Report } from '../models/Report.js';
 import { deleteFromR2, extractKeyFromUrl } from './r2Service.js';
 import { disconnectUser } from '../server/socket.js';
@@ -104,6 +105,20 @@ export interface UserDataExport {
         read: boolean;
         createdAt: string | null;
     }>;
+    // Usage records kept for analytics, each deleted ANALYTICS_RETENTION_DAYS
+    // after it happened: the days the account was used (UTC dates) and the
+    // analytics events tied to it (sign-ins, content the filter rejected, app
+    // events).
+    usage: {
+        activeDays: Array<{ day: string; platform: string | null; appVersion: string | null }>;
+        events: Array<{
+            name: string;
+            platform: string | null;
+            appVersion: string | null;
+            details: Record<string, unknown>;
+            occurredAt: string | null;
+        }>;
+    };
 }
 
 export async function exportUserData(userId: string): Promise<UserDataExport> {
@@ -124,7 +139,19 @@ export async function exportUserData(userId: string): Promise<UserDataExport> {
 
     const joinedRoomIds = user.joinedRooms || [];
 
-    const [identities, passkeys, pushTokens, rooms, messages, blocks, blockedByOthers, notifications, reportsFiled] = await Promise.all([
+    const [
+        identities,
+        passkeys,
+        pushTokens,
+        rooms,
+        messages,
+        blocks,
+        blockedByOthers,
+        notifications,
+        reportsFiled,
+        activeDays,
+        analyticsEvents,
+    ] = await Promise.all([
         UserIdentity.find({ userId: userObjectId })
             .select('provider email emailVerified isPrivateRelay linkedAt lastUsedAt')
             .lean<Array<{
@@ -185,6 +212,20 @@ export async function exportUserData(userId: string): Promise<UserDataExport> {
                 details?: string;
                 status?: string;
                 createdAt?: Date;
+            }>>(),
+        UserActivity.find({ userId: userObjectId })
+            .select('day platform appVersion')
+            .sort({ day: 1 })
+            .lean<Array<{ day: Date; platform?: string; appVersion?: string }>>(),
+        AnalyticsEvent.find({ userId: userObjectId })
+            .select('name platform appVersion props occurredAt')
+            .sort({ occurredAt: 1 })
+            .lean<Array<{
+                name: string;
+                platform?: string;
+                appVersion?: string;
+                props?: Record<string, unknown>;
+                occurredAt?: Date;
             }>>(),
     ]);
 
@@ -279,6 +320,20 @@ export async function exportUserData(userId: string): Promise<UserDataExport> {
             read: notification.read ?? false,
             createdAt: notification.createdAt ? notification.createdAt.toISOString() : null,
         })),
+        usage: {
+            activeDays: activeDays.map((activity) => ({
+                day: activity.day.toISOString().slice(0, 10),
+                platform: activity.platform || null,
+                appVersion: activity.appVersion || null,
+            })),
+            events: analyticsEvents.map((event) => ({
+                name: event.name,
+                platform: event.platform || null,
+                appVersion: event.appVersion || null,
+                details: event.props || {},
+                occurredAt: event.occurredAt ? event.occurredAt.toISOString() : null,
+            })),
+        },
     };
 }
 
@@ -297,6 +352,7 @@ export interface DeleteAccountResult {
         authChallenges: number;
         pushTokens: number;
         analyticsEvents: number;
+        activityDays: number;
     };
 }
 
@@ -394,6 +450,7 @@ export async function deleteUserAccount(userId: string): Promise<DeleteAccountRe
     const challengesResult = await AuthChallenge.deleteMany({ userId: userObjectId });
     const pushTokensResult = await PushToken.deleteMany({ userId: userObjectId });
     const analyticsResult = await AnalyticsEvent.deleteMany({ userId: userObjectId });
+    const activityResult = await UserActivity.deleteMany({ userId: userObjectId });
 
     // External storage: profile image. deleteFromR2 logs and swallows its own errors.
     if (user.profileImageUrl) {
@@ -417,6 +474,7 @@ export async function deleteUserAccount(userId: string): Promise<DeleteAccountRe
         authChallenges: challengesResult.deletedCount ?? 0,
         pushTokens: pushTokensResult.deletedCount ?? 0,
         analyticsEvents: analyticsResult.deletedCount ?? 0,
+        activityDays: activityResult.deletedCount ?? 0,
     };
 
     logger.info('account.deleted', { userId, ...removed });

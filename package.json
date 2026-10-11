@@ -24,6 +24,7 @@
     "migrate:reencode-profile-images": "npm run build && node dist/migrations/007_reencode_profile_images.js",
     "migrate:report-retention": "npm run build && node dist/migrations/008_report_retention.js",
     "migrate:audit-log-retention": "npm run build && node dist/migrations/009_audit_log_retention.js",
+    "migrate:analytics-indexes": "npm run build && node dist/migrations/010_analytics_indexes.js",
     "db": "npm run build && node dist/scripts/db.js",
     "diagnose-push": "npm run build && node dist/scripts/diagnose-push.js",
     "postinstall": "npm run build"

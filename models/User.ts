@@ -145,4 +145,7 @@ userSchema.index({ hiddenDirectRooms: 1 });
 // Index for efficient per-room read pointer lookups
 userSchema.index({ 'roomReadPointers.roomId': 1 });
 
+// Sign-ups in a period: the analytics summary and the daily rollup.
+userSchema.index({ createdAt: 1 });
+
 export const User = mongoose.model('User', userSchema); 

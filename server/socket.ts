@@ -21,6 +21,8 @@ import { validateObjectId } from '../utils/validation.js';
 import { describeEnforcementForUser, type EnforcementState } from '../utils/enforcement.js';
 import { config } from '../config/index.js';
 import logger from '../utils/logger.js';
+import { readClientContext } from '../utils/clientContext.js';
+import { recordUserActivity } from '../services/activityService.js';
 import type { LeanMessage } from '../types/lean.js';
 import type { FormattedMessage } from '../utils/message.js';
 
@@ -425,6 +427,7 @@ export function setupSocketIO(server: HTTPServer) {
         setSocketPresence(user.userId, socket.id, {});
 
         logger.info('socket.connected', { userId: user.userId, socketId: socket.id });
+        recordUserActivity(user.userId, readClientContext(socket.handshake.headers));
 
         const userRoom = `user:${user.userId}`;
         socket.join(userRoom);

@@ -54,4 +54,7 @@ userBlockSchema.index({ blockedUserId: 1, isActive: 1 });
 // Efficient pair checks for DM send validation.
 userBlockSchema.index({ blockerUserId: 1, blockedUserId: 1 });
 
+// Blocks in a period: the analytics summary and the daily rollup.
+userBlockSchema.index({ blockedAt: 1 });
+
 export const UserBlock = mongoose.model('UserBlock', userBlockSchema);

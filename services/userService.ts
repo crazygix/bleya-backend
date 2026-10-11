@@ -6,6 +6,7 @@ import { NotFoundError, ValidationError, ErrorCode } from '../utils/errors.js';
 import { sanitizePlainText } from '../utils/sanitize.js';
 import { isValidUsername, normalizeUsernameInput } from '../utils/username.js';
 import { assertCleanText } from '../utils/contentFilter.js';
+import { trackContentBlocked } from './analyticsService.js';
 import logger from '../utils/logger.js';
 import { type UserRepository, userRepository as defaultUserRepo } from '../repositories/userRepository.js';
 
@@ -137,7 +138,7 @@ export function createUserService(deps: UserServiceDeps) {
                 throw new ValidationError('Keep it simple: 3-30 characters, just letters, numbers, and underscores.');
             }
 
-            assertCleanText(normalizedUsername, 'username');
+            assertCleanText(normalizedUsername, 'username', () => trackContentBlocked({ surface: 'username', userId }));
 
             // Same rules as POST /auth/set-username: a username is chosen once.
             const currentUsername = (user.username || '').trim();
@@ -166,7 +167,7 @@ export function createUserService(deps: UserServiceDeps) {
                 collapseWhitespace: false,
             });
 
-            assertCleanText(sanitizedBio, 'bio');
+            assertCleanText(sanitizedBio, 'bio', () => trackContentBlocked({ surface: 'bio', userId }));
 
             if (user.bio !== sanitizedBio) {
                 user.bio = sanitizedBio;
@@ -195,6 +196,7 @@ export function createUserService(deps: UserServiceDeps) {
 
         const imageCheck = await moderateImage(imageBuffer, 'image/webp');
         if (!imageCheck.allowed) {
+            trackContentBlocked({ surface: 'profile_photo', userId });
             throw new ValidationError(imageCheck.reason || "That image isn't allowed.");
         }
 

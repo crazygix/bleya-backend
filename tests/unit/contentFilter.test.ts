@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { config } from '../../config/index.js';
-import { containsBlockedTerm, resetContentFilterCacheForTests } from '../../utils/contentFilter.js';
+import { assertCleanText, containsBlockedTerm, resetContentFilterCacheForTests } from '../../utils/contentFilter.js';
 
 // Everyday text that the old space-stripping matcher rejected, plus words that
 // merely contain a blocked term.
@@ -66,4 +66,13 @@ test('custom terms match whole words, with optional wildcards and phrases', () =
         config.contentFilter.blockedTerms = original;
         resetContentFilterCacheForTests();
     }
+});
+
+test('assertCleanText reports a rejection before throwing, and only then', () => {
+    let blocked = 0;
+    assertCleanText('hello there', 'message', () => { blocked += 1; });
+    assert.equal(blocked, 0);
+
+    assert.throws(() => assertCleanText('fuck off', 'message', () => { blocked += 1; }), /That message isn't allowed/);
+    assert.equal(blocked, 1);
 });

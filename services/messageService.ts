@@ -6,6 +6,7 @@ import { AppError, ValidationError, ErrorCode } from '../utils/errors.js';
 import { validateObjectId } from '../utils/validation.js';
 import { describeEnforcementForUser } from '../utils/enforcement.js';
 import { getActiveBlockPairUserIds } from './blockService.js';
+import { trackContentBlocked } from './analyticsService.js';
 import { User } from '../models/User.js';
 import type { LeanRoom, LeanMessage, LeanUserBlock } from '../types/lean.js';
 import type { FormattedMessage } from '../utils/message.js';
@@ -117,7 +118,7 @@ export function createMessageService(deps: MessageServiceDeps) {
             throw new ValidationError('Message cannot be empty');
         }
 
-        assertCleanText(sanitizedText, 'message');
+        assertCleanText(sanitizedText, 'message', () => trackContentBlocked({ surface: 'message', userId: input.userId }));
 
         let parentObjectId: mongoose.Types.ObjectId | null = null;
         if (input.parentMessageId) {

@@ -1,6 +1,7 @@
+import type { Request } from 'express';
 import rateLimit, { ipKeyGenerator, type Options, type RateLimitRequestHandler } from 'express-rate-limit';
 import { config } from '../config/index.js';
-import { TooManyRequestsError } from '../utils/errors.js';
+import { TooManyRequestsError, errorDetails } from '../utils/errors.js';
 import logger from '../utils/logger.js';
 import { getLoggablePath } from '../utils/requestPath.js';
 import { getClientIp } from '../utils/trustedProxy.js';
@@ -13,6 +14,9 @@ export interface RateLimiterOptions {
     windowMs?: number;
     // Count only failed requests (status >= 400) — e.g. wrong admin keys.
     skipSuccessfulRequests?: boolean;
+    // Called for each request the limiter rejects, e.g. to record a sign-in
+    // that never reached its route. Must not throw or block.
+    onLimited?: (req: Request) => void;
 }
 
 export function createRateLimiter({
@@ -20,6 +24,7 @@ export function createRateLimiter({
     limit,
     windowMs = FIFTEEN_MINUTES_MS,
     skipSuccessfulRequests = false,
+    onLimited,
 }: RateLimiterOptions): RateLimitRequestHandler {
     const handler: Options['handler'] = (req, _res, next) => {
         logger.warn('rate_limit.exceeded', {
@@ -28,6 +33,13 @@ export function createRateLimiter({
             path: getLoggablePath(req),
             method: req.method,
         });
+        if (onLimited) {
+            try {
+                onLimited(req);
+            } catch (error) {
+                logger.warn('rate_limit.on_limited_failed', { limiter: name, error: errorDetails(error) });
+            }
+        }
         next(new TooManyRequestsError('Too many requests. Please try again later.'));
     };
 

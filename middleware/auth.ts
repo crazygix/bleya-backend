@@ -3,6 +3,8 @@ import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import { UnauthorizedError, AppError, ErrorCode } from '../utils/errors.js';
 import { config } from '../config/index.js';
+import { recordUserActivity } from '../services/activityService.js';
+import { readClientContext } from '../utils/clientContext.js';
 
 export interface AuthRequest extends Request {
     user?: {
@@ -32,6 +34,8 @@ export const authenticateUser = (
                 userId: claims.userId,
                 tokenIssuedAt: typeof claims.iat === 'number' ? claims.iat : undefined,
             };
+            // Daily active users: one write per user per day at most.
+            recordUserActivity(claims.userId, readClientContext(req.headers));
             next();
         } catch {
             return next(new UnauthorizedError('Invalid or expired token'));

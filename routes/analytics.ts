@@ -4,6 +4,7 @@ import { asyncHandler } from '../middleware/errorHandler.js';
 import { createRateLimiter } from '../middleware/rateLimiter.js';
 import { config } from '../config/index.js';
 import { recordClientEvents } from '../services/analyticsService.js';
+import { readClientContext } from '../utils/clientContext.js';
 
 const router = express.Router();
 
@@ -19,7 +20,7 @@ router.post('/events', clientEventsLimiter, identifyUserIfPresent, asyncHandler(
         platform: req.body.platform,
         appVersion: req.body.appVersion,
         events: req.body.events,
-    });
+    }, readClientContext(req.headers));
     res.status(202).json(result);
 }));
 

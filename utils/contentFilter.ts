@@ -159,8 +159,10 @@ export function containsBlockedTerm(text: string): boolean {
     ));
 }
 
-export function assertCleanText(text: string, label = 'content'): void {
+// `onBlocked` runs before the rejection is thrown, e.g. to count it.
+export function assertCleanText(text: string, label = 'content', onBlocked?: () => void): void {
     if (containsBlockedTerm(text)) {
+        onBlocked?.();
         throw new ValidationError(`That ${label} isn't allowed. Please remove inappropriate language.`);
     }
 }

@@ -139,6 +139,21 @@ function parseBooleanEnv(name: string, defaultValue: boolean): boolean {
   throw new Error(`${name} must be a boolean (true/false)`);
 }
 
+// A whole hour of the day, 0-23.
+function parseHourEnv(name: string, defaultValue: number): number {
+  const raw = process.env[name];
+  if (!raw || raw.trim().length === 0) {
+    return defaultValue;
+  }
+
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 23) {
+    throw new Error(`${name} must be a whole hour from 0 to 23`);
+  }
+
+  return parsed;
+}
+
 function parseList(value: string | undefined): string[] {
   if (!value) {
     return [];
@@ -373,22 +388,37 @@ export const config = {
     retentionDays: parseNumberEnv('AUDIT_LOG_RETENTION_DAYS', 730),
   },
 
-  // Product analytics (AnalyticsEvent): sign-in outcomes and the events the
-  // app reports. Each event is deleted automatically this long after it
-  // happened; dashboards only need recent history.
+  // Product analytics: events (AnalyticsEvent: sign-in outcomes, content the
+  // filter rejected, what the app reports) and daily activity (UserActivity)
+  // are deleted automatically retentionDays after they happened. The daily
+  // totals (DailyStat) hold no personal data and are kept.
   analytics: {
+    // Keep it at least 31 so monthly active users and 30-day returns can be
+    // counted.
     retentionDays: parseNumberEnv('ANALYTICS_RETENTION_DAYS', 90),
+    // How far back the daily rollup (DailyStat) fills in days that have no
+    // totals yet: the first deploy, or after downtime. Analytics events and
+    // activity older than retentionDays are gone and count as zero.
+    backfillDays: parseNumberEnv('ANALYTICS_BACKFILL_DAYS', 90),
   },
 
   // Telegram alerts from one bot to two chats (a private chat with the bot or
-  // a group it was added to): moderation (new reports, user blocks, moderator
-  // actions) and errors (every logger.error; client errors, 4xx, are logged
-  // as warnings and never sent). A chat left empty turns its alerts off.
+  // a group it was added to): moderation (new reports, users many people
+  // block, moderator actions) and errors (every logger.error; client errors,
+  // 4xx, are logged as warnings and never sent). A chat left empty turns its
+  // alerts off.
   alerts: {
     telegramBotToken: process.env.TELEGRAM_BOT_TOKEN?.trim() || '',
     moderationChatId: process.env.TELEGRAM_MODERATION_CHAT_ID?.trim() || '',
     errorsChatId: process.env.TELEGRAM_ERRORS_CHAT_ID?.trim() || '',
     sendErrors: parseBooleanEnv('ERROR_ALERTS_ENABLED', !isTest),
+    // A daily digest of yesterday's numbers (UTC day), sent at digestHourUtc
+    // to TELEGRAM_DIGEST_CHAT_ID, or to the moderation chat when that is unset.
+    sendDigest: parseBooleanEnv('DAILY_DIGEST_ENABLED', !isTest),
+    digestChatId: process.env.TELEGRAM_DIGEST_CHAT_ID?.trim()
+      || process.env.TELEGRAM_MODERATION_CHAT_ID?.trim()
+      || '',
+    digestHourUtc: parseHourEnv('DAILY_DIGEST_HOUR_UTC', 6),
   },
 
   // Proactive content filtering at post time. blockedTerms extends the built-in

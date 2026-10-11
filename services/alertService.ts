@@ -10,9 +10,10 @@ export function isModerationAlertingConfigured(): boolean {
 
 /**
  * Sends a short alert to the moderation chat (TELEGRAM_MODERATION_CHAT_ID): new
- * reports, user blocks, moderator actions. Fire-and-forget: it never throws and
- * never delays the request that triggered it. Alerts must not carry message
- * text or other user content, only what a moderator needs to go and look.
+ * reports, users many people block, moderator actions. Fire-and-forget: it
+ * never throws and never delays the request that triggered it. Alerts must not
+ * carry message text or other user content, only what a moderator needs to go
+ * and look.
  */
 export function sendModerationAlert(text: string): void {
     if (!isModerationAlertingConfigured() || config.isTest) {
@@ -26,8 +27,17 @@ export function sendModerationAlert(text: string): void {
     });
 }
 
-// A user blocked another. Includes how many people block that user now, which
-// is what makes a problem account stand out.
+// How many users must block someone before the moderation chat hears about
+// it, and again at each further mark (then every 100). A single block is
+// routine; several people blocking the same account is what makes it stand out.
+const BLOCK_ALERT_THRESHOLDS = [3, 5, 10, 25, 50, 100];
+
+export function isBlockAlertThreshold(blockedBy: number): boolean {
+    return BLOCK_ALERT_THRESHOLDS.includes(blockedBy) || (blockedBy > 100 && blockedBy % 100 === 0);
+}
+
+// A user blocked another. Alerted only when the number of people blocking
+// that user reaches one of BLOCK_ALERT_THRESHOLDS.
 export function alertUserBlocked(input: { blockerUserId: string; blockedUserId: string; via: 'profile' | 'direct chat' }): void {
     if (!isModerationAlertingConfigured() || config.isTest) {
         return;
@@ -35,9 +45,12 @@ export function alertUserBlocked(input: { blockerUserId: string; blockedUserId: 
 
     void UserBlock.countDocuments({ blockedUserId: new mongoose.Types.ObjectId(input.blockedUserId), isActive: true })
         .then((blockedBy) => {
+            if (!isBlockAlertThreshold(blockedBy)) {
+                return;
+            }
             sendModerationAlert(
-                `🚫 User ${input.blockedUserId} was blocked (${input.via}) by ${input.blockerUserId}\n`
-                + `Now blocked by ${blockedBy} user(s)`
+                `🚫 User ${input.blockedUserId} is now blocked by ${blockedBy} users\n`
+                + `Latest: blocked (${input.via}) by ${input.blockerUserId}`
             );
         })
         .catch((error: unknown) => {

@@ -36,6 +36,7 @@ import {
     passkeyService as defaultPasskeyService,
 } from './passkeyService.js';
 import { isIdentityBanned } from './bannedIdentityService.js';
+import { trackContentBlocked } from './analyticsService.js';
 import type {
     RegistrationResponseJSON,
     AuthenticationResponseJSON,
@@ -579,7 +580,7 @@ export function createAuthService(deps: AuthServiceDeps) {
             throw new ValidationError('Keep it simple: 3-30 characters, just letters, numbers, and underscores.');
         }
 
-        assertCleanText(normalizedUsername, 'username');
+        assertCleanText(normalizedUsername, 'username', () => trackContentBlocked({ surface: 'username', userId }));
 
         const user = await loadUser(userId);
 

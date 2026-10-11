@@ -6,17 +6,44 @@ import { AppError, UnauthorizedError, errorDetails } from '../utils/errors.js';
 import { config } from '../config/index.js';
 import * as authService from '../services/authService.js';
 import { deactivatePushTokensForUser } from '../services/pushNotificationService.js';
-import { SignInMethod, trackSignInFailed, trackSignInSucceeded } from '../services/analyticsService.js';
+import {
+    SignInMethod,
+    trackSignInFailed,
+    trackSignInRateLimited,
+    trackSignInSucceeded,
+} from '../services/analyticsService.js';
+import { recordUserActivity } from '../services/activityService.js';
 import { disconnectUser } from '../server/socket.js';
 import logger from '../utils/logger.js';
+import { ClientContext, normalizePlatform, readClientContext } from '../utils/clientContext.js';
+import { getClientIp } from '../utils/trustedProxy.js';
 
 const router = express.Router();
 
 const PROD = config.isProduction;
 
+// The app identifies itself in headers (X-App-Platform, X-App-Version,
+// X-Install-Id). Builds from before that sent the platform in the body.
+function signInClientContext(req: express.Request): ClientContext {
+    const client = readClientContext(req.headers);
+    return { ...client, platform: client.platform ?? normalizePlatform(req.body?.platform) };
+}
+
+function providerMethod(value: unknown): SignInMethod {
+    return value === 'google' || value === 'apple' ? value : 'unknown';
+}
+
+// A sign-in turned away here never reaches the route that records failures.
+function recordRateLimitedSignIn(method: (req: express.Request) => SignInMethod) {
+    return (req: express.Request): void => {
+        trackSignInRateLimited({ method: method(req), client: signInClientContext(req), ip: getClientIp(req) });
+    };
+}
+
 const providerSignInLimiter = createRateLimiter({
     name: 'auth.provider-sign-in',
     limit: PROD ? 20 : 200,
+    onLimited: recordRateLimitedSignIn((req) => providerMethod(req.body?.provider)),
 });
 const passkeyRegistrationLimiter = createRateLimiter({
     name: 'auth.passkey-registration',
@@ -25,6 +52,7 @@ const passkeyRegistrationLimiter = createRateLimiter({
 const passkeyAuthenticationLimiter = createRateLimiter({
     name: 'auth.passkey-authentication',
     limit: PROD ? 30 : 200,
+    onLimited: recordRateLimitedSignIn(() => 'passkey'),
 });
 const refreshLimiter = createRateLimiter({
     name: 'auth.refresh',
@@ -52,29 +80,27 @@ function buildAndroidAppleRedirect(body: Record<string, unknown>): string {
     return `intent://callback?${params.toString()}#Intent;package=${config.authProviders.androidPackageName};scheme=signinwithapple;end`;
 }
 
-// Records the outcome of a sign-in for analytics, then passes the result or
-// error through unchanged.
+// Records the outcome of a sign-in for analytics (and the user as active
+// today), then passes the result or error through unchanged.
 async function trackSignIn(
     method: SignInMethod,
-    platform: unknown,
+    req: express.Request,
     signIn: () => Promise<authService.SignInResult>
 ): Promise<authService.SignInResult> {
+    const client = signInClientContext(req);
     try {
         const result = await signIn();
-        trackSignInSucceeded({ method, platform, userId: result.userId, isNewUser: result.isNewUser });
+        trackSignInSucceeded({ method, client, userId: result.userId, isNewUser: result.isNewUser });
+        recordUserActivity(result.userId, client);
         return result;
     } catch (error) {
-        trackSignInFailed({ method, platform, error });
+        trackSignInFailed({ method, client, error });
         throw error;
     }
 }
 
-function providerMethod(value: unknown): SignInMethod {
-    return value === 'google' || value === 'apple' ? value : 'unknown';
-}
-
 router.post('/provider-sign-in', providerSignInLimiter, asyncHandler(async (req: express.Request, res: express.Response) => {
-    const result = await trackSignIn(providerMethod(req.body.provider), req.body.platform, () => authService.providerSignIn({
+    const result = await trackSignIn(providerMethod(req.body.provider), req, () => authService.providerSignIn({
         provider: req.body.provider,
         idToken: req.body.idToken,
         rawNonce: req.body.rawNonce,
@@ -125,7 +151,7 @@ router.post('/passkeys/authentication/options', passkeyAuthenticationLimiter, as
 }));
 
 router.post('/passkeys/authentication/verify', passkeyAuthenticationLimiter, asyncHandler(async (req: express.Request, res: express.Response) => {
-    const result = await trackSignIn('passkey', req.body.platform, () => (
+    const result = await trackSignIn('passkey', req, () => (
         authService.finishPasskeyAuthentication(req.body.challengeId, req.body.response)
     ));
     setRefreshCookie(res, result.refreshToken);

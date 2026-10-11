@@ -7,6 +7,7 @@ import { setupSocketIO } from './socket.js';
 import { createApp } from './app.js';
 import logger from '../utils/logger.js';
 import { flushErrorReports } from '../utils/errorReporter.js';
+import { startAnalyticsJobs } from '../services/analyticsJobs.js';
 import { config } from '../config/index.js';
 import { errorDetails } from '../utils/errors.js';
 
@@ -291,6 +292,12 @@ export async function startServer(options: StartServerOptions = {}): Promise<{
                 process.exit(1);
             }
         });
+
+        // Daily analytics totals and the Telegram digest need the database,
+        // and never run in tests.
+        if (resolvedOptions.connectMongo && !config.isTest) {
+            startAnalyticsJobs();
+        }
 
         logger.info('server.started', { url: config.urls.publicOrigin });
 

@@ -17,7 +17,10 @@ import {
 import { exportUserData, deleteUserAccount } from '../services/accountService.js';
 import { recordModerationAction } from '../services/auditService.js';
 import { getAnalyticsSummary } from '../services/analyticsService.js';
+import { listDailyStats } from '../services/dailyStatsService.js';
+import { isDailyDigestConfigured } from '../services/dailyDigestService.js';
 import { isModerationAlertingConfigured, sendModerationAlert } from '../services/alertService.js';
+import { sendTelegramMessage } from '../utils/telegram.js';
 import logger from '../utils/logger.js';
 import { validateObjectId } from '../utils/validation.js';
 import { errorDetails } from '../utils/errors.js';
@@ -142,22 +145,37 @@ router.get('/analytics', asyncHandler(async (req: AdminRequest, res: express.Res
     res.json(result);
 }));
 
+// The written totals of each finished UTC day (default the last 30, max 366),
+// oldest first. These never change once written.
+router.get('/analytics/daily', asyncHandler(async (req: AdminRequest, res: express.Response) => {
+    const result = await listDailyStats({ days: req.query.days });
+    res.json(result);
+}));
+
 // --- Alerts --------------------------------------------------------------------
 
-// Sends a test message to the moderation chat and raises a test error (which
-// goes to the errors chat like any real one), so the Telegram setup can be
-// checked end to end.
+// Sends a test message to the moderation chat (and to the digest chat when it
+// is a different one) and raises a test error (which goes to the errors chat
+// like any real one), so the Telegram setup can be checked end to end.
 router.post('/alerts/test', asyncHandler(async (req: AdminRequest, res: express.Response) => {
     sendModerationAlert(`✅ Test alert from ${req.admin!.actor}: moderation alerts work.`);
     logger.error('admin.alerts.test', {
         error: errorDetails(new Error('Test error from POST /v1/admin/alerts/test: error alerts work.')),
         actor: req.admin!.actor,
     });
+    const digestChat = isDailyDigestConfigured();
+    if (digestChat && !config.isTest && config.alerts.digestChatId !== config.alerts.moderationChatId) {
+        void sendTelegramMessage(
+            config.alerts.digestChatId,
+            `✅ Test alert from ${req.admin!.actor}: the daily digest will arrive here.`
+        );
+    }
     res.json({
         moderationChat: isModerationAlertingConfigured(),
         errorsChat: config.alerts.sendErrors
             && config.alerts.telegramBotToken.length > 0
             && config.alerts.errorsChatId.length > 0,
+        digestChat,
     });
 }));
 

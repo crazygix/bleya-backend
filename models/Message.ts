@@ -53,5 +53,7 @@ messageSchema.index({ roomId: 1, createdAt: -1 });
 messageSchema.index({ roomId: 1, parentMessageId: 1, createdAt: -1, _id: -1 });
 // A user's own messages: account deletion and data export.
 messageSchema.index({ userId: 1, createdAt: 1 });
+// Messages sent in a period: the analytics summary and the daily rollup.
+messageSchema.index({ createdAt: 1 });
 
 export const Message = mongoose.model('Message', messageSchema);
