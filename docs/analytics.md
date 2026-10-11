@@ -125,21 +125,9 @@ users, reports open now, active users today / in the last 7 and 30 days, and a
 
 ## Atlas Charts (interactive dashboards)
 
-In Atlas: **Charts → Add dashboard → Add chart**, pick the cluster, the `bleya`
-database and mostly the `dailystats` collection (one document per day, so
-charts are fast and stable). Useful charts:
-
-- **Active users**: line, X = `day`, Y = `active.users`, `active.last7Days`, `active.last30Days`.
-- **Sign-ins**: stacked columns, X = `day`, Y = `signIns.succeeded` and `signIns.failed`.
-- **Did people get in**: X = `day`, Y = `signIns.installs.signedIn` and `signIns.installs.neverSignedIn`.
-- **Why sign-ins fail**: unwind `signIns.failureReasons` (and `signIns.client.failureReasons`), sum `count` by `key`.
-- **Messages per city**: unwind `messages.byCity`, sum `messages` by `name`, with a date filter on `day`.
-- **New users and returns**: `users.new`, `retention.day1.returned` / `retention.day1.signups`.
-- **Safety**: `reports.created`, `blocks.created`, `moderation.actions`, `contentBlocked.total` per day.
-
-For today, or a drill-down into single events, chart `analyticsevents`
-(e.g. filter `{ name: "sign_in.failed" }`, bar of `props.reason`). Dashboards
-support date-range filters and can email scheduled reports.
+`docs/atlas-charts.md` is a click-by-click guide to a dashboard over `dailystats`: active users, sign-ins and why
+they fail, whether people got in, messages per city, returning new users, safety, and a weekly or daily emailed
+report.
 
 ## Telegram
 
@@ -149,7 +137,9 @@ support date-range filters and can email scheduled reports.
    `TELEGRAM_BOT_TOKEN`.
 2. Create the groups, e.g. "Bleya moderation" and "Bleya errors" (and "Bleya
    stats" if the digest should go elsewhere), add the bot and post any message
-   in each.
+   in each. In each group turn on **Auto-delete messages → 1 month** (group
+   settings): the privacy policy says internal alerts are deleted after one
+   month.
 3. Open `https://api.telegram.org/bot<token>/getUpdates` and copy each group's
    `message.chat.id` (negative numbers) into `TELEGRAM_MODERATION_CHAT_ID`,
    `TELEGRAM_ERRORS_CHAT_ID` and, optionally, `TELEGRAM_DIGEST_CHAT_ID`.
@@ -211,9 +201,10 @@ Events and activity records are tied to the account when the user is signed in,
 deleted `ANALYTICS_RETENTION_DAYS` (default 90) after they happen, deleted with
 the account, and included in the data export (`usage` in
 `GET /v1/users/me/export`). The daily totals hold no personal data. The App
-Store and Google Play privacy answers and the privacy policy must describe this
-collection (usage data, the install id, crash data) before a build that sends
-it is released.
+Store and Google Play privacy answers (bleya-mobile
+`docs/store-privacy-answers.md`), the iOS privacy manifest and the privacy
+policy (bleyachat.com/privacy) describe this collection, the install id and
+crash reports; change them together with it.
 
 ## Deploying
 
