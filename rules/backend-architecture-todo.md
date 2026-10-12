@@ -39,10 +39,10 @@ Remaining:
 
 #### 2. Migration workflow
 **Status:** Partially complete  
-**Files:** `migrations/001_seed_public_rooms.ts`, `migrations/002_drop_legacy_room_name_index.ts`, `migrations/003_normalize_user_references.ts`
+**Files:** `migrations/002_drop_legacy_room_name_index.ts`, `migrations/003_normalize_user_references.ts`
 
 Completed:
-- One-off migration scripts exist for preset rooms, legacy index cleanup, and user-reference normalization.
+- One-off migration scripts exist for legacy index cleanup, and user-reference normalization.
 
 Remaining:
 - Add a single migration runner or deployment playbook so migrations run in a documented, ordered way.

@@ -3,7 +3,8 @@ import fs from 'fs/promises';
 import path from 'path';
 import crypto from 'crypto';
 import mongoose from 'mongoose';
-import { config } from '../config/index.js';
+import { S3Client, ListObjectsV2Command, DeleteObjectsCommand } from '@aws-sdk/client-s3';
+import { config, validateR2Config } from '../config/index.js';
 import { cityRepository } from '../repositories/cityRepository.js';
 
 interface CityJsonEntry {
@@ -15,7 +16,7 @@ interface CityJsonEntry {
     population: number;
 }
 
-type Action = 'clean' | 'import-cities' | 'quit';
+type Action = 'clean' | 'import-cities' | 'empty-r2' | 'quit';
 
 interface MenuItem {
     key: string;
@@ -29,13 +30,19 @@ const MENU: MenuItem[] = [
         key: '1',
         action: 'clean',
         title: 'Clean database',
-        description: 'Drops all collections. Asks whether to also drop the cities collection.',
+        description: 'Drops all collections. Asks whether to also drop the cities collection and empty the R2 bucket.',
     },
     {
         key: '2',
         action: 'import-cities',
         title: 'Import cities',
         description: 'Imports cities from data/cities.json into the cities collection.',
+    },
+    {
+        key: '3',
+        action: 'empty-r2',
+        title: 'Empty R2 bucket',
+        description: 'Deletes every object in R2_BUCKET_NAME and clears city image URLs. The bucket itself is kept.',
     },
     {
         key: 'q',
@@ -176,6 +183,92 @@ async function importCities(jsonPath: string) {
     console.log('Import complete.');
 }
 
+async function confirmR2Target(): Promise<boolean> {
+    const { complete, missing } = validateR2Config();
+    if (!complete) {
+        console.log(`\nR2 configuration incomplete, missing: ${missing.join(', ')}. Skipping R2.`);
+        return false;
+    }
+
+    const bucketName = config.r2.bucketName;
+    console.log('');
+    console.log('About to EMPTY the R2 bucket:');
+    console.log(`  endpoint: ${config.r2.endpoint}`);
+    console.log(`  bucket:   ${bucketName}`);
+    console.log(`  env:      ${config.nodeEnv}`);
+    console.log('');
+    const typed = await ask(`Type the bucket name to confirm ("${bucketName}"): `);
+    if (typed !== bucketName) {
+        console.log('Confirmation failed. Skipping R2.');
+        return false;
+    }
+    return true;
+}
+
+async function emptyR2Bucket() {
+    const bucketName = config.r2.bucketName;
+    const client = new S3Client({
+        region: 'auto',
+        endpoint: config.r2.endpoint,
+        forcePathStyle: true,
+        credentials: {
+            accessKeyId: config.r2.accessKeyId,
+            secretAccessKey: config.r2.secretAccessKey,
+        },
+    });
+
+    console.log(`\nEmptying R2 bucket '${bucketName}'...`);
+
+    let deleted = 0;
+    let continuationToken: string | undefined;
+    try {
+        do {
+            const page = await client.send(new ListObjectsV2Command({
+                Bucket: bucketName,
+                ContinuationToken: continuationToken,
+                MaxKeys: 1000,
+            }));
+
+            const keys = (page.Contents ?? [])
+                .map((o) => o.Key)
+                .filter((key): key is string => Boolean(key));
+
+            if (keys.length > 0) {
+                const result = await client.send(new DeleteObjectsCommand({
+                    Bucket: bucketName,
+                    Delete: { Objects: keys.map((Key) => ({ Key })), Quiet: true },
+                }));
+
+                if (result.Errors && result.Errors.length > 0) {
+                    for (const err of result.Errors) {
+                        console.log(`  failed: ${err.Key} (${err.Code}: ${err.Message})`);
+                    }
+                    throw new Error(`Failed to delete ${result.Errors.length} objects`);
+                }
+
+                deleted += keys.length;
+                console.log(`  Deleted ${deleted} objects`);
+            }
+
+            continuationToken = page.IsTruncated ? page.NextContinuationToken : undefined;
+        } while (continuationToken);
+    } finally {
+        client.destroy();
+    }
+
+    console.log(deleted === 0 ? 'Bucket was already empty.' : `R2 empty done (${deleted} objects).`);
+}
+
+// City images live in R2, so once the bucket is empty the stored URLs point at
+// nothing. Clearing them lets each city fetch a fresh image on its next listing.
+async function clearCityImageUrls() {
+    const result = await mongoose.connection.collection('cities').updateMany(
+        { imageUrl: { $exists: true, $nin: [null, ''] } },
+        { $unset: { imageUrl: '', imageCheckedAt: '' } }
+    );
+    console.log(`Cleared image URLs on ${result.modifiedCount} cities.`);
+}
+
 function resolveCitiesJsonPath(): string {
     return path.resolve(process.cwd(), 'data/cities.json');
 }
@@ -185,9 +278,19 @@ async function runAction(action: Action) {
         case 'clean': {
             if (!(await confirmTarget('CLEAN the database'))) return;
             const alsoDropCities = await askYesNo('Also drop the cities collection? (y/N) ');
+            const alsoEmptyR2 = await askYesNo('Also empty the R2 bucket? (y/N) ');
             await cleanDatabase(alsoDropCities);
+            if (alsoEmptyR2 && (await confirmR2Target())) {
+                await emptyR2Bucket();
+                await clearCityImageUrls();
+            }
             break;
         }
+        case 'empty-r2':
+            if (!(await confirmR2Target())) return;
+            await emptyR2Bucket();
+            await clearCityImageUrls();
+            break;
         case 'import-cities':
             if (!(await confirmTarget('IMPORT cities into the database'))) return;
             await importCities(resolveCitiesJsonPath());

@@ -15,7 +15,6 @@
     "test": "npm run build && NODE_ENV=test node --test --test-concurrency=1 dist/tests/**/*.test.js",
     "test:isolated": "npm run build && node scripts/run-tests-isolated.mjs",
     "build": "rm -rf dist && tsc",
-    "migrate:seed-rooms": "npm run build && node dist/migrations/001_seed_public_rooms.js",
     "migrate:drop-legacy-room-index": "npm run build && node dist/migrations/002_drop_legacy_room_name_index.js",
     "migrate:normalize-user-refs": "npm run build && node dist/migrations/003_normalize_user_references.js",
     "migrate:dedupe-rooms": "npm run build && node dist/migrations/004_dedupe_rooms_and_build_indexes.js",
