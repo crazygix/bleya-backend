@@ -180,7 +180,7 @@ describe('Notifications API', () => {
         });
     });
 
-    describe('POST /v1/notifications/threads/:threadId/read', () => {
+    describe('POST /v1/notifications/threads/:threadId/dismiss', () => {
         // A city room where `me` started two threads, `friend` replied in
         // both, and `other` got a reply of their own in the first one.
         async function threadsWithReplies() {
@@ -209,7 +209,7 @@ describe('Notifications API', () => {
             await Notification.create([
                 item(me._id, replies[0]),
                 item(me._id, replies[1]),
-                // Read already, e.g. its push was tapped.
+                // Read already, e.g. its push was tapped, but still listed.
                 item(me._id, replies[2], true),
                 item(me._id, replies[3]),
                 item(other._id, replies[1]),
@@ -217,25 +217,30 @@ describe('Notifications API', () => {
             return { me, friend, other, thread, otherThread };
         }
 
-        async function unreadThreadIds(userId: mongoose.Types.ObjectId): Promise<string[]> {
-            const unread = await Notification.find({ recipient: userId, read: false }).lean();
-            return unread.map((notification) => notification.thread.toString());
+        /** The threads of the items Activity still lists for the user. */
+        async function listedThreadIds(userId: mongoose.Types.ObjectId): Promise<string[]> {
+            const listed = await Notification.find({ recipient: userId, isDismissed: false }).lean();
+            return listed.map((notification) => notification.thread.toString());
         }
 
-        it("marks all of the caller's items from that thread read, and only those", async () => {
+        it("takes all of the caller's items from that thread out of Activity, and only those", async () => {
             const { me, other, thread, otherThread } = await threadsWithReplies();
 
             const res = await getTestAgent()
-                .post(`/v1/notifications/threads/${thread._id}/read`)
+                .post(`/v1/notifications/threads/${thread._id}/dismiss`)
                 .set(authHeader(me._id.toString()))
                 .expect(200);
 
             assert.deepEqual(res.body, { success: true, unreadCount: 1 });
-            assert.deepEqual(await unreadThreadIds(me._id), [otherThread._id.toString()]);
-            // Someone else's item from the same thread stays unread.
-            assert.deepEqual(await unreadThreadIds(other._id), [thread._id.toString()]);
-            // Read, not dismissed: the items stay in Activity.
-            assert.equal(await Notification.countDocuments({ recipient: me._id, isDismissed: true }), 0);
+            // The read item goes too, and what's dismissed counts as read.
+            assert.deepEqual(await listedThreadIds(me._id), [otherThread._id.toString()]);
+            assert.equal(await Notification.countDocuments({ recipient: me._id, isDismissed: true, read: false }), 0);
+            // Someone else's item from the same thread stays.
+            assert.deepEqual(await listedThreadIds(other._id), [thread._id.toString()]);
+
+            const list = await getTestAgent().get('/v1/notifications').set(authHeader(me._id.toString())).expect(200);
+            assert.deepEqual(list.body.notifications.map((n: { replyText: string }) => n.replyText), ['Sure']);
+            assert.equal(list.body.unreadCount, 1);
         });
 
         it('counts what is left the way the Activity list does', async () => {
@@ -243,7 +248,7 @@ describe('Notifications API', () => {
             await UserBlock.create({ blockerUserId: me._id, blockedUserId: friend._id });
 
             const res = await getTestAgent()
-                .post(`/v1/notifications/threads/${otherThread._id}/read`)
+                .post(`/v1/notifications/threads/${otherThread._id}/dismiss`)
                 .set(authHeader(me._id.toString()))
                 .expect(200);
 
@@ -254,11 +259,11 @@ describe('Notifications API', () => {
             assert.equal(list.body.unreadCount, 0);
         });
 
-        it('succeeds for a thread with nothing to mark', async () => {
+        it('succeeds for a thread with nothing to take out', async () => {
             const { me } = await threadsWithReplies();
 
             const res = await getTestAgent()
-                .post(`/v1/notifications/threads/${new mongoose.Types.ObjectId()}/read`)
+                .post(`/v1/notifications/threads/${new mongoose.Types.ObjectId()}/dismiss`)
                 .set(authHeader(me._id.toString()))
                 .expect(200);
 
@@ -269,14 +274,14 @@ describe('Notifications API', () => {
             const user = await createTestUser();
 
             await getTestAgent()
-                .post('/v1/notifications/threads/not-an-id/read')
+                .post('/v1/notifications/threads/not-an-id/dismiss')
                 .set(authHeader(user._id.toString()))
                 .expect(400);
         });
 
         it('returns 401 without authentication', async () => {
             await getTestAgent()
-                .post(`/v1/notifications/threads/${new mongoose.Types.ObjectId()}/read`)
+                .post(`/v1/notifications/threads/${new mongoose.Types.ObjectId()}/dismiss`)
                 .expect(401);
         });
     });

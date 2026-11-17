@@ -189,38 +189,6 @@ router.post('/read-all', authenticateUser, asyncHandler(async (req: AuthRequest,
     res.json({ success: true });
 }));
 
-interface ThreadReadResponse {
-    success: true;
-    // Unread items left, as GET / counts them. Left out when counting fails;
-    // the app then keeps its own count.
-    unreadCount?: number;
-}
-
-// The app calls this when a thread opens: all of the thread's items become
-// read, not only the one that was tapped. The count includes items of the
-// thread the app hasn't loaded yet.
-router.post('/threads/:threadId/read', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
-    const userId = req.user!.userId;
-    const { threadId } = req.params;
-
-    if (!OBJECT_ID_REGEX.test(threadId)) {
-        throw new ValidationError("That thread isn't valid.");
-    }
-
-    await NotificationService.markThreadAsRead(threadId, userId);
-
-    const response: ThreadReadResponse = { success: true };
-    try {
-        response.unreadCount = await NotificationService.countUnread(userId);
-    } catch (error) {
-        logger.warn('notifications.thread_read.unread_count_failed', {
-            userId,
-            error: errorDetails(error),
-        });
-    }
-    res.json(response);
-}));
-
 router.post('/:id/dismiss', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
     const userId = req.user!.userId;
     const { id } = req.params;
@@ -237,6 +205,38 @@ router.post('/dismiss-all', authenticateUser, asyncHandler(async (req: AuthReque
     const userId = req.user!.userId;
     await NotificationService.dismissAllNotifications(userId);
     res.json({ success: true });
+}));
+
+interface ThreadDismissResponse {
+    success: true;
+    // Unread items left, as GET / counts them. Left out when counting fails;
+    // the app then keeps its own count.
+    unreadCount?: number;
+}
+
+// The app calls this when a thread opens: all of the thread's items leave
+// Activity, not only the one that was tapped. The count includes items the
+// app hasn't loaded yet.
+router.post('/threads/:threadId/dismiss', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
+    const userId = req.user!.userId;
+    const { threadId } = req.params;
+
+    if (!OBJECT_ID_REGEX.test(threadId)) {
+        throw new ValidationError("That thread isn't valid.");
+    }
+
+    await NotificationService.dismissThread(threadId, userId);
+
+    const response: ThreadDismissResponse = { success: true };
+    try {
+        response.unreadCount = await NotificationService.countUnread(userId);
+    } catch (error) {
+        logger.warn('notifications.thread_dismiss.unread_count_failed', {
+            userId,
+            error: errorDetails(error),
+        });
+    }
+    res.json(response);
 }));
 
 export default router;

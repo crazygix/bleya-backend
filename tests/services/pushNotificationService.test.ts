@@ -22,7 +22,16 @@ import {
 } from '../../services/pushNotificationService.js';
 
 const SOUND_ONLY_APNS = { headers: { 'apns-priority': '10' }, payload: { aps: { sound: 'default' } } };
+// What every Android push shares. Each one also has a tag naming its chat;
+// see androidSettings.
 const ANDROID_CONFIG = { priority: 'high', notification: { channelId: 'bleya_messages', sound: 'default' } };
+
+/** [push]'s Android settings without the tag, which differs per message. */
+function androidSettings(push: PushMessage): unknown {
+    const notification = { ...push.android?.notification };
+    delete notification.tag;
+    return { ...push.android, notification };
+}
 
 function recordPushes(): PushMessage[] {
     const sent: PushMessage[] = [];
@@ -349,8 +358,33 @@ describe('pushNotificationService', () => {
         assert.equal(sent.length, 4);
         for (const push of sent) {
             assert.deepEqual(push.apns, SOUND_ONLY_APNS);
-            assert.deepEqual(push.android, ANDROID_CONFIG);
+            assert.deepEqual(androidSettings(push), ANDROID_CONFIG);
         }
+    });
+
+    it('tags each Android notification with its chat and message, so the app can clear one chat', async () => {
+        const user = await createTestUser();
+        await PushToken.create({ userId: user._id, token: 'token-android', platform: 'android', isActive: true });
+        const roomId = new mongoose.Types.ObjectId().toString();
+        const threadId = new mongoose.Types.ObjectId().toString();
+        const messageIds = Array.from({ length: 3 }, () => new mongoose.Types.ObjectId().toString());
+
+        const sent = recordPushes();
+        await sendPushNotifications(pushTo([user._id.toString()], { roomId, messageId: messageIds[0] }));
+        await sendPushNotifications(pushTo([user._id.toString()], { roomId, messageId: messageIds[1] }));
+        await sendPushNotifications(pushTo([user._id.toString()], {
+            type: 'reply',
+            roomId,
+            threadId,
+            messageId: messageIds[2],
+        }));
+
+        // Unique per message, so a chat's notifications don't replace each other.
+        assert.deepEqual(sent.map((push) => push.android?.notification?.tag), [
+            `room:${roomId}:${messageIds[0]}`,
+            `room:${roomId}:${messageIds[1]}`,
+            `thread:${threadId}:${messageIds[2]}`,
+        ]);
     });
 
     it('sets the iPhone badge to unread Activity items plus DM chats with unread messages', async () => {
@@ -415,7 +449,7 @@ describe('pushNotificationService', () => {
             headers: { 'apns-priority': '10' },
             payload: { aps: { sound: 'default', badge: 0 } },
         });
-        assert.deepEqual(pushFor(sent, 'token-me').android, ANDROID_CONFIG);
+        assert.deepEqual(androidSettings(pushFor(sent, 'token-me')), ANDROID_CONFIG);
     });
 
     it('caps the badge at 99', async () => {
@@ -589,7 +623,7 @@ describe('pushNotificationService', () => {
         assert.equal(sent.length, 2);
         for (const push of sent) {
             assert.deepEqual(push.apns, SOUND_ONLY_APNS);
-            assert.deepEqual(push.android, ANDROID_CONFIG);
+            assert.deepEqual(androidSettings(push), ANDROID_CONFIG);
         }
     });
 

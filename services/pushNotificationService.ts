@@ -168,6 +168,19 @@ function buildNotificationPresentation(input: SendPushNotificationsInput): { tit
     };
 }
 
+// Names the chat an Android notification belongs to, so the app can take that
+// chat's notifications off the notification shade when the chat opens and
+// leave the others. The message id keeps every tag unique: notifications that
+// share a tag replace each other. iOS needs no tag; the app finds a chat's
+// notifications there by the data payload.
+function buildAndroidNotificationTag(input: SendPushNotificationsInput): string {
+    if (input.type === 'reply' && input.threadId) {
+        return `thread:${input.threadId}:${input.messageId}`;
+    }
+
+    return `room:${input.roomId}:${input.messageId}`;
+}
+
 function buildDataPayload(
     input: SendPushNotificationsInput,
     recipient: PushRecipient
@@ -414,6 +427,7 @@ export async function sendPushNotifications(input: SendPushNotificationsInput): 
     );
     const badgeByUserId = await countAppBadges([...badgeUserIds]);
     const presentation = buildNotificationPresentation(input);
+    const androidTag = buildAndroidNotificationTag(input);
     const messages: Message[] = [];
     const tokensInSendOrder: StoredPushToken[] = [];
 
@@ -432,7 +446,7 @@ export async function sendPushNotifications(input: SendPushNotificationsInput): 
                 priority: 'high',
                 // Android 8+ plays the bleya_messages channel's sound. Android 7
                 // has no channels and plays the sound named here.
-                notification: { channelId: 'bleya_messages', sound: 'default' },
+                notification: { channelId: 'bleya_messages', sound: 'default', tag: androidTag },
             },
             apns: {
                 headers: { 'apns-priority': '10' },

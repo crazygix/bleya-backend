@@ -393,14 +393,14 @@ export class NotificationService {
     }
 
     /**
-     * Marks every one of the user's items from one thread read. Opening the
-     * thread shows all of its replies, not just the one whose item or push
-     * was tapped.
+     * Takes all of the user's items from one thread out of Activity, read or
+     * not. Opening the thread shows every reply in it, not just the one whose
+     * item or push was tapped.
      */
-    static async markThreadAsRead(threadId: string, userId: string) {
+    static async dismissThread(threadId: string, userId: string) {
         return Notification.updateMany(
-            { recipient: userId, thread: threadId, read: false },
-            { $set: { read: true } }
+            { recipient: userId, thread: threadId, isDismissed: false },
+            { $set: { isDismissed: true, read: true } }
         );
     }
 
