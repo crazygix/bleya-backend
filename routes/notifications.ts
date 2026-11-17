@@ -10,8 +10,9 @@ import {
 } from '../services/NotificationService.js';
 import { registerPushToken, unregisterPushToken } from '../services/pushNotificationService.js';
 import { userRepository } from '../repositories/userRepository.js';
-import { AppError, ErrorCode, ValidationError } from '../utils/errors.js';
+import { AppError, ErrorCode, ValidationError, errorDetails } from '../utils/errors.js';
 import { describeEnforcementForUser } from '../utils/enforcement.js';
+import logger from '../utils/logger.js';
 
 const router = express.Router();
 const OBJECT_ID_REGEX = /^[0-9a-fA-F]{24}$/;
@@ -186,6 +187,38 @@ router.post('/read-all', authenticateUser, asyncHandler(async (req: AuthRequest,
     const userId = req.user!.userId;
     await NotificationService.markAllAsRead(userId);
     res.json({ success: true });
+}));
+
+interface ThreadReadResponse {
+    success: true;
+    // Unread items left, as GET / counts them. Left out when counting fails;
+    // the app then keeps its own count.
+    unreadCount?: number;
+}
+
+// The app calls this when a thread opens: all of the thread's items become
+// read, not only the one that was tapped. The count includes items of the
+// thread the app hasn't loaded yet.
+router.post('/threads/:threadId/read', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
+    const userId = req.user!.userId;
+    const { threadId } = req.params;
+
+    if (!OBJECT_ID_REGEX.test(threadId)) {
+        throw new ValidationError("That thread isn't valid.");
+    }
+
+    await NotificationService.markThreadAsRead(threadId, userId);
+
+    const response: ThreadReadResponse = { success: true };
+    try {
+        response.unreadCount = await NotificationService.countUnread(userId);
+    } catch (error) {
+        logger.warn('notifications.thread_read.unread_count_failed', {
+            userId,
+            error: errorDetails(error),
+        });
+    }
+    res.json(response);
 }));
 
 router.post('/:id/dismiss', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {

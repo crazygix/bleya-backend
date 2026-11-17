@@ -1,10 +1,15 @@
 import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import mongoose from 'mongoose';
 import { connectTestDb, clearTestDb, disconnectTestDb } from '../helpers/testDb.js';
 import { getTestAgent, resetTestApp } from '../helpers/testApp.js';
 import { createTestUser, authHeader } from '../helpers/auth.js';
 import { stopRateLimiterCleanupForTests } from '../../middleware/rateLimiter.js';
 import { PushToken } from '../../models/PushToken.js';
+import { Room } from '../../models/Room.js';
+import { Message } from '../../models/Message.js';
+import { Notification } from '../../models/Notification.js';
+import { UserBlock } from '../../models/UserBlock.js';
 
 describe('Notifications API', () => {
     before(async () => {
@@ -171,6 +176,107 @@ describe('Notifications API', () => {
             await agent
                 .post('/v1/notifications/push/unregister')
                 .send({ token: 'push-token-1' })
+                .expect(401);
+        });
+    });
+
+    describe('POST /v1/notifications/threads/:threadId/read', () => {
+        // A city room where `me` started two threads, `friend` replied in
+        // both, and `other` got a reply of their own in the first one.
+        async function threadsWithReplies() {
+            const room = await Room.create({ name: 'General', type: 'public' });
+            const roomId = room._id as mongoose.Types.ObjectId;
+            const me = await createTestUser({ username: 'myself', joinedRooms: [roomId] });
+            const friend = await createTestUser({ username: 'friend', joinedRooms: [roomId] });
+            const other = await createTestUser({ username: 'other', joinedRooms: [roomId] });
+            const thread = await Message.create({ roomId, userId: me._id, text: 'Coffee?' });
+            const otherThread = await Message.create({ roomId, userId: me._id, text: 'Lunch?' });
+            const replies = await Message.create([
+                { roomId, userId: friend._id, text: 'Yes', parentMessageId: thread._id },
+                { roomId, userId: friend._id, text: 'At 10?', parentMessageId: thread._id },
+                { roomId, userId: friend._id, text: 'Or 11', parentMessageId: thread._id },
+                { roomId, userId: friend._id, text: 'Sure', parentMessageId: otherThread._id },
+            ]);
+            const item = (recipient: mongoose.Types.ObjectId, reply: typeof replies[number], read = false) => ({
+                recipient,
+                sender: friend._id,
+                type: 'reply',
+                room: roomId,
+                message: reply._id,
+                thread: reply.parentMessageId,
+                read,
+            });
+            await Notification.create([
+                item(me._id, replies[0]),
+                item(me._id, replies[1]),
+                // Read already, e.g. its push was tapped.
+                item(me._id, replies[2], true),
+                item(me._id, replies[3]),
+                item(other._id, replies[1]),
+            ]);
+            return { me, friend, other, thread, otherThread };
+        }
+
+        async function unreadThreadIds(userId: mongoose.Types.ObjectId): Promise<string[]> {
+            const unread = await Notification.find({ recipient: userId, read: false }).lean();
+            return unread.map((notification) => notification.thread.toString());
+        }
+
+        it("marks all of the caller's items from that thread read, and only those", async () => {
+            const { me, other, thread, otherThread } = await threadsWithReplies();
+
+            const res = await getTestAgent()
+                .post(`/v1/notifications/threads/${thread._id}/read`)
+                .set(authHeader(me._id.toString()))
+                .expect(200);
+
+            assert.deepEqual(res.body, { success: true, unreadCount: 1 });
+            assert.deepEqual(await unreadThreadIds(me._id), [otherThread._id.toString()]);
+            // Someone else's item from the same thread stays unread.
+            assert.deepEqual(await unreadThreadIds(other._id), [thread._id.toString()]);
+            // Read, not dismissed: the items stay in Activity.
+            assert.equal(await Notification.countDocuments({ recipient: me._id, isDismissed: true }), 0);
+        });
+
+        it('counts what is left the way the Activity list does', async () => {
+            const { me, friend, otherThread } = await threadsWithReplies();
+            await UserBlock.create({ blockerUserId: me._id, blockedUserId: friend._id });
+
+            const res = await getTestAgent()
+                .post(`/v1/notifications/threads/${otherThread._id}/read`)
+                .set(authHeader(me._id.toString()))
+                .expect(200);
+
+            // The first thread's items are still unread, but they come from
+            // a blocked user, so Activity doesn't count them.
+            assert.equal(res.body.unreadCount, 0);
+            const list = await getTestAgent().get('/v1/notifications').set(authHeader(me._id.toString())).expect(200);
+            assert.equal(list.body.unreadCount, 0);
+        });
+
+        it('succeeds for a thread with nothing to mark', async () => {
+            const { me } = await threadsWithReplies();
+
+            const res = await getTestAgent()
+                .post(`/v1/notifications/threads/${new mongoose.Types.ObjectId()}/read`)
+                .set(authHeader(me._id.toString()))
+                .expect(200);
+
+            assert.deepEqual(res.body, { success: true, unreadCount: 3 });
+        });
+
+        it('rejects a thread id that is not valid', async () => {
+            const user = await createTestUser();
+
+            await getTestAgent()
+                .post('/v1/notifications/threads/not-an-id/read')
+                .set(authHeader(user._id.toString()))
+                .expect(400);
+        });
+
+        it('returns 401 without authentication', async () => {
+            await getTestAgent()
+                .post(`/v1/notifications/threads/${new mongoose.Types.ObjectId()}/read`)
                 .expect(401);
         });
     });

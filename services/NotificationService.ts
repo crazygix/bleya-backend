@@ -392,6 +392,24 @@ export class NotificationService {
         );
     }
 
+    /**
+     * Marks every one of the user's items from one thread read. Opening the
+     * thread shows all of its replies, not just the one whose item or push
+     * was tapped.
+     */
+    static async markThreadAsRead(threadId: string, userId: string) {
+        return Notification.updateMany(
+            { recipient: userId, thread: threadId, read: false },
+            { $set: { read: true } }
+        );
+    }
+
+    /** The user's unread Activity items, counted as `unreadCount` in `getNotifications`. */
+    static async countUnread(userId: string): Promise<number> {
+        const activityFilter = buildActivityFilter(userId, await getActiveBlockPairUserIds(userId));
+        return countUnreadActivity(userId, activityFilter);
+    }
+
     static async dismissNotification(notificationId: string, userId: string) {
         return Notification.updateOne(
             { _id: notificationId, recipient: userId },
