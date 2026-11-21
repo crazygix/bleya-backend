@@ -324,28 +324,6 @@ export function createAuthService(deps: AuthServiceDeps) {
         return { ...session, userId: user._id.toString(), isNewUser };
     }
 
-    // Local development and UI tests only: the route exists only while
-    // config.devLogin.enabled (see config/index.ts for the guards). Signs in as
-    // the user with this username, creating it on first use.
-    async function devSignIn(input: { username: unknown }): Promise<SignInResult> {
-        if (!config.devLogin.enabled) {
-            throw new NotFoundError('Not found');
-        }
-
-        const username = normalizeUsernameInput(typeof input.username === 'string' ? input.username : '');
-        if (!isValidUsername(username)) {
-            throw new ValidationError('Username must be 3-30 characters: lowercase letters, numbers and underscores.');
-        }
-
-        const existing = await userRepo.findByUsernameLean(username);
-        const user = existing
-            ? await loadUser(existing._id.toString())
-            : await userRepo.create({ username }) as AuthUserDocument;
-
-        const session = await issueSessionForUser(user);
-        return { ...session, userId: user._id.toString(), isNewUser: !existing };
-    }
-
     async function getSecurityStatus(userId: string): Promise<AuthSecurityStatus> {
         await loadUser(userId);
         const hasPasskey = await passkeyCredentialRepo.existsForUser(userId);
@@ -624,7 +602,6 @@ export function createAuthService(deps: AuthServiceDeps) {
 
     return {
         providerSignIn,
-        devSignIn,
         getSecurityStatus,
         listPasskeys,
         deletePasskey,
@@ -650,7 +627,6 @@ const defaultAuthService = createAuthService({
 });
 
 export const providerSignIn = defaultAuthService.providerSignIn;
-export const devSignIn = defaultAuthService.devSignIn;
 export const getSecurityStatus = defaultAuthService.getSecurityStatus;
 export const listPasskeys = defaultAuthService.listPasskeys;
 export const deletePasskey = defaultAuthService.deletePasskey;
