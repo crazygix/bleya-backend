@@ -116,6 +116,22 @@ router.post('/provider-sign-in', providerSignInLimiter, asyncHandler(async (req:
     });
 }));
 
+// Local development and UI tests only. Not registered at all unless
+// DEV_LOGIN_ENABLED passes the guards in config/index.ts, so it 404s elsewhere.
+if (config.devLogin.enabled) {
+    logger.warn('auth.dev_login.enabled', { message: 'POST /v1/auth/dev-login is ON: anyone can sign in as any username' });
+    router.post('/dev-login', providerSignInLimiter, asyncHandler(async (req: express.Request, res: express.Response) => {
+        const result = await authService.devSignIn({ username: req.body?.username });
+        recordUserActivity(result.userId, signInClientContext(req));
+        setRefreshCookie(res, result.refreshToken);
+        res.json({
+            token: result.token,
+            requiresUsername: result.requiresUsername,
+            hasPasskey: result.hasPasskey,
+        });
+    }));
+}
+
 router.get('/security', authenticateUser, asyncHandler(async (req: AuthRequest, res: express.Response) => {
     const result = await authService.getSecurityStatus(req.user!.userId);
     res.json(result);

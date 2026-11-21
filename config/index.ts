@@ -260,6 +260,22 @@ const passkeyExpectedOrigins = parseList(process.env.PASSKEY_EXPECTED_ORIGINS);
 const passkeyRpId = process.env.PASSKEY_RP_ID?.trim() || 'bleyachat.com';
 const passkeyRpName = process.env.PASSKEY_RP_NAME?.trim() || 'Bleya';
 const jwtSecret = requiredEnv('JWT_SECRET', { defaultInTest: 'test-jwt-secret' });
+// Dev login (POST /v1/auth/dev-login) signs in as any username with no
+// provider, for emulators, screenshots and automated UI tests. It needs
+// DEV_LOGIN_ENABLED=true, NODE_ENV development or test, AND a database on this
+// machine. A missing NODE_ENV counts as development, so the database check is
+// the guard that keeps it off a deployed server. Asking for it anywhere else
+// stops the server from starting instead of quietly ignoring the flag.
+export function isLocalMongoUri(uri: string | undefined): boolean {
+  const match = /^mongodb:\/\/(?:[^@/]*@)?([^/?]+)/.exec(uri?.trim() ?? '');
+  if (!match) return false;
+  const hosts = match[1].split(',').map((host) => host.replace(/:\d+$/, '').replace(/^\[|\]$/g, '').toLowerCase());
+  return hosts.length > 0 && hosts.every((host) => host === 'localhost' || host === '127.0.0.1' || host === '::1');
+}
+const devLoginEnabled = parseBooleanEnv('DEV_LOGIN_ENABLED', false);
+if (devLoginEnabled && (isProduction || !(isLocal || isTest) || !isLocalMongoUri(process.env.MONGODB_URI))) {
+  throw new Error('DEV_LOGIN_ENABLED is only allowed with NODE_ENV development or test and a local MONGODB_URI');
+}
 const citySearchDefaults = {
   defaultRadiusKm: 30,
   defaultLimit: 20,
@@ -341,6 +357,10 @@ export const config = {
     secretAccessKey: process.env.R2_SECRET_ACCESS_KEY || '',
     bucketName: process.env.R2_BUCKET_NAME || '',
     publicBaseUrl: r2PublicBaseUrl,
+  },
+
+  devLogin: {
+    enabled: devLoginEnabled,
   },
 
   citySearch: citySearchDefaults,
